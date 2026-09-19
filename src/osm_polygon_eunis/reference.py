@@ -29,7 +29,7 @@ from .domain import EunisResult, OverlapCandidate
 from .matching import choose_winner
 
 _LAYER_CODE = re.compile(r"^Prob_(?P<code>[A-Z][A-Z0-9.]+)_\d+m\.tif$")
-_RASTER_TILE_SIZE = 256
+_RASTER_TILE_SIZE = 64
 _RASTER_TILE_CACHE_SIZE = 1024
 
 
@@ -186,13 +186,20 @@ class RasterReference:
         window = self._window(dataset, polygon)
         if window is None:
             return None
-        cells = [
+        return _merge_tile_cells(self._raster_tile_cells(layer, dataset, window))
+
+    def _raster_tile_cells(
+        self,
+        layer: RasterLayer,
+        dataset: rasterio.DatasetReader,
+        window: Window,
+    ) -> list[BaseGeometry]:
+        return [
             geometry
             for row in _raster_tile_indices(window.row_off, window.height)
             for column in _raster_tile_indices(window.col_off, window.width)
             if (geometry := self._cached_tile_geometry(layer, dataset, row, column)) is not None
         ]
-        return _merge_tile_cells(cells)
 
     def _cached_tile_geometry(
         self,

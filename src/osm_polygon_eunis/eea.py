@@ -449,13 +449,17 @@ def _online_resource(value: Mapping[object, object]) -> tuple[str | None, str] |
 
 
 def _catalog_value(value: object) -> str | None:
-    if isinstance(value, Mapping):
-        for key in ("gco:CharacterString", "gcx:Anchor", "#text"):
-            nested = _catalog_value(value.get(key))
-            if nested:
-                return nested
-        return None
-    return value if isinstance(value, str) and value else None
+    if not isinstance(value, Mapping):
+        return value if isinstance(value, str) and value else None
+    return _catalog_mapping_value(value)
+
+
+def _catalog_mapping_value(value: Mapping[object, object]) -> str | None:
+    for key in ("gco:CharacterString", "gcx:Anchor", "#text"):
+        nested = _catalog_value(value.get(key))
+        if nested:
+            return nested
+    return None
 
 
 def _all_text(value: object) -> Iterable[str]:

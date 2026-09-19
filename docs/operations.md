@@ -1,9 +1,9 @@
 # Operations
 
 Use a temporary directory on the HDD with enough room for one source shard,
-one replacement shard, and one reference group. Set `UV_CACHE_DIR` outside the
-dataset root. Production commands emit JSON-line progress records and verify
-row counts and schemas after every upload.
+one replacement shard, and the resolved EEA reference assets. Set `UV_CACHE_DIR`
+outside the dataset root. Production commands emit JSON-line progress records
+and verify row counts and schemas after every upload.
 
 Local checks use a task-scoped cache on the temporary volume:
 
@@ -13,9 +13,9 @@ UV_CACHE_DIR=/private/tmp/osm-polygon-eunis-uv \
 uv run osm-polygon-eunis plan
 ```
 
-The release command keeps four-column label sidecars while it streams one EEA
-reference group at a time. It requires a valid `HF_TOKEN` with write access to
-the target repositories:
+The release command keeps four-column label sidecars, opens the resolved EEA
+groups once, and streams each source geometry shard once through all groups. It
+requires a valid `HF_TOKEN` with write access to the target repositories:
 
 ```bash
 UV_PROJECT_ENVIRONMENT=/private/tmp/osm-polygon-eunis-venv \

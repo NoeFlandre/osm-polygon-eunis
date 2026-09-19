@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -253,31 +253,57 @@ def process_geometry_paths(
     with _http_client(http_client) as reusable_client:
         source_root.mkdir(parents=True, exist_ok=True)
         for source_path in plan.geometry_paths:
-            local_source = _download_geometry_source(
+            _process_geometry_path(
                 api,
                 plan,
-                source_path,
-                source_root,
-                retain_source=retain_source,
-                client=reusable_client,
-            )
-            sidecar = _sidecar_path(sidecar_root, plan.spec, source_path)
-            sidecar.parent.mkdir(parents=True, exist_ok=True)
-            next_sidecar = sidecar.with_name(f"{sidecar.name}.next")
-            update_label_sidecar(
-                local_source,
-                next_sidecar,
-                reference=reference,
-                current=sidecar if sidecar.is_file() else None,
+                source_path=source_path,
+                references=(reference,),
+                sidecar_root=sidecar_root,
+                source_root=source_root,
                 batch_size=batch_size,
+                progress=progress,
+                http_client=reusable_client,
+                retain_source=retain_source,
             )
-            next_sidecar.replace(sidecar)
-            if not retain_source:
-                local_source.unlink(missing_ok=True)
-            if progress is not None:
-                progress(
-                    {"event": "sidecar_updated", "dataset": plan.spec.name, "path": source_path}
-                )
+
+
+def _process_geometry_path(
+    api: Any,
+    plan: DatasetPlan,
+    *,
+    source_path: str,
+    references: tuple[OverlapReference, ...],
+    sidecar_root: Path,
+    source_root: Path,
+    batch_size: int,
+    progress: Progress | None,
+    http_client: Any,
+    retain_source: bool,
+) -> None:
+    local_source = _download_geometry_source(
+        api,
+        plan,
+        source_path,
+        source_root,
+        retain_source=retain_source,
+        client=http_client,
+    )
+    for reference in references:
+        sidecar = _sidecar_path(sidecar_root, plan.spec, source_path)
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        next_sidecar = sidecar.with_name(f"{sidecar.name}.next")
+        update_label_sidecar(
+            local_source,
+            next_sidecar,
+            reference=reference,
+            current=sidecar if sidecar.is_file() else None,
+            batch_size=batch_size,
+        )
+        next_sidecar.replace(sidecar)
+    if not retain_source:
+        local_source.unlink(missing_ok=True)
+    if progress is not None:
+        progress({"event": "sidecar_updated", "dataset": plan.spec.name, "path": source_path})
 
 
 def _commit_id(result: Any) -> str | None:
@@ -401,19 +427,13 @@ def _finalize_shard(
     card: DatasetCardAccumulator,
     source_cache_root: Path | None,
 ) -> tuple[tuple[ShardExpectation, ...], str]:
-    cached_source = (
-        _cached_geometry_path(source_cache_root, plan, geometry_path)
-        if source_cache_root is not None
-        else None
-    )
-    reused_source = cached_source is not None and cached_source.is_file()
-    local_source = cached_source if reused_source else download_to_temp(
+    local_source, reused_source = _final_source(
         api,
-        plan.spec.source_repo,
+        plan,
         geometry_path,
-        plan.source_revision,
-        local_root,
-        client=http_client,
+        source_cache_root=source_cache_root,
+        local_root=local_root,
+        http_client=http_client,
     )
     sidecar = _sidecar_path(sidecar_root, plan.spec, geometry_path)
     if not sidecar.is_file():
@@ -438,21 +458,14 @@ def _finalize_shard(
         batch_size,
         http_client,
     )
-    current_commit = _upload_file(
+    current_commit = _upload_shard_outputs(
         api,
-        plan.spec.output_repo,
+        plan,
         geometry_path,
         local_output,
+        link_output,
         parent_commit,
     )
-    if link_output is not None:
-        current_commit = _upload_file(
-            api,
-            plan.spec.output_repo,
-            link_output.path,
-            link_output.output,
-            current_commit,
-        )
     _cleanup_shard(
         local_source,
         local_output,
@@ -464,6 +477,58 @@ def _finalize_shard(
     if link_output is not None:
         expectations.append(link_output.expectation)
     return tuple(expectations), current_commit
+
+
+def _final_source(
+    api: Any,
+    plan: DatasetPlan,
+    geometry_path: str,
+    *,
+    source_cache_root: Path | None,
+    local_root: Path,
+    http_client: Any,
+) -> tuple[Path, bool]:
+    if source_cache_root is not None:
+        cached = _cached_geometry_path(source_cache_root, plan, geometry_path)
+        if cached.is_file():
+            return cached, True
+    return (
+        download_to_temp(
+            api,
+            plan.spec.source_repo,
+            geometry_path,
+            plan.source_revision,
+            local_root,
+            client=http_client,
+        ),
+        False,
+    )
+
+
+def _upload_shard_outputs(
+    api: Any,
+    plan: DatasetPlan,
+    geometry_path: str,
+    local_output: Path,
+    link_output: _LinkOutput | None,
+    parent_commit: str,
+) -> str:
+    current_commit = _upload_file(
+        api,
+        plan.spec.output_repo,
+        geometry_path,
+        local_output,
+        parent_commit,
+    )
+    if link_output is None:
+        return current_commit
+    return _upload_file(
+        api,
+        plan.spec.output_repo,
+        link_output.path,
+        link_output.output,
+        current_commit,
+    )
 
 
 def _build_link_output(
@@ -991,27 +1056,22 @@ def _process_reference_groups(
     progress: Progress | None,
     http_client: Any,
 ) -> None:
-    """Reuse each downloaded reference group across all source shards."""
+    """Process each source shard once while reusing every open reference group."""
 
-    for group in groups:
-        with (
-            TemporaryDirectory(
-                dir=workdir,
-                prefix=f"reference-{group.record_id[:8]}-",
-            ) as raw_dir,
-            open_reference_group(
-                group,
-                Path(raw_dir),
-                threshold=threshold,
-                checksums=checksums,
-                client=http_client,
-            ) as reference,
-        ):
-            for plan in plans:
-                process_geometry_paths(
+    with _open_reference_groups(
+        groups,
+        workdir=workdir,
+        threshold=threshold,
+        checksums=checksums,
+        client=http_client,
+    ) as references:
+        for plan in plans:
+            for source_path in plan.geometry_paths:
+                _process_geometry_path(
                     api,
                     plan,
-                    reference=reference,
+                    source_path=source_path,
+                    references=references,
                     sidecar_root=sidecar_root,
                     source_root=source_root,
                     batch_size=batch_size,
@@ -1019,6 +1079,40 @@ def _process_reference_groups(
                     http_client=http_client,
                     retain_source=True,
                 )
+
+
+@contextmanager
+def _open_reference_groups(
+    groups: tuple[EeaGroup, ...],
+    *,
+    workdir: Path,
+    threshold: int,
+    checksums: dict[str, str],
+    client: Any,
+) -> Iterator[tuple[OverlapReference, ...]]:
+    with ExitStack() as stack:
+        references: list[OverlapReference] = []
+        for group in groups:
+            directory = Path(
+                stack.enter_context(
+                    TemporaryDirectory(
+                        dir=workdir,
+                        prefix=f"reference-{group.record_id[:8]}-",
+                    )
+                )
+            )
+            references.append(
+                stack.enter_context(
+                    open_reference_group(
+                        group,
+                        directory,
+                        threshold=threshold,
+                        checksums=checksums,
+                        client=client,
+                    )
+                )
+            )
+        yield tuple(references)
 
 
 def _finalize_plan(

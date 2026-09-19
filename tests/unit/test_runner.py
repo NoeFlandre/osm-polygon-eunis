@@ -434,6 +434,9 @@ def test_process_reference_groups_reuses_reference_for_all_plans(
     group = EeaGroup(
         "record", "title", "folder", "service", {}, (), _asset("/habitats.gpkg", code=None)
     )
+    second_group = EeaGroup(
+        "record-2", "title", "folder", "service", {}, (), _asset("/other.gpkg", code=None)
+    )
     plans = (
         DatasetPlan(
             DatasetSpec("website", "source", "target", "polygons/*.parquet"), "rev", (), ("a",), ()
@@ -442,7 +445,7 @@ def test_process_reference_groups_reuses_reference_for_all_plans(
             DatasetSpec("description", "source", "target", "data/*.parquet"), "rev", (), ("b",), ()
         ),
     )
-    seen: list[tuple[str, object, object]] = []
+    seen: list[tuple[str, tuple[object, ...], object]] = []
 
     @contextmanager
     def fake_open(*args, **kwargs):
@@ -451,15 +454,16 @@ def test_process_reference_groups_reuses_reference_for_all_plans(
         yield reference
 
     def fake_process(api, plan, **kwargs):
-        seen.append((plan.spec.name, kwargs["reference"], kwargs["http_client"]))
+        del api
+        seen.append((plan.spec.name, kwargs["references"], kwargs["http_client"]))
 
     monkeypatch.setattr(runner, "open_reference_group", fake_open)
-    monkeypatch.setattr(runner, "process_geometry_paths", fake_process)
+    monkeypatch.setattr(runner, "_process_geometry_path", fake_process)
     client = object()
     runner._process_reference_groups(
         object(),
         plans,
-        (group,),
+        (group, second_group),
         sidecar_root=tmp_path / "sidecars",
         source_root=tmp_path / "source",
         workdir=tmp_path,
@@ -471,6 +475,7 @@ def test_process_reference_groups_reuses_reference_for_all_plans(
     )
 
     assert [name for name, _, _ in seen] == ["website", "description"]
+    assert len(seen[0][1]) == 2
     assert seen[0][1] is seen[1][1]
     assert all(item[2] is client for item in seen)
 
