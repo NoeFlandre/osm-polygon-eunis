@@ -29,6 +29,8 @@ from .domain import EunisResult, OverlapCandidate
 from .matching import choose_winner
 
 _LAYER_CODE = re.compile(r"^Prob_(?P<code>[A-Z][A-Z0-9.]+)_\d+m\.tif$")
+_RASTER_TILE_SIZE = 256
+_RASTER_TILE_CACHE_SIZE = 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +99,7 @@ class RasterReference:
         self._source_version = next(iter(versions), None)
         self._stack: ExitStack | None = None
         self._datasets: tuple[tuple[RasterLayer, rasterio.DatasetReader], ...] = ()
+        self._tile_cache: OrderedDict[tuple[str, int, int], BaseGeometry | None] = OrderedDict()
 
     def __enter__(self) -> RasterReference:
         if self._stack is not None:
@@ -120,6 +123,7 @@ class RasterReference:
             self._stack.close()
             self._stack = None
             self._datasets = ()
+            self._tile_cache.clear()
 
     def overlap(self, polygon: BaseGeometry | None) -> EunisResult:
         """Return the label with the largest actual intersection area."""
@@ -155,7 +159,7 @@ class RasterReference:
     ) -> EunisResult:
         candidates: list[OverlapCandidate] = []
         for layer, dataset in datasets:
-            cell_geometry = self._positive_cell_geometry(dataset, polygon)
+            cell_geometry = self._positive_cell_geometry(layer, dataset, polygon)
             if cell_geometry is not None:
                 candidates.append(OverlapCandidate(layer.code, layer.name, cell_geometry))
         return choose_winner(polygon, candidates, source_version=self._source_version)
@@ -172,6 +176,7 @@ class RasterReference:
 
     def _positive_cell_geometry(
         self,
+        layer: RasterLayer,
         dataset: rasterio.DatasetReader,
         polygon: BaseGeometry,
     ) -> BaseGeometry | None:
@@ -181,10 +186,35 @@ class RasterReference:
         window = self._window(dataset, polygon)
         if window is None:
             return None
+        cells = [
+            geometry
+            for row in _raster_tile_indices(window.row_off, window.height)
+            for column in _raster_tile_indices(window.col_off, window.width)
+            if (geometry := self._cached_tile_geometry(layer, dataset, row, column)) is not None
+        ]
+        return _merge_tile_cells(cells)
+
+    def _cached_tile_geometry(
+        self,
+        layer: RasterLayer,
+        dataset: rasterio.DatasetReader,
+        row: int,
+        column: int,
+    ) -> BaseGeometry | None:
+        key = (layer.code, row, column)
+        if key in self._tile_cache:
+            geometry = self._tile_cache[key]
+            self._tile_cache.move_to_end(key)
+            return geometry
+        window = _raster_tile_window(dataset, row, column)
         valid = self._positive_mask(dataset, window)
-        if valid is None:
-            return None
-        return _mask_geometry(valid, dataset.window_transform(window))
+        geometry = (
+            None if valid is None else _mask_geometry(valid, dataset.window_transform(window))
+        )
+        self._tile_cache[key] = geometry
+        if len(self._tile_cache) > _RASTER_TILE_CACHE_SIZE:
+            self._tile_cache.popitem(last=False)
+        return geometry
 
     @staticmethod
     def _window(
@@ -224,6 +254,27 @@ def _mask_geometry(valid: np.ndarray, transform: Any) -> BaseGeometry | None:
     ]
     merged = unary_union(cells)
     return None if merged.is_empty else merged
+
+
+def _raster_tile_indices(offset: float, length: float) -> range:
+    first = max(0, math.floor(offset / _RASTER_TILE_SIZE))
+    last = math.ceil((offset + length) / _RASTER_TILE_SIZE)
+    return range(first, last)
+
+
+def _raster_tile_window(
+    dataset: rasterio.DatasetReader,
+    row: int,
+    column: int,
+) -> Window:
+    row_offset = row * _RASTER_TILE_SIZE
+    column_offset = column * _RASTER_TILE_SIZE
+    width = min(_RASTER_TILE_SIZE, dataset.width - column_offset)
+    height = min(_RASTER_TILE_SIZE, dataset.height - row_offset)
+    return Window.from_slices(
+        (row_offset, row_offset + height),
+        (column_offset, column_offset + width),
+    )
 
 
 def _is_epsg_3035(crs: object) -> bool:

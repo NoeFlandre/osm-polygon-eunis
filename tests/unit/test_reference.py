@@ -191,6 +191,19 @@ def test_largest_actual_overlap_wins_across_raster_layers(tmp_path: Path) -> Non
     assert result.overlap_percentage == pytest.approx(9 * 8 / (17 * 8) * 100)
 
 
+def test_raster_reference_reuses_exact_tile_geometry(tmp_path: Path) -> None:
+    raster = _write_raster(tmp_path / "Prob_R11_100m.tif", [[1, 1], [0, 0]])
+    reference = RasterReference((RasterLayer("R11", "steppe", raster, "EEA-test"),))
+
+    with reference:
+        first = reference.overlap(box(1, 11, 9, 19))
+        second = reference.overlap(box(11, 11, 19, 19))
+        assert len(reference._tile_cache) == 1
+
+    assert first.code == second.code == "R11"
+    assert len(reference._tile_cache) == 0
+
+
 def test_reference_rejects_mixed_source_versions(tmp_path: Path) -> None:
     first = _write_raster(tmp_path / "Prob_R11_100m.tif", [[1, 0], [0, 0]])
     second = _write_raster(tmp_path / "Prob_R12_100m.tif", [[0, 1], [0, 0]])
