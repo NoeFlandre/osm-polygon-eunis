@@ -24,6 +24,12 @@ small supplemental label rather than inferred from geometry.
 Bounding boxes and spatial indexes are permitted only to select candidate
 windows. They cannot select the label or calculate the percentage.
 
+Reference groups are staged in bounded batches: at most two raster groups are
+opened together, while adjacent vector groups share a batch. Source geometry
+shards are retained once and reused across these passes, and compact sidecars
+make interrupted batches resumable. This reduces the number of full source
+passes without reopening all EEA assets simultaneously.
+
 ## Consequences
 
 The result is reproducible when the source version, asset URLs, ETags, and

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -44,6 +44,7 @@ from .transform import (
 )
 
 Progress = Callable[[Mapping[str, object]], None]
+_RASTER_GROUP_BATCH_SIZE = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -1055,20 +1056,16 @@ def _process_reference_groups(
     progress: Progress | None,
     http_client: Any,
 ) -> None:
-    """Process one reference group at a time while reusing downloaded sources."""
+    """Process bounded reference batches while reusing downloaded sources."""
 
-    for group in groups:
-        with TemporaryDirectory(
-            dir=workdir,
-            prefix=f"reference-{group.record_id[:8]}-",
-        ) as directory, open_reference_group(
-            group,
-            Path(directory),
+    for batch in _reference_group_batches(groups):
+        with _open_reference_batch(
+            batch,
+            workdir=workdir,
             threshold=threshold,
             checksums=checksums,
             client=http_client,
-        ) as reference:
-            references = (reference,)
+        ) as references:
             for plan in plans:
                 for source_path in plan.geometry_paths:
                     _process_geometry_path(
@@ -1083,6 +1080,57 @@ def _process_reference_groups(
                         http_client=http_client,
                         retain_source=True,
                     )
+
+
+def _reference_group_batches(
+    groups: tuple[EeaGroup, ...],
+) -> tuple[tuple[EeaGroup, ...], ...]:
+    """Bound raster groups while coalescing adjacent vector groups."""
+
+    batches: list[list[EeaGroup]] = []
+    for group in groups:
+        if _starts_reference_batch(batches, group):
+            batches.append([])
+        batches[-1].append(group)
+    return tuple(tuple(batch) for batch in batches)
+
+
+def _starts_reference_batch(batches: list[list[EeaGroup]], group: EeaGroup) -> bool:
+    if not batches:
+        return True
+    current = batches[-1]
+    if group.raster_assets:
+        return not current[0].raster_assets or len(current) >= _RASTER_GROUP_BATCH_SIZE
+    return bool(current[0].raster_assets)
+
+
+@contextmanager
+def _open_reference_batch(
+    groups: tuple[EeaGroup, ...],
+    *,
+    workdir: Path,
+    threshold: int,
+    checksums: dict[str, str],
+    client: Any,
+) -> Iterator[tuple[OverlapReference, ...]]:
+    first_record = groups[0].record_id[:8]
+    with TemporaryDirectory(
+        dir=workdir,
+        prefix=f"reference-{first_record}-",
+    ) as directory, ExitStack() as stack:
+        references = tuple(
+            stack.enter_context(
+                open_reference_group(
+                    group,
+                    Path(directory) / f"{index:02d}-{group.record_id[:8]}",
+                    threshold=threshold,
+                    checksums=checksums,
+                    client=client,
+                )
+            )
+            for index, group in enumerate(groups)
+        )
+        yield references
 
 def _finalize_plan(
     api: Any,

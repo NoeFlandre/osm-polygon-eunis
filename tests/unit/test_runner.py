@@ -427,7 +427,7 @@ def test_planning_manifest_and_shared_blobs_are_deterministic(monkeypatch) -> No
     }
 
 
-def test_process_reference_groups_reuses_one_reference_group_for_all_plans(
+def test_process_reference_groups_batches_reference_groups_for_all_plans(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -474,17 +474,41 @@ def test_process_reference_groups_reuses_one_reference_group_for_all_plans(
         http_client=client,
     )
 
-    assert [name for name, _, _ in seen] == [
-        "website",
-        "description",
-        "website",
-        "description",
-    ]
-    assert all(len(references) == 1 for _, references, _ in seen)
+    assert [name for name, _, _ in seen] == ["website", "description"]
+    assert all(len(references) == 2 for _, references, _ in seen)
     assert seen[0][1] is seen[1][1]
-    assert seen[2][1] is seen[3][1]
-    assert seen[0][1] != seen[2][1]
     assert all(item[2] is client for item in seen)
+
+
+def test_reference_group_batches_bound_rasters_and_coalesce_vectors() -> None:
+    raster = _asset("/Prob_R11.tif")
+    raster_groups = tuple(
+        EeaGroup(str(index), "title", "folder", "service", {}, (raster,), None)
+        for index in range(4)
+    )
+    vector_groups = tuple(
+        EeaGroup(
+            str(index),
+            "title",
+            "folder",
+            "service",
+            {},
+            (),
+            _asset(f"/{index}.gpkg", code=None),
+        )
+        for index in range(4, 7)
+    )
+
+    batches = runner._reference_group_batches(raster_groups + vector_groups)
+
+    assert [[group.record_id for group in batch] for batch in batches] == [
+        ["0", "1"],
+        ["2", "3"],
+        ["4", "5", "6"],
+    ]
+
+    reversed_batches = runner._reference_group_batches(vector_groups[:1] + raster_groups[:1])
+    assert [[group.record_id for group in batch] for batch in reversed_batches] == [["4"], ["0"]]
 
 
 def test_finalize_plan_builds_manifest_and_verifies_target(monkeypatch, tmp_path: Path) -> None:
