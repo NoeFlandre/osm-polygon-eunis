@@ -23,6 +23,11 @@ UV_CACHE_DIR=/private/tmp/osm-polygon-eunis-uv \
 uv run osm-polygon-eunis release --batch-size 256 --workdir .eunis-run
 ```
 
+If all three targets already contain a matching manifest for the pinned source
+revisions and EEA asset identities, the command performs a verified no-op: it
+checks the remote tree, shared blob identities, Parquet rows and schemas, and
+card artifact hashes without uploading or rebuilding shards.
+
 Before handoff, run the deterministic gates in this order:
 
 ```bash

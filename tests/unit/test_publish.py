@@ -82,12 +82,14 @@ def test_manifest_records_added_card_artifacts() -> None:
         added_paths=("eunis/world-map.svg",),
         reference_manifest={"version": "EEA-test"},
         rows_by_path={"polygons/a.parquet": 1},
+        schema_by_path={"polygons/a.parquet": "schema"},
         card_manifest={"map_path": "eunis/world-map.svg"},
     )
 
-    assert manifest["manifest_version"] == 2
+    assert manifest["manifest_version"] == 3
     assert manifest["added_paths"] == ["eunis/world-map.svg"]
     assert manifest["shared_paths"] == []
+    assert manifest["schema_by_path"] == {"polygons/a.parquet": "schema"}
     assert manifest["card"] == {"map_path": "eunis/world-map.svg"}
 
 

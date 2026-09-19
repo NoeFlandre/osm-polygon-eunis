@@ -511,6 +511,7 @@ def test_run_release_coordinates_pooled_processing(monkeypatch, tmp_path: Path) 
     seen: list[object] = []
     monkeypatch.setattr(runner, "plan_datasets", lambda api: (plan,))
     monkeypatch.setattr(runner, "_duplicate_outputs", lambda *args: None)
+    monkeypatch.setattr(runner, "_load_existing_manifest", lambda *args: None)
     monkeypatch.setattr(runner, "resolve_config", lambda path: (group,))
     monkeypatch.setattr(
         runner,
@@ -525,3 +526,185 @@ def test_run_release_coordinates_pooled_processing(monkeypatch, tmp_path: Path) 
 
     assert result.datasets == (receipt,)
     assert len(seen) == 1
+
+
+def test_run_release_verifies_matching_manifests_without_processing(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.json"
+    config.write_text(
+        json.dumps({"source_version": "EEA-test", "crs": "EPSG:3035", "threshold": 0}),
+        encoding="utf-8",
+    )
+    plan = DatasetPlan(
+        DatasetSpec("website", "source", "target", "polygons/*.parquet"),
+        "source-revision",
+        ("README.md", "polygons/a.parquet"),
+        ("polygons/a.parquet",),
+        (),
+    )
+    reference = {"source_version": "EEA-test", "crs": "EPSG:3035", "threshold": 0}
+    manifest = {
+        "manifest_version": 3,
+        "source_repo": "source",
+        "target_repo": "target",
+        "source_revision": "source-revision",
+        "source_paths": ["README.md", "polygons/a.parquet"],
+        "changed_paths": ["README.md", "polygons/a.parquet"],
+        "added_paths": ["eunis/world-map.svg"],
+        "shared_paths": [],
+        "rows_by_path": {"polygons/a.parquet": 2},
+        "schema_by_path": {"polygons/a.parquet": "schema"},
+        "reference": reference,
+        "card": {
+            "readme_path": "README.md",
+            "map_path": "eunis/world-map.svg",
+            "readme_sha256": "readme",
+            "map_sha256": "map",
+        },
+    }
+    receipt = DatasetReceipt(
+        plan,
+        (ShardExpectation("polygons/a.parquet", 2, "schema"),),
+        VerificationReceipt("target", "verified", {}, (), manifest),
+        no_op=True,
+    )
+    monkeypatch.setattr(runner, "plan_datasets", lambda api: (plan,))
+    monkeypatch.setattr(runner, "_duplicate_outputs", lambda *args: None)
+    monkeypatch.setattr(runner, "resolve_config", lambda path: ())
+    monkeypatch.setattr(runner, "_reference_manifest", lambda *args, **kwargs: reference)
+    monkeypatch.setattr(
+        runner,
+        "_load_existing_manifest",
+        lambda *args, **kwargs: runner._ExistingManifest("target", manifest),
+    )
+    monkeypatch.setattr(runner, "_verify_no_op_dataset", lambda *args, **kwargs: receipt)
+    monkeypatch.setattr(
+        runner,
+        "_process_reference_groups",
+        lambda *args, **kwargs: pytest.fail("matching release must not process source shards"),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_finalize_plan",
+        lambda *args, **kwargs: pytest.fail("matching release must not upload source shards"),
+    )
+
+    result = runner.run_release(
+        object(), reference_config=config, workdir=tmp_path / "run", batch_size=2
+    )
+
+    assert result.datasets == (receipt,)
+    assert result.datasets[0].no_op is True
+
+
+def test_no_op_manifest_helpers_validate_and_load_pinned_state(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    plan = DatasetPlan(
+        DatasetSpec("website", "source", "target", "polygons/*.parquet"),
+        "source-revision",
+        ("README.md", "polygons/a.parquet"),
+        ("polygons/a.parquet",),
+        (),
+    )
+    reference = {"assets": [{"code": "R11", "sha256": "downloaded"}]}
+    manifest = {
+        "manifest_version": 3,
+        "source_repo": "source",
+        "target_repo": "target",
+        "source_revision": "source-revision",
+        "source_paths": ["README.md", "polygons/a.parquet"],
+        "changed_paths": ["README.md", "polygons/a.parquet"],
+        "added_paths": ["eunis/world-map.svg"],
+        "rows_by_path": {"polygons/a.parquet": 2},
+        "schema_by_path": {"polygons/a.parquet": "schema"},
+        "reference": reference,
+        "card": {
+            "readme_path": "README.md",
+            "map_path": "eunis/world-map.svg",
+            "readme_sha256": "readme",
+            "map_sha256": "map",
+        },
+    }
+
+    assert runner._reference_identity(reference) == {"assets": [{"code": "R11"}]}
+    assert runner._manifest_matches_inputs(plan, manifest, {"assets": [{"code": "R11"}]})
+    assert not runner._manifest_matches_inputs(
+        plan,
+        {**manifest, "source_revision": "different"},
+        {"assets": [{"code": "R11"}]},
+    )
+    assert runner._manifest_expectations(manifest) == (
+        ShardExpectation("polygons/a.parquet", 2, "schema"),
+    )
+    assert runner._manifest_artifacts(manifest) == {
+        "README.md": "readme",
+        "eunis/world-map.svg": "map",
+    }
+    assert runner._required_no_op_parts(manifest)[2:] == (
+        ("README.md", "polygons/a.parquet"),
+        ("eunis/world-map.svg",),
+    )
+    with pytest.raises(ValueError, match="incomplete"):
+        runner._required_manifest_paths({})
+    with pytest.raises(ValueError, match="incomplete"):
+        runner._required_manifest_paths({"changed_paths": ["ok", 1], "added_paths": []})
+    assert runner._manifest_expectations({"rows_by_path": {}, "schema_by_path": {}}) == ()
+    assert runner._manifest_artifacts({"card": {}}) is None
+
+    class Api:
+        def repo_info(self, *_args, **_kwargs):
+            return SimpleNamespace(sha="target-revision")
+
+        def list_repo_tree(self, *_args, **_kwargs):
+            return iter((SimpleNamespace(path="eunis/manifest.json"),))
+
+    def fake_download(api, repo_id, path, revision, directory, *, client=None):
+        del api, repo_id, path, revision, client
+        destination = directory / "manifest.json"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(json.dumps(manifest), encoding="utf-8")
+        return destination
+
+    monkeypatch.setattr(runner, "download_to_temp", fake_download)
+    loaded = runner._load_existing_manifest(Api(), plan, tmp_path / "noop", object())
+    assert loaded == runner._ExistingManifest("target-revision", manifest)
+
+
+def test_verify_no_op_dataset_reuses_manifest_expectations(monkeypatch, tmp_path: Path) -> None:
+    plan = DatasetPlan(
+        DatasetSpec("website", "source", "target", "polygons/*.parquet"),
+        "source-revision",
+        ("README.md", "polygons/a.parquet"),
+        ("polygons/a.parquet",),
+        (),
+    )
+    manifest = {
+        "rows_by_path": {"polygons/a.parquet": 1},
+        "schema_by_path": {"polygons/a.parquet": "schema"},
+        "changed_paths": ["polygons/a.parquet"],
+        "added_paths": ["eunis/world-map.svg"],
+        "card": {
+            "readme_path": "README.md",
+            "map_path": "eunis/world-map.svg",
+            "readme_sha256": "readme",
+            "map_sha256": "map",
+        },
+    }
+    verification = VerificationReceipt("target", "verified", {}, (), manifest)
+    monkeypatch.setattr(runner, "_shared_blobs", lambda *args, **kwargs: {})
+    monkeypatch.setattr(runner, "_verify_final_dataset", lambda *args, **kwargs: verification)
+
+    result = runner._verify_no_op_dataset(
+        object(),
+        plan,
+        runner._ExistingManifest("target", manifest),
+        workdir=tmp_path,
+        client=object(),
+    )
+
+    assert result.no_op is True
+    assert result.expectations == (ShardExpectation("polygons/a.parquet", 1, "schema"),)

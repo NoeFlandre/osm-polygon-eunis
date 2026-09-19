@@ -127,6 +127,7 @@ def build_manifest(
     changed_paths: Iterable[str],
     reference_manifest: Mapping[str, Any],
     rows_by_path: Mapping[str, int],
+    schema_by_path: Mapping[str, str] | None = None,
     added_paths: Iterable[str] = (),
     card_manifest: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -135,9 +136,10 @@ def build_manifest(
     source = sorted(set(source_paths))
     changed = sorted(set(changed_paths))
     added = sorted(set(added_paths))
+    schemas = schema_by_path or {}
     _validate_manifest_paths(source, changed, added)
     return {
-        "manifest_version": 2,
+        "manifest_version": 3,
         "source_repo": source_repo,
         "target_repo": target_repo,
         "source_revision": source_revision,
@@ -146,6 +148,10 @@ def build_manifest(
         "added_paths": added,
         "shared_paths": sorted(set(source) - set(changed)),
         "rows_by_path": {path: rows_by_path[path] for path in sorted(rows_by_path)},
+        "schema_by_path": {
+            path: schemas[path]
+            for path in sorted(schemas)
+        },
         "reference": dict(reference_manifest),
         "card": dict(card_manifest) if card_manifest is not None else None,
     }

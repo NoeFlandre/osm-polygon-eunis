@@ -78,6 +78,7 @@ def main(argv: list[str] | None = None) -> int:
                         "target_repo": item.plan.spec.output_repo,
                         "verified_revision": item.verification.target_revision,
                         "changed_shards": len(item.expectations),
+                        "no_op": item.no_op,
                     }
                     for item in receipt.datasets
                 ]
