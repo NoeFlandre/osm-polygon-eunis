@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 from collections.abc import Callable, Iterator, Mapping
+from concurrent.futures import ProcessPoolExecutor
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +14,7 @@ from typing import Any, cast
 from urllib.parse import unquote
 
 import httpx
+from huggingface_hub import HfApi
 
 from .cards import CardArtifacts, DatasetCardAccumulator
 from .domain import EunisResult
@@ -45,6 +47,7 @@ from .transform import (
 
 Progress = Callable[[Mapping[str, object]], None]
 _RASTER_GROUP_BATCH_SIZE = 2
+_SOURCE_WORKERS = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +93,22 @@ class _ExistingManifest:
 
     revision: str
     manifest: Mapping[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class _GeometryChunk:
+    """Pickleable work unit for one bounded reference batch."""
+
+    groups: tuple[EeaGroup, ...]
+    reference_directory: Path
+    plans: tuple[DatasetPlan, ...]
+    jobs: tuple[tuple[str, str], ...]
+    sidecar_root: Path
+    source_root: Path
+    threshold: int
+    batch_size: int
+    endpoint: str
+    token: str | bool | None
 
 
 def _settings(config_path: Path) -> tuple[str, str, int, Mapping[str, object]]:
@@ -186,6 +205,126 @@ def _reference_group_with_client(
         raise ValueError(f"EEA group has no reference asset: {group.record_id}")
     with _vector_group_reference(client, group, directory, threshold, checksums) as reference:
         yield reference
+
+
+def _stage_reference_group(
+    client: Any,
+    group: EeaGroup,
+    directory: Path,
+    checksums: dict[str, str],
+) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    for asset in _reference_assets_for_staging(group):
+        path = directory / _asset_filename(asset)
+        checksums[_asset_key(group, asset)] = download_asset(client, asset, path)
+
+
+def _reference_assets_for_staging(group: EeaGroup) -> tuple[RemoteAsset, ...]:
+    if group.raster_assets:
+        return group.raster_assets
+    if group.vector_asset is None:
+        raise ValueError(f"EEA group has no reference asset: {group.record_id}")
+    return (group.vector_asset,)
+
+
+@contextmanager
+def _open_local_reference_group(
+    group: EeaGroup,
+    directory: Path,
+    threshold: int,
+) -> Iterator[OverlapReference]:
+    if group.raster_assets:
+        with _open_local_raster_reference(group, directory, threshold) as reference:
+            yield reference
+        return
+    with _open_local_vector_reference(group, directory, threshold) as reference:
+        yield reference
+
+
+@contextmanager
+def _open_local_raster_reference(
+    group: EeaGroup,
+    directory: Path,
+    threshold: int,
+) -> Iterator[RasterReference]:
+    layers = tuple(
+        RasterLayer(
+            code=asset.code or "",
+            name=asset.name or "",
+            path=directory / _asset_filename(asset),
+            source_version=asset.source_version,
+        )
+        for asset in group.raster_assets
+    )
+    with RasterReference(layers, threshold=threshold) as reference:
+        yield reference
+
+
+@contextmanager
+def _open_local_vector_reference(
+    group: EeaGroup,
+    directory: Path,
+    threshold: int,
+) -> Iterator[GeoPackageReference]:
+    if group.vector_asset is None:
+        raise ValueError(f"EEA group has no reference asset: {group.record_id}")
+    asset = group.vector_asset
+    with GeoPackageReference(
+        directory / _asset_filename(asset),
+        dict(group.labels),
+        source_version=asset.source_version,
+        threshold=threshold,
+    ) as reference:
+        yield reference
+
+
+def _reference_group_directory(root: Path, index: int, group: EeaGroup) -> Path:
+    return root / f"{index:02d}-{group.record_id[:8]}"
+
+
+@contextmanager
+def _stage_reference_batch(
+    groups: tuple[EeaGroup, ...],
+    *,
+    workdir: Path,
+    threshold: int,
+    checksums: dict[str, str],
+    client: Any,
+) -> Iterator[Path]:
+    first_record = groups[0].record_id[:8]
+    with TemporaryDirectory(
+        dir=workdir,
+        prefix=f"reference-{first_record}-",
+    ) as directory:
+        root = Path(directory)
+        for index, group in enumerate(groups):
+            _stage_reference_group(
+                client,
+                group,
+                _reference_group_directory(root, index, group),
+                checksums,
+            )
+        yield root
+
+
+@contextmanager
+def _open_local_reference_batch(
+    groups: tuple[EeaGroup, ...],
+    root: Path,
+    threshold: int,
+) -> Iterator[tuple[OverlapReference, ...]]:
+    with ExitStack() as stack:
+        references = tuple(
+            stack.enter_context(
+                _open_local_reference_group(
+                    group,
+                    _reference_group_directory(root, index, group),
+                    threshold,
+                )
+            )
+            for index, group in enumerate(groups)
+        )
+        yield references
 
 
 @contextmanager
@@ -1006,6 +1145,7 @@ def run_release(
             batch_size=batch_size,
             progress=progress,
             http_client=reusable_client,
+            parallelism=_SOURCE_WORKERS,
         )
         reference_info = _reference_manifest(
             groups,
@@ -1055,31 +1195,217 @@ def _process_reference_groups(
     batch_size: int,
     progress: Progress | None,
     http_client: Any,
+    parallelism: int = 1,
 ) -> None:
     """Process bounded reference batches while reusing downloaded sources."""
 
     for batch in _reference_group_batches(groups):
-        with _open_reference_batch(
-            batch,
+        if parallelism > 1:
+            _process_reference_batch_parallel(
+                api,
+                plans,
+                groups=batch,
+                sidecar_root=sidecar_root,
+                source_root=source_root,
+                workdir=workdir,
+                threshold=threshold,
+                checksums=checksums,
+                batch_size=batch_size,
+                progress=progress,
+                http_client=http_client,
+                parallelism=parallelism,
+            )
+            continue
+        _process_reference_batch_serial(
+            api,
+            plans,
+            groups=batch,
+            sidecar_root=sidecar_root,
+            source_root=source_root,
             workdir=workdir,
             threshold=threshold,
             checksums=checksums,
-            client=http_client,
-        ) as references:
-            for plan in plans:
-                for source_path in plan.geometry_paths:
-                    _process_geometry_path(
-                        api,
-                        plan,
-                        source_path=source_path,
-                        references=references,
-                        sidecar_root=sidecar_root,
-                        source_root=source_root,
-                        batch_size=batch_size,
-                        progress=progress,
-                        http_client=http_client,
-                        retain_source=True,
-                    )
+            batch_size=batch_size,
+            progress=progress,
+            http_client=http_client,
+        )
+
+
+def _process_reference_batch_serial(
+    api: Any,
+    plans: tuple[DatasetPlan, ...],
+    *,
+    groups: tuple[EeaGroup, ...],
+    sidecar_root: Path,
+    source_root: Path,
+    workdir: Path,
+    threshold: int,
+    checksums: dict[str, str],
+    batch_size: int,
+    progress: Progress | None,
+    http_client: Any,
+) -> None:
+    with _open_reference_batch(
+        groups,
+        workdir=workdir,
+        threshold=threshold,
+        checksums=checksums,
+        client=http_client,
+    ) as references:
+        for plan in plans:
+            for source_path in plan.geometry_paths:
+                _process_geometry_path(
+                    api,
+                    plan,
+                    source_path=source_path,
+                    references=references,
+                    sidecar_root=sidecar_root,
+                    source_root=source_root,
+                    batch_size=batch_size,
+                    progress=progress,
+                    http_client=http_client,
+                    retain_source=True,
+                )
+
+
+def _process_reference_batch_parallel(
+    api: Any,
+    plans: tuple[DatasetPlan, ...],
+    *,
+    groups: tuple[EeaGroup, ...],
+    sidecar_root: Path,
+    source_root: Path,
+    workdir: Path,
+    threshold: int,
+    checksums: dict[str, str],
+    batch_size: int,
+    progress: Progress | None,
+    http_client: Any,
+    parallelism: int,
+) -> None:
+    jobs = _geometry_jobs(plans)
+    if not jobs:
+        return
+    with _stage_reference_batch(
+        groups,
+        workdir=workdir,
+        threshold=threshold,
+        checksums=checksums,
+        client=http_client,
+    ) as reference_directory:
+        work = _geometry_work_units(
+            api,
+            plans,
+            groups,
+            jobs,
+            reference_directory=reference_directory,
+            sidecar_root=sidecar_root,
+            source_root=source_root,
+            threshold=threshold,
+            batch_size=batch_size,
+            parallelism=parallelism,
+        )
+        _run_geometry_workers(work, progress)
+
+
+def _geometry_jobs(plans: tuple[DatasetPlan, ...]) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (plan.spec.name, source_path)
+        for plan in plans
+        for source_path in plan.geometry_paths
+    )
+
+
+def _geometry_work_units(
+    api: Any,
+    plans: tuple[DatasetPlan, ...],
+    groups: tuple[EeaGroup, ...],
+    jobs: tuple[tuple[str, str], ...],
+    *,
+    reference_directory: Path,
+    sidecar_root: Path,
+    source_root: Path,
+    threshold: int,
+    batch_size: int,
+    parallelism: int,
+) -> tuple[_GeometryChunk, ...]:
+    endpoint = str(getattr(api, "endpoint", None) or "https://huggingface.co")
+    token = getattr(api, "token", None)
+    return tuple(
+        _GeometryChunk(
+            groups=groups,
+            reference_directory=reference_directory,
+            plans=plans,
+            jobs=chunk,
+            sidecar_root=sidecar_root,
+            source_root=source_root,
+            threshold=threshold,
+            batch_size=batch_size,
+            endpoint=endpoint,
+            token=token,
+        )
+        for chunk in _geometry_chunks(jobs, parallelism)
+    )
+
+
+def _run_geometry_workers(
+    work: tuple[_GeometryChunk, ...],
+    progress: Progress | None,
+) -> None:
+    with ProcessPoolExecutor(max_workers=len(work)) as executor:
+        for completed in executor.map(_process_geometry_chunk, work):
+            _report_completed_geometry(completed, progress)
+
+
+def _report_completed_geometry(
+    completed: tuple[tuple[str, str], ...],
+    progress: Progress | None,
+) -> None:
+    if progress is None:
+        return
+    for dataset, source_path in completed:
+        progress(
+            {
+                "event": "sidecar_updated",
+                "dataset": dataset,
+                "path": source_path,
+            }
+        )
+
+
+def _geometry_chunks(
+    jobs: tuple[tuple[str, str], ...],
+    parallelism: int,
+) -> tuple[tuple[tuple[str, str], ...], ...]:
+    worker_count = min(max(parallelism, 1), len(jobs))
+    chunks: list[list[tuple[str, str]]] = [[] for _ in range(worker_count)]
+    for index, job in enumerate(jobs):
+        chunks[index % worker_count].append(job)
+    return tuple(tuple(chunk) for chunk in chunks)
+
+
+def _process_geometry_chunk(chunk: _GeometryChunk) -> tuple[tuple[str, str], ...]:
+    plans = {plan.spec.name: plan for plan in chunk.plans}
+    api = HfApi(endpoint=chunk.endpoint, token=chunk.token)
+    with httpx.Client(follow_redirects=True, timeout=None) as client, _open_local_reference_batch(
+        chunk.groups,
+        chunk.reference_directory,
+        chunk.threshold,
+    ) as references:
+        for dataset, source_path in chunk.jobs:
+            _process_geometry_path(
+                api,
+                plans[dataset],
+                source_path=source_path,
+                references=references,
+                sidecar_root=chunk.sidecar_root,
+                source_root=chunk.source_root,
+                batch_size=chunk.batch_size,
+                progress=None,
+                http_client=client,
+                retain_source=True,
+            )
+    return chunk.jobs
 
 
 def _reference_group_batches(
@@ -1122,7 +1448,7 @@ def _open_reference_batch(
             stack.enter_context(
                 open_reference_group(
                     group,
-                    Path(directory) / f"{index:02d}-{group.record_id[:8]}",
+                    _reference_group_directory(Path(directory), index, group),
                     threshold=threshold,
                     checksums=checksums,
                     client=client,
@@ -1131,6 +1457,7 @@ def _open_reference_batch(
             for index, group in enumerate(groups)
         )
         yield references
+
 
 def _finalize_plan(
     api: Any,

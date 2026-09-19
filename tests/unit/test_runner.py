@@ -480,6 +480,43 @@ def test_process_reference_groups_batches_reference_groups_for_all_plans(
     assert all(item[2] is client for item in seen)
 
 
+def test_process_reference_groups_dispatches_parallel_batches(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    group = EeaGroup(
+        "record", "title", "folder", "service", {}, (), _asset("/habitats.gpkg", code=None)
+    )
+    plan = DatasetPlan(
+        DatasetSpec("website", "source", "target", "polygons/*.parquet"), "rev", (), ("a",), ()
+    )
+    seen: list[tuple[tuple[str, ...], int]] = []
+
+    def fake_parallel(*args, **kwargs):
+        del args
+        seen.append(
+            (tuple(group.record_id for group in kwargs["groups"]), kwargs["parallelism"])
+        )
+
+    monkeypatch.setattr(runner, "_process_reference_batch_parallel", fake_parallel)
+    runner._process_reference_groups(
+        object(),
+        (plan,),
+        (group,),
+        sidecar_root=tmp_path / "sidecars",
+        source_root=tmp_path / "source",
+        workdir=tmp_path,
+        threshold=0,
+        checksums={},
+        batch_size=2,
+        progress=None,
+        http_client=object(),
+        parallelism=2,
+    )
+
+    assert seen == [(("record",), 2)]
+
+
 def test_reference_group_batches_bound_rasters_and_coalesce_vectors() -> None:
     raster = _asset("/Prob_R11.tif")
     raster_groups = tuple(
@@ -592,7 +629,7 @@ def test_run_release_coordinates_pooled_processing(monkeypatch, tmp_path: Path) 
     )
     group = EeaGroup("record", "title", "folder", "service", {}, (), _asset("/x.gpkg", code=None))
     receipt = DatasetReceipt(plan, (), VerificationReceipt("target", "verified", {}, (), None))
-    seen: list[object] = []
+    seen: list[tuple[object, int]] = []
     monkeypatch.setattr(runner, "plan_datasets", lambda api: (plan,))
     monkeypatch.setattr(runner, "_duplicate_outputs", lambda *args: None)
     monkeypatch.setattr(runner, "_load_existing_manifest", lambda *args: None)
@@ -600,7 +637,9 @@ def test_run_release_coordinates_pooled_processing(monkeypatch, tmp_path: Path) 
     monkeypatch.setattr(
         runner,
         "_process_reference_groups",
-        lambda *args, **kwargs: seen.append(kwargs["http_client"]),
+        lambda *args, **kwargs: seen.append(
+            (kwargs["http_client"], kwargs["parallelism"])
+        ),
     )
     monkeypatch.setattr(runner, "_finalize_plan", lambda *args, **kwargs: receipt)
 
@@ -610,6 +649,7 @@ def test_run_release_coordinates_pooled_processing(monkeypatch, tmp_path: Path) 
 
     assert result.datasets == (receipt,)
     assert len(seen) == 1
+    assert seen[0][1] == runner._SOURCE_WORKERS
 
 
 def test_run_release_verifies_matching_manifests_without_processing(
