@@ -7,6 +7,7 @@ import math
 import re
 import sqlite3
 import struct
+import warnings
 from collections import OrderedDict
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -16,6 +17,7 @@ from typing import Any, ClassVar, cast
 import numpy as np
 import rasterio
 from pyproj import CRS
+from rasterio.errors import NotGeoreferencedWarning
 from rasterio.features import shapes
 from rasterio.io import MemoryFile
 from rasterio.transform import from_origin
@@ -31,7 +33,7 @@ from .matching import choose_winner
 _LAYER_CODE = re.compile(r"^Prob_(?P<code>[A-Z][A-Z0-9.]+)_\d+m\.tif$")
 _RASTER_TILE_SIZE = 64
 _RASTER_TILE_CACHE_SIZE = 1024
-_GEOPACKAGE_TILE_CACHE_SIZE = 128
+_GEOPACKAGE_TILE_CACHE_SIZE = 256
 
 
 @dataclass(frozen=True, slots=True)
@@ -716,30 +718,32 @@ class GeoPackageReference:
         tile_row: int,
         blob: bytes | memoryview,
     ) -> BaseGeometry | None:
-        with MemoryFile(bytes(blob)) as memory, memory.open() as dataset:
-            data = dataset.read(1, masked=True)
-            values = np.asarray(data)
-            valid = (~np.ma.getmaskarray(data)) & (values > self._threshold)
-            if dataset.count >= 4:
-                valid &= dataset.read(4) > 0
-            if not valid.any():
-                return None
-            origin_x = layer.min_x + tile_column * layer.tile_width * layer.pixel_x_size
-            origin_y = layer.max_y - tile_row * layer.tile_height * layer.pixel_y_size
-            transform = from_origin(
-                origin_x,
-                origin_y,
-                layer.pixel_x_size,
-                layer.pixel_y_size,
-            )
-            cells = [
-                shape(geometry)
-                for geometry, _ in shapes(
-                    valid.astype("uint8"),
-                    mask=valid,
-                    transform=transform,
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", NotGeoreferencedWarning)
+            with MemoryFile(bytes(blob)) as memory, memory.open() as dataset:
+                data = dataset.read(1, masked=True)
+                values = np.asarray(data)
+                valid = (~np.ma.getmaskarray(data)) & (values > self._threshold)
+                if dataset.count >= 4:
+                    valid &= dataset.read(4) > 0
+                if not valid.any():
+                    return None
+                origin_x = layer.min_x + tile_column * layer.tile_width * layer.pixel_x_size
+                origin_y = layer.max_y - tile_row * layer.tile_height * layer.pixel_y_size
+                transform = from_origin(
+                    origin_x,
+                    origin_y,
+                    layer.pixel_x_size,
+                    layer.pixel_y_size,
                 )
-            ]
+                cells = [
+                    shape(geometry)
+                    for geometry, _ in shapes(
+                        valid.astype("uint8"),
+                        mask=valid,
+                        transform=transform,
+                    )
+                ]
         return _geometry_collection(cells)
 
     @staticmethod
