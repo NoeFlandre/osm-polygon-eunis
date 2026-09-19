@@ -10,8 +10,11 @@ area. A polygon outside the European reference coverage receives null fields.
 The EEA raster families published as GeoPackages are tile pyramids rather than
 feature layers. The adapter reads only highest-resolution tiles intersecting a
 polygon bbox, decodes positive pixels into EPSG:3035 cell geometry, and then
-uses the same exact intersection matcher. A bounded decoded-tile cache is used
-only as a performance optimization.
+uses the same exact intersection matcher. Raster-cell collections explicitly
+carry their disjoint-component invariant so the matcher can sum Shapely's
+vectorized exact cell intersections; arbitrary geometry collections still use
+the general overlay path. A bounded decoded-tile cache is used only as a
+performance optimization.
 
 Names come from the EEA 2021 classification workbook in catalog record
 `bfe4c237-e378-4a83-ab21-b3807f96c2e2`. The saltmarsh service has one null

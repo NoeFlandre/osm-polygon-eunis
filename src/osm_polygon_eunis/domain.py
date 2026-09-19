@@ -20,6 +20,7 @@ class OverlapCandidate:
     code: str
     name: str
     geometry: BaseGeometry
+    components_are_disjoint: bool = False
 
 
 @dataclass(frozen=True, slots=True)

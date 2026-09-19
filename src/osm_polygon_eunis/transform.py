@@ -156,14 +156,16 @@ def update_label_sidecar(
     source: Path,
     destination: Path,
     *,
-    reference: OverlapReference,
+    reference: OverlapReference | None = None,
+    references: tuple[OverlapReference, ...] = (),
     batch_size: int,
     current: Path | None = None,
     geometry_column: str = "geometry",
 ) -> int:
-    """Update four-field labels while keeping only one source and sidecar batch live."""
+    """Update labels in one source pass while keeping one batch live."""
 
     _validate_batch_size(batch_size)
+    selected_references = _selected_references(reference, references)
     source_file, current_file = _sidecar_inputs(source, destination, current, geometry_column)
     source_schema = source_file.schema_arrow
     empty = EunisResult(None, None, None, None)
@@ -178,12 +180,25 @@ def update_label_sidecar(
             updated = _updated_results(
                 source_table[geometry_column].to_pylist(),
                 previous,
-                reference,
+                selected_references,
             )
             writer.write_table(_results_table(updated))
             rows += batch.num_rows
     _ensure_no_extra_batches(current_batches, "current sidecar has more rows than source")
     return rows
+
+
+def _selected_references(
+    reference: OverlapReference | None,
+    references: tuple[OverlapReference, ...],
+) -> tuple[OverlapReference, ...]:
+    if reference is not None:
+        if references:
+            raise ValueError("provide reference or references, not both")
+        return (reference,)
+    if not references:
+        raise ValueError("at least one overlap reference is required")
+    return references
 
 
 def _sidecar_inputs(
@@ -230,12 +245,16 @@ def _previous_results(
 def _updated_results(
     geometries: list[object],
     previous: list[EunisResult],
-    reference: OverlapReference,
+    references: tuple[OverlapReference, ...],
 ) -> list[EunisResult]:
-    return [
-        prefer_result(existing, reference.overlap(to_equal_area(parse_geometry(value))))
-        for value, existing in zip(geometries, previous, strict=True)
-    ]
+    results: list[EunisResult] = []
+    for value, existing in zip(geometries, previous, strict=True):
+        geometry = to_equal_area(parse_geometry(value))
+        result = existing
+        for reference in references:
+            result = prefer_result(result, reference.overlap(geometry))
+        results.append(result)
+    return results
 
 
 def _ensure_no_extra_batches(

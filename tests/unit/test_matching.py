@@ -1,10 +1,14 @@
+from unittest.mock import Mock
+
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
-from shapely.geometry import Polygon, box
+from shapely.geometry import GeometryCollection, Polygon, box
 
+from osm_polygon_eunis import matching as matching_module
 from osm_polygon_eunis.domain import EunisResult, OverlapCandidate
 from osm_polygon_eunis.matching import (
+    _exact_intersection_area,
     _higher_percentage,
     _percentage,
     _prefer_code,
@@ -27,6 +31,63 @@ def test_largest_actual_intersection_and_percentage() -> None:
     assert result.name == "Pannonian steppe"
     assert result.overlap_percentage == 80.0
     assert result.source_version == "test"
+
+
+def test_disjoint_cell_collection_sums_exact_intersections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    polygon = box(0.5, 0.5, 2.5, 1.5)
+    cells = (box(0, 0, 1, 2), box(2, 0, 3, 2))
+    vectorized_intersection = Mock(wraps=matching_module.shapely_intersection)
+    monkeypatch.setattr(matching_module, "shapely_intersection", vectorized_intersection)
+
+    result = choose_winner(
+        polygon,
+        (
+            OverlapCandidate(
+                "R11",
+                "steppe",
+                GeometryCollection(cells),
+                components_are_disjoint=True,
+            ),
+        ),
+        source_version="test",
+    )
+
+    assert result.code == "R11"
+    assert result.overlap_percentage == 50.0
+    assert vectorized_intersection.call_count == 1
+
+
+def test_empty_disjoint_cell_collection_has_no_overlap() -> None:
+    candidate = OverlapCandidate(
+        "R11",
+        "steppe",
+        GeometryCollection(),
+        components_are_disjoint=True,
+    )
+
+    assert _exact_intersection_area(box(0, 0, 1, 1), candidate) == 0.0
+
+    result = choose_winner(
+        box(0, 0, 1, 1),
+        (candidate,),
+        source_version="test",
+    )
+
+    assert result.is_empty
+
+
+def test_overlapping_generic_collection_keeps_union_semantics() -> None:
+    cells = GeometryCollection((box(0, 0, 2, 2), box(1, 0, 3, 2)))
+
+    result = choose_winner(
+        box(0, 0, 3, 2),
+        (OverlapCandidate("R11", "steppe", cells),),
+        source_version="test",
+    )
+
+    assert result.overlap_percentage == 100.0
 
 
 def test_bbox_touch_without_geometry_intersection_is_null() -> None:

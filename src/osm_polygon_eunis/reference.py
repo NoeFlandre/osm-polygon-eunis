@@ -20,7 +20,7 @@ from rasterio.features import shapes
 from rasterio.io import MemoryFile
 from rasterio.transform import from_origin
 from rasterio.windows import Window, WindowError, from_bounds
-from shapely.geometry import box, shape
+from shapely.geometry import GeometryCollection, box, shape
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 from shapely.wkb import loads as load_wkb
@@ -31,6 +31,7 @@ from .matching import choose_winner
 _LAYER_CODE = re.compile(r"^Prob_(?P<code>[A-Z][A-Z0-9.]+)_\d+m\.tif$")
 _RASTER_TILE_SIZE = 64
 _RASTER_TILE_CACHE_SIZE = 1024
+_GEOPACKAGE_TILE_CACHE_SIZE = 128
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,7 +162,14 @@ class RasterReference:
         for layer, dataset in datasets:
             cell_geometry = self._positive_cell_geometry(layer, dataset, polygon)
             if cell_geometry is not None:
-                candidates.append(OverlapCandidate(layer.code, layer.name, cell_geometry))
+                candidates.append(
+                    OverlapCandidate(
+                        layer.code,
+                        layer.name,
+                        cell_geometry,
+                        components_are_disjoint=_has_disjoint_components(cell_geometry),
+                    )
+                )
         return choose_winner(polygon, candidates, source_version=self._source_version)
 
     @staticmethod
@@ -259,8 +267,15 @@ def _mask_geometry(valid: np.ndarray, transform: Any) -> BaseGeometry | None:
             transform=transform,
         )
     ]
-    merged = unary_union(cells)
-    return None if merged.is_empty else merged
+    return _geometry_collection(cells)
+
+
+def _geometry_collection(cells: list[BaseGeometry]) -> BaseGeometry | None:
+    if not cells:
+        return None
+    if len(cells) == 1:
+        return cells[0]
+    return GeometryCollection(cells)
 
 
 def _raster_tile_indices(offset: float, length: float) -> range:
@@ -477,7 +492,12 @@ class GeoPackageReference:
             geometry = self._positive_tile_geometry(connection, layer, polygon)
             if geometry is not None:
                 candidates.append(
-                    OverlapCandidate(layer.table, self._labels[layer.table], geometry)
+                    OverlapCandidate(
+                        layer.table,
+                        self._labels[layer.table],
+                        geometry,
+                        components_are_disjoint=_has_disjoint_components(geometry),
+                    )
                 )
         return candidates
 
@@ -685,7 +705,7 @@ class GeoPackageReference:
             return tile_geometry
         tile_geometry = self._decode_tile(layer, tile_column, tile_row, blob)
         self._tile_cache[key] = tile_geometry
-        if len(self._tile_cache) > 128:
+        if len(self._tile_cache) > _GEOPACKAGE_TILE_CACHE_SIZE:
             self._tile_cache.popitem(last=False)
         return tile_geometry
 
@@ -720,8 +740,7 @@ class GeoPackageReference:
                     transform=transform,
                 )
             ]
-        geometry = unary_union(cells)
-        return None if geometry.is_empty else geometry
+        return _geometry_collection(cells)
 
     @staticmethod
     def _candidate_tile_rows(
@@ -777,10 +796,11 @@ class GeoPackageReference:
 
 
 def _merge_tile_cells(cells: list[BaseGeometry]) -> BaseGeometry | None:
-    if not cells:
-        return None
-    geometry = unary_union(cells)
-    return None if geometry.is_empty else geometry
+    return _geometry_collection(cells)
+
+
+def _has_disjoint_components(geometry: BaseGeometry) -> bool:
+    return isinstance(geometry, GeometryCollection)
 
 
 def _tile_values(row: tuple[object, ...]) -> _TileMetadata:

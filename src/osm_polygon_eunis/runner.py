@@ -288,18 +288,17 @@ def _process_geometry_path(
         retain_source=retain_source,
         client=http_client,
     )
-    for reference in references:
-        sidecar = _sidecar_path(sidecar_root, plan.spec, source_path)
-        sidecar.parent.mkdir(parents=True, exist_ok=True)
-        next_sidecar = sidecar.with_name(f"{sidecar.name}.next")
-        update_label_sidecar(
-            local_source,
-            next_sidecar,
-            reference=reference,
-            current=sidecar if sidecar.is_file() else None,
-            batch_size=batch_size,
-        )
-        next_sidecar.replace(sidecar)
+    sidecar = _sidecar_path(sidecar_root, plan.spec, source_path)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    next_sidecar = sidecar.with_name(f"{sidecar.name}.next")
+    update_label_sidecar(
+        local_source,
+        next_sidecar,
+        references=references,
+        current=sidecar if sidecar.is_file() else None,
+        batch_size=batch_size,
+    )
+    next_sidecar.replace(sidecar)
     if not retain_source:
         local_source.unlink(missing_ok=True)
     if progress is not None:

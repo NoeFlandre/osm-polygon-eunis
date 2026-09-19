@@ -2,6 +2,9 @@
 
 from collections.abc import Iterable
 
+from shapely import area as shapely_area
+from shapely import get_parts
+from shapely import intersection as shapely_intersection
 from shapely.geometry.base import BaseGeometry
 
 from .domain import EunisResult, OverlapCandidate
@@ -53,10 +56,19 @@ def _intersection_area(
     if candidate.geometry.is_empty or not candidate.geometry.is_valid:
         return None
     try:
-        area = float(polygon.intersection(candidate.geometry).area)
+        area = _exact_intersection_area(polygon, candidate)
     except (ValueError, RuntimeError):
         return None
     return area if area > 0.0 else None
+
+
+def _exact_intersection_area(polygon: BaseGeometry, candidate: OverlapCandidate) -> float:
+    if not candidate.components_are_disjoint:
+        return float(polygon.intersection(candidate.geometry).area)
+    components = get_parts(candidate.geometry)
+    if not len(components):
+        return 0.0
+    return float(shapely_area(shapely_intersection(polygon, components)).sum())
 
 
 def _percentage(area: float, polygon_area: float) -> float:

@@ -137,6 +137,36 @@ def test_label_sidecar_merges_groups_and_appends_without_geometry_loss(tmp_path:
     assert all(isinstance(item[1], str) for item in observed)
 
 
+def test_label_sidecar_streams_one_geometry_through_all_references(tmp_path: Path) -> None:
+    source = tmp_path / "source.parquet"
+    output = tmp_path / "labels.parquet"
+    pq.write_table(
+        pa.table({"geometry": [_polygon_json(0), _polygon_json(2)]}),
+        source,
+    )
+    seen: list[object] = []
+
+    class Reference:
+        def __init__(self, code: str) -> None:
+            self.code = code
+
+        def overlap(self, polygon) -> EunisResult:
+            seen.append(polygon)
+            percentage = 50.0 if self.code == "R11" else 75.0
+            return EunisResult(self.code, self.code, percentage, "EEA-test")
+
+    update_label_sidecar(
+        source,
+        output,
+        references=(Reference("R11"), Reference("R12")),
+        batch_size=2,
+    )
+
+    assert seen[0] is seen[1]
+    assert seen[2] is seen[3]
+    assert pq.read_table(output)["eunis_code"].to_pylist() == ["R12", "R12"]
+
+
 def test_build_label_map_joins_polygon_ids_to_a_sidecar_in_batches(tmp_path: Path) -> None:
     source = tmp_path / "source.parquet"
     sidecar = tmp_path / "sidecar.parquet"

@@ -272,6 +272,13 @@ def test_geopackage_tile_reference_uses_exact_positive_pixels(tmp_path: Path) ->
     assert result.overlap_percentage == 50.0
 
 
+def test_raster_cell_collection_preserves_exact_intersection_area() -> None:
+    cells = reference_module._geometry_collection([box(0, 0, 1, 1), box(1, 0, 2, 1)])
+
+    assert cells is not None
+    assert box(0.5, 0.5, 1.5, 1.5).intersection(cells).area == 0.5
+
+
 def test_reference_metadata_and_raster_lifecycle_fail_closed(tmp_path: Path) -> None:
     labels = tmp_path / "labels.json"
     labels.write_text("[]", encoding="utf-8")
