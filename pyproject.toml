@@ -41,6 +41,9 @@ packages = ["src/osm_polygon_eunis"]
 [tool.pytest.ini_options]
 addopts = "--strict-config --strict-markers"
 testpaths = ["tests"]
+markers = [
+  "property: deterministic property-based tests",
+]
 
 [tool.coverage.run]
 branch = true
