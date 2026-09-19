@@ -33,6 +33,18 @@ The pipeline reads one Parquet shard at a time, uses bounded Arrow batches,
 streams temporary files, and deletes each shard after verification. It does not
 mirror a complete input or output dataset on the local disk.
 
+The EEA resolver pins the catalog records, public asset metadata, the official
+2021 classification workbook, and downloaded SHA-256 checksums in each target's
+`eunis/manifest.json`. EEA GeoPackages are read as highest-resolution tiled
+rasters; only tiles intersecting the polygon bbox are decoded, and the final
+label still uses actual cell/polygon intersection area.
+
+Each output dataset card also contains a deterministic static world map at
+`eunis/world-map.svg` and a compact percentage table for every EUNIS label,
+including polygons that received no label. The map is built while the final
+Parquet shards stream through the pipeline, using bounded 2-degree bins rather
+than retaining source geometries.
+
 ## Local development
 
 Use a task-scoped uv cache when working on the mounted data volume:

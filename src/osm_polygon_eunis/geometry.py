@@ -8,10 +8,12 @@ from functools import lru_cache
 from typing import Any
 
 from pyproj import Transformer
+from shapely.errors import GEOSException
 from shapely.geometry import shape
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import transform
 from shapely.validation import make_valid
+from shapely.wkb import loads as load_wkb
 
 
 def parse_geometry(value: object) -> BaseGeometry | None:
@@ -20,14 +22,28 @@ def parse_geometry(value: object) -> BaseGeometry | None:
     if value is None:
         return None
     try:
-        payload: Any = json.loads(value) if isinstance(value, str) else value
-        if not isinstance(payload, Mapping):
-            return None
-        geometry = shape(payload)
-    except (TypeError, ValueError, json.JSONDecodeError):
+        geometry = _decode_geometry(value)
+    except (GEOSException, TypeError, ValueError, json.JSONDecodeError):
         return None
-    if geometry.is_empty:
+    return _valid_geometry(geometry)
+
+
+def _decode_geometry(value: object) -> BaseGeometry | None:
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return load_wkb(bytes(value))
+    payload: Any = json.loads(value) if isinstance(value, str) else value
+    if not isinstance(payload, Mapping):
         return None
+    return shape(payload)
+
+
+def _valid_geometry(geometry: BaseGeometry | None) -> BaseGeometry | None:
+    if geometry is None or geometry.is_empty:
+        return None
+    return _repair_geometry(geometry)
+
+
+def _repair_geometry(geometry: BaseGeometry) -> BaseGeometry | None:
     if not geometry.is_valid:
         geometry = make_valid(geometry)
     return None if geometry.is_empty or not geometry.is_valid else geometry
@@ -45,10 +61,14 @@ def to_equal_area(
 ) -> BaseGeometry | None:
     """Project a geometry to the EEA equal-area CRS."""
 
-    if geometry is None or geometry.is_empty or not geometry.is_valid:
+    if not _is_usable(geometry):
         return None
     projected = transform(_transformer(source_crs, target_crs).transform, geometry)
-    return None if projected.is_empty or not projected.is_valid else projected
+    return _valid_geometry(projected)
+
+
+def _is_usable(geometry: BaseGeometry | None) -> bool:
+    return geometry is not None and not geometry.is_empty and geometry.is_valid
 
 
 def safe_area(geometry: BaseGeometry | None) -> float:

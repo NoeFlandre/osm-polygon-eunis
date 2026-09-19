@@ -1,0 +1,22 @@
+name: QA
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  deterministic-quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --group dev
+      - run: uv run ruff check src tests scripts
+      - run: uv run ty check src tests scripts
+      - run: uv run pytest --cov --cov-report=json --cov-report=term-missing
+      - run: uv run python scripts/check_architecture.py
+      - run: uv run python scripts/check_crap.py
+      - run: uv run python scripts/smoke.py
+      - run: uv run mutmut run

@@ -6,7 +6,7 @@ import fnmatch
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, Self
 
 import httpx
 from huggingface_hub import HfApi, hf_hub_url
@@ -67,6 +67,31 @@ class _InventoryApi(Protocol):
     ) -> Iterable[Any]: ...
 
 
+class _StreamResponse(Protocol):
+    @property
+    def headers(self) -> Mapping[str, str]: ...
+
+    def __enter__(self) -> Self: ...
+
+    def __exit__(self, *args: object) -> bool | None: ...
+
+    def raise_for_status(self) -> Any: ...
+
+    def iter_bytes(self, *, chunk_size: int) -> Iterable[bytes]: ...
+
+
+class _StreamClient(Protocol):
+    def stream(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Mapping[str, str],
+        follow_redirects: bool,
+        timeout: None,
+    ) -> _StreamResponse: ...
+
+
 def dataset_spec(name: str) -> DatasetSpec:
     """Return a known source layout by its short name."""
 
@@ -99,11 +124,34 @@ def list_parquet_files(api: _InventoryApi, repo_id: str, revision: str) -> tuple
     paths = {
         path
         for entry in entries
-        if getattr(entry, "type", None) == "file"
+        if not hasattr(entry, "tree_id")
         and isinstance((path := getattr(entry, "path", None)), str)
         and path.endswith(".parquet")
     }
     return tuple(sorted(paths))
+
+
+def list_repo_files(api: _InventoryApi, repo_id: str, revision: str) -> tuple[Any, ...]:
+    """List file entries in a pinned Hub revision, excluding directory entries."""
+
+    entries = api.list_repo_tree(
+        repo_id,
+        path_in_repo="",
+        recursive=True,
+        revision=revision,
+        repo_type="dataset",
+    )
+    return tuple(
+        sorted(
+            (
+                entry
+                for entry in entries
+                if not hasattr(entry, "tree_id")
+                and isinstance(getattr(entry, "path", None), str)
+            ),
+            key=lambda entry: entry.path,
+        )
+    )
 
 
 def _index_by_filename(paths: Iterable[str], kind: str) -> dict[str, str]:
@@ -144,6 +192,8 @@ def download_to_temp(
     path: str,
     revision: str,
     directory: Path,
+    *,
+    client: _StreamClient | None = None,
 ) -> Path:
     """Stream one Hub file to a run-local path and verify Content-Length."""
 
@@ -157,26 +207,49 @@ def download_to_temp(
         endpoint=api.endpoint,
     )
     headers = build_hf_headers(token=api.token)
-    written = 0
-    with httpx.stream(
-        "GET",
-        url,
-        headers=headers,
-        follow_redirects=True,
-        timeout=None,
-    ) as response:
-        response.raise_for_status()
-        with destination.open("wb") as output:
-            for chunk in response.iter_bytes(chunk_size=8 * 1024 * 1024):
-                output.write(chunk)
-                written += len(chunk)
-        expected = response.headers.get("content-length")
+    if client is None:
+        with httpx.stream(
+            "GET",
+            url,
+            headers=headers,
+            follow_redirects=True,
+            timeout=None,
+        ) as response:
+            written, expected = _write_response(response, destination)
+    else:
+        written, expected = _download_with_client(client, url, headers, destination)
     if expected is not None and written != int(expected):
         destination.unlink(missing_ok=True)
         raise ValueError(
             f"downloaded byte count {written} does not match Content-Length {expected}",
         )
     return destination
+
+
+def _download_with_client(
+    client: _StreamClient,
+    url: str,
+    headers: Mapping[str, str],
+    destination: Path,
+) -> tuple[int, str | None]:
+    with client.stream(
+        "GET",
+        url,
+        headers=headers,
+        follow_redirects=True,
+        timeout=None,
+    ) as response:
+        return _write_response(response, destination)
+
+
+def _write_response(response: Any, destination: Path) -> tuple[int, str | None]:
+    response.raise_for_status()
+    written = 0
+    with destination.open("wb") as output:
+        for chunk in response.iter_bytes(chunk_size=8 * 1024 * 1024):
+            output.write(chunk)
+            written += len(chunk)
+    return written, response.headers.get("content-length")
 
 
 def matches_layout(path: str, pattern: str) -> bool:

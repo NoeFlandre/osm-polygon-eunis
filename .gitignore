@@ -13,4 +13,6 @@ build/
 __pycache__/
 tmp/
 staging/
+.eunis-run/
+mutants/
 .DS_Store

@@ -1,6 +1,7 @@
 import json
 
 from shapely.geometry import Polygon
+from shapely.wkb import dumps
 
 from osm_polygon_eunis.geometry import parse_geometry, safe_area, to_equal_area
 
@@ -17,6 +18,13 @@ def test_parse_geometry_accepts_json_text_and_returns_valid_geometry() -> None:
 
     assert geometry is not None
     assert geometry.is_valid
+    assert geometry.geom_type == "Polygon"
+
+
+def test_parse_geometry_accepts_binary_wkb() -> None:
+    geometry = parse_geometry(dumps(Polygon([(0, 0), (1, 0), (1, 1), (0, 0)])))
+
+    assert geometry is not None
     assert geometry.geom_type == "Polygon"
 
 

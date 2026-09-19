@@ -2,6 +2,10 @@
   "source_version": "EEA EUNIS habitat probability maps v1 2021",
   "crs": "EPSG:3035",
   "threshold": 0,
+  "classification_record": "bfe4c237-e378-4a83-ab21-b3807f96c2e2",
+  "supplemental_labels": {
+    "MA223": "Atlantic upper-mid saltmarshes and saline and brackish reed, rush and sedge beds"
+  },
   "catalog_records": [
     "99498d2c-7350-4655-b914-92c5b9e016c5",
     "f425a73e-dc6c-40be-93d6-9d234d4bbe1b",

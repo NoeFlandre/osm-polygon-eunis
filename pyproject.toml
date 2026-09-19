@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
   "httpx>=0.27,<1",
-  "huggingface-hub>=0.35,<1",
+  "huggingface-hub>=1.32,<2",
   "numpy>=2,<3",
   "pyarrow>=18,<23",
   "pyproj>=3.7,<4",
@@ -67,6 +67,6 @@ quote-style = "double"
 python-version = "3.12"
 
 [tool.mutmut]
-paths_to_mutate = "src/osm_polygon_eunis/matching.py"
-runner = "UV_CACHE_DIR=/private/tmp/osm-polygon-eunis-uv uv run pytest -q tests/unit/test_matching.py"
-tests_dir = "tests"
+source_paths = ["src/osm_polygon_eunis/matching.py"]
+also_copy = ["src/osm_polygon_eunis/domain.py", "src/osm_polygon_eunis/__init__.py"]
+pytest_add_cli_args_test_selection = ["tests/unit/test_matching.py"]

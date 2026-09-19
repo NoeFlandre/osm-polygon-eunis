@@ -10,6 +10,7 @@ from osm_polygon_eunis.sources import (
     dataset_spec,
     download_to_temp,
     list_parquet_files,
+    list_repo_files,
     pair_region_paths,
 )
 
@@ -35,6 +36,7 @@ def test_capture_revision_and_list_parquet_files() -> None:
             return iter(
                 (
                     SimpleNamespace(type="file", path="polygons/z.parquet"),
+                    SimpleNamespace(path="polygons/y.parquet", blob_id="y"),
                     SimpleNamespace(type="file", path="README.md"),
                     SimpleNamespace(type="file", path="polygons/a.parquet"),
                 )
@@ -45,8 +47,15 @@ def test_capture_revision_and_list_parquet_files() -> None:
     assert capture_revision(api, "org/source") == "source-sha"
     assert list_parquet_files(api, "org/source", "source-sha") == (
         "polygons/a.parquet",
+        "polygons/y.parquet",
         "polygons/z.parquet",
     )
+    assert [entry.path for entry in list_repo_files(api, "org/source", "source-sha")] == [
+        "README.md",
+        "polygons/a.parquet",
+        "polygons/y.parquet",
+        "polygons/z.parquet",
+    ]
 
 
 def test_region_paths_pair_by_filename() -> None:
@@ -138,3 +147,49 @@ def test_download_to_temp_rejects_wrong_length(tmp_path: Path, monkeypatch) -> N
             "source-sha",
             tmp_path,
         )
+
+
+def test_download_to_temp_reuses_supplied_http_client(tmp_path: Path, monkeypatch) -> None:
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def raise_for_status(self) -> None:
+            return None
+
+        @property
+        def headers(self):
+            return {"content-length": "3"}
+
+        def iter_bytes(self, chunk_size: int):
+            assert chunk_size == 8 * 1024 * 1024
+            yield b"abc"
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def stream(self, *_args, **_kwargs):
+            self.calls += 1
+            return FakeResponse()
+
+    def unexpected_module_stream(*_args, **_kwargs):
+        raise AssertionError("the supplied client must be used")
+
+    monkeypatch.setattr(httpx, "stream", unexpected_module_stream)
+    client = FakeClient()
+
+    local_path = download_to_temp(
+        HfApi(token="hf-test"),
+        "org/source",
+        "polygons/france-latest.parquet",
+        "source-sha",
+        tmp_path,
+        client=client,
+    )
+
+    assert client.calls == 1
+    assert local_path.read_bytes() == b"abc"

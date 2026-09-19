@@ -1,10 +1,17 @@
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
-from shapely.geometry import box
+from shapely.geometry import Polygon, box
 
-from osm_polygon_eunis.domain import OverlapCandidate
-from osm_polygon_eunis.matching import choose_winner
+from osm_polygon_eunis.domain import EunisResult, OverlapCandidate
+from osm_polygon_eunis.matching import (
+    _higher_percentage,
+    _percentage,
+    _prefer_code,
+    _usable_polygon,
+    choose_winner,
+    prefer_result,
+)
 
 
 def test_largest_actual_intersection_and_percentage() -> None:
@@ -19,6 +26,7 @@ def test_largest_actual_intersection_and_percentage() -> None:
     assert result.code == "R11"
     assert result.name == "Pannonian steppe"
     assert result.overlap_percentage == 80.0
+    assert result.source_version == "test"
 
 
 def test_bbox_touch_without_geometry_intersection_is_null() -> None:
@@ -49,6 +57,93 @@ def test_empty_polygon_returns_all_null_fields() -> None:
     assert result.name is None
     assert result.overlap_percentage is None
     assert result.source_version is None
+
+
+def test_invalid_zero_area_and_none_polygons_are_not_usable() -> None:
+    invalid = Polygon([(0, 0), (2, 2), (0, 2), (2, 0), (0, 0)])
+    line = box(0, 0, 1, 1).boundary
+
+    assert not _usable_polygon(None)
+    assert not _usable_polygon(invalid)
+    assert not _usable_polygon(line)
+    assert not choose_winner(
+        invalid,
+        (OverlapCandidate("R11", "steppe", box(0, 0, 2, 2)),),
+        source_version="test",
+    ).code
+    assert not choose_winner(
+        None,
+        (OverlapCandidate("R11", "steppe", box(0, 0, 2, 2)),),
+        source_version="test",
+    ).code
+
+
+def test_small_and_full_intersections_are_retained_and_capped() -> None:
+    small = choose_winner(
+        box(0, 0, 1, 1),
+        (OverlapCandidate("R11", "small", box(0, 0, 0.5, 0.5)),),
+        source_version="test",
+    )
+    full = choose_winner(
+        box(0, 0, 1, 1),
+        (OverlapCandidate("R11", "full", box(-1, -1, 2, 2)),),
+        source_version="test",
+    )
+
+    assert small.overlap_percentage == 25.0
+    assert full.overlap_percentage == 100.0
+    assert _percentage(-1.0, 1.0) == 0.0
+    assert _percentage(2.0, 1.0) == 100.0
+
+
+def test_invalid_candidate_and_sub_unit_overlap_are_ignored() -> None:
+    invalid = Polygon([(0, 0), (2, 2), (0, 2), (2, 0), (0, 0)])
+    result = choose_winner(
+        box(0, 0, 1, 1),
+        (
+            OverlapCandidate("R11", "invalid", invalid),
+            OverlapCandidate("R12", "small", box(0, 0, 0.5, 0.5)),
+        ),
+        source_version="test",
+    )
+
+    assert result.code == "R12"
+
+
+def test_prefer_result_merges_reference_groups_by_percentage_then_code() -> None:
+    first = choose_winner(
+        box(0, 0, 10, 10),
+        (OverlapCandidate("R12", "second", box(0, 0, 5, 10)),),
+        source_version="test",
+    )
+    second = choose_winner(
+        box(0, 0, 10, 10),
+        (OverlapCandidate("R11", "first", box(0, 0, 5, 10)),),
+        source_version="test",
+    )
+
+    assert prefer_result(first, second).code == "R11"
+
+
+def test_prefer_result_handles_unequal_percentages_and_version_mismatch() -> None:
+    current = EunisResult("R11", "current", 25.0, "test")
+    candidate = EunisResult("R12", "candidate", 50.0, "test")
+
+    assert prefer_result(current, candidate) is candidate
+    assert prefer_result(candidate, current) is candidate
+    with pytest.raises(ValueError) as error:
+        prefer_result(current, EunisResult("R12", "other", 50.0, "other"))
+    assert str(error.value) == "cannot merge EUNIS results from different source versions"
+
+
+def test_equal_code_ties_keep_the_current_result_and_cover_percentage_helper() -> None:
+    current = EunisResult("R11", "current", 25.0, "test")
+    candidate = EunisResult("R11", "candidate", 25.0, "test")
+
+    assert prefer_result(current, candidate) is current
+    assert _prefer_code(current, candidate) is current
+    assert _higher_percentage(current, candidate) is current
+    assert _higher_percentage(candidate, current) is candidate
 
 
 @st.composite
