@@ -1,0 +1,15 @@
+{
+  "source_version": "EEA EUNIS habitat probability maps v1 2021",
+  "crs": "EPSG:3035",
+  "threshold": 0,
+  "catalog_records": [
+    "99498d2c-7350-4655-b914-92c5b9e016c5",
+    "f425a73e-dc6c-40be-93d6-9d234d4bbe1b",
+    "443cdba1-1d4b-4cae-91d5-72fa99a8a758",
+    "0c4270c4-fd7e-4099-ac2f-5af2079ddbd8",
+    "ae2fdada-93d6-4cf1-a11c-6ebccf25d286",
+    "7a2d78ec-8a31-4e7b-91df-45db6e64e842",
+    "a6c48c2d-114f-406e-ba99-c9085a5f5aee"
+  ],
+  "label_source": "https://biodiversity.europa.eu/resources/search-habitat"
+}
