@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -1055,64 +1055,34 @@ def _process_reference_groups(
     progress: Progress | None,
     http_client: Any,
 ) -> None:
-    """Process each source shard once while reusing every open reference group."""
+    """Process one reference group at a time while reusing downloaded sources."""
 
-    with _open_reference_groups(
-        groups,
-        workdir=workdir,
-        threshold=threshold,
-        checksums=checksums,
-        client=http_client,
-    ) as references:
-        for plan in plans:
-            for source_path in plan.geometry_paths:
-                _process_geometry_path(
-                    api,
-                    plan,
-                    source_path=source_path,
-                    references=references,
-                    sidecar_root=sidecar_root,
-                    source_root=source_root,
-                    batch_size=batch_size,
-                    progress=progress,
-                    http_client=http_client,
-                    retain_source=True,
-                )
-
-
-@contextmanager
-def _open_reference_groups(
-    groups: tuple[EeaGroup, ...],
-    *,
-    workdir: Path,
-    threshold: int,
-    checksums: dict[str, str],
-    client: Any,
-) -> Iterator[tuple[OverlapReference, ...]]:
-    with ExitStack() as stack:
-        references: list[OverlapReference] = []
-        for group in groups:
-            directory = Path(
-                stack.enter_context(
-                    TemporaryDirectory(
-                        dir=workdir,
-                        prefix=f"reference-{group.record_id[:8]}-",
+    for group in groups:
+        with TemporaryDirectory(
+            dir=workdir,
+            prefix=f"reference-{group.record_id[:8]}-",
+        ) as directory, open_reference_group(
+            group,
+            Path(directory),
+            threshold=threshold,
+            checksums=checksums,
+            client=http_client,
+        ) as reference:
+            references = (reference,)
+            for plan in plans:
+                for source_path in plan.geometry_paths:
+                    _process_geometry_path(
+                        api,
+                        plan,
+                        source_path=source_path,
+                        references=references,
+                        sidecar_root=sidecar_root,
+                        source_root=source_root,
+                        batch_size=batch_size,
+                        progress=progress,
+                        http_client=http_client,
+                        retain_source=True,
                     )
-                )
-            )
-            references.append(
-                stack.enter_context(
-                    open_reference_group(
-                        group,
-                        directory,
-                        threshold=threshold,
-                        checksums=checksums,
-                        client=client,
-                    )
-                )
-            )
-        yield tuple(references)
-
 
 def _finalize_plan(
     api: Any,

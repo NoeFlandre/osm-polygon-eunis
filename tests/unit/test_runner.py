@@ -427,7 +427,7 @@ def test_planning_manifest_and_shared_blobs_are_deterministic(monkeypatch) -> No
     }
 
 
-def test_process_reference_groups_reuses_reference_for_all_plans(
+def test_process_reference_groups_reuses_one_reference_group_for_all_plans(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -474,9 +474,16 @@ def test_process_reference_groups_reuses_reference_for_all_plans(
         http_client=client,
     )
 
-    assert [name for name, _, _ in seen] == ["website", "description"]
-    assert len(seen[0][1]) == 2
+    assert [name for name, _, _ in seen] == [
+        "website",
+        "description",
+        "website",
+        "description",
+    ]
+    assert all(len(references) == 1 for _, references, _ in seen)
     assert seen[0][1] is seen[1][1]
+    assert seen[2][1] is seen[3][1]
+    assert seen[0][1] != seen[2][1]
     assert all(item[2] is client for item in seen)
 
 
