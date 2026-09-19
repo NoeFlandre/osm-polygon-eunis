@@ -1,0 +1,11 @@
+site_name: OSM Polygon EUNIS
+site_description: Exact-overlap EUNIS enrichment for OSM polygon datasets
+theme:
+  name: material
+nav:
+  - Home: index.md
+  - Operations: operations.md
+  - Architecture decisions:
+      - Reference data and overlap: adr/0001-reference-data-and-overlap.md
+      - Hub shard processing: adr/0002-hub-shard-processing.md
+      - Technical debt: technical-debt.md

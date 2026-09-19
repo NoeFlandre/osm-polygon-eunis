@@ -1,0 +1,16 @@
+.venv/
+.pytest_cache/
+.ruff_cache/
+.ty_cache/
+.mypy_cache/
+.coverage
+coverage.json
+htmlcov/
+dist/
+build/
+*.egg-info/
+*.pyc
+__pycache__/
+tmp/
+staging/
+.DS_Store
