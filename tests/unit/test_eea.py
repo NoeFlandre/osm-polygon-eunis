@@ -154,6 +154,29 @@ def test_catalog_links_extracts_nested_online_resources() -> None:
         catalog_links({})
 
 
+def test_classification_links_accept_iso_json_character_strings() -> None:
+    record = {
+        "title": "EUNIS terrestrial habitat classification review",
+        "resources": [
+            {
+                "cit:CI_OnlineResource": {
+                    "cit:linkage": {
+                        "gco:CharacterString": {"#text": "https://example.test/folder"}
+                    },
+                    "cit:protocol": {
+                        "gco:CharacterString": {"#text": "EEA:FOLDERPATH"}
+                    },
+                }
+            }
+        ],
+    }
+
+    assert _classification_catalog_links(record) == (
+        "EUNIS terrestrial habitat classification review",
+        "https://example.test/folder",
+    )
+
+
 def test_webdav_discovery_walks_nested_directories() -> None:
     root_listing = b"""<?xml version="1.0"?>
     <d:multistatus xmlns:d="DAV:">

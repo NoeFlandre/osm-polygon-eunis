@@ -122,6 +122,54 @@ def test_process_geometry_paths_forwards_a_reusable_http_client(
     assert calls == [reusable_client]
 
 
+def test_process_geometry_paths_reuses_retained_source_shard(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "input.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "polygon_id": ["a"],
+                "geometry": ['{"type":"Point","coordinates":[0,0]}'],
+            }
+        ),
+        source,
+    )
+    calls: list[str] = []
+
+    def fake_download(api, repo_id, path, revision, directory, *, client=None):
+        del api, repo_id, revision, client
+        calls.append(path)
+        destination = directory / path.replace("/", "__")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(source.read_bytes())
+        return destination
+
+    monkeypatch.setattr(runner, "download_to_temp", fake_download)
+    plan = DatasetPlan(
+        DatasetSpec("website", "source", "target", "polygons/*.parquet"),
+        "revision",
+        ("polygons/test.parquet",),
+        ("polygons/test.parquet",),
+        (),
+    )
+
+    for _ in range(2):
+        process_geometry_paths(
+            object(),
+            plan,
+            reference=_Reference(EunisResult("R11", "steppe", 25.0, "test")),
+            sidecar_root=tmp_path / "sidecars",
+            source_root=tmp_path / "source",
+            batch_size=1,
+            retain_source=True,
+        )
+
+    assert calls == ["polygons/test.parquet"]
+    assert (tmp_path / "source" / "website" / "polygons__test.parquet").is_file()
+
+
 def _asset(path: str, *, code: str | None = "R11") -> RemoteAsset:
     return RemoteAsset(
         path=path,

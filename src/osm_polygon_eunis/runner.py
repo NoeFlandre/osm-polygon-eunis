@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -245,18 +246,19 @@ def process_geometry_paths(
     batch_size: int,
     progress: Progress | None = None,
     http_client: Any | None = None,
+    retain_source: bool = False,
 ) -> None:
     """Merge one reference group into every geometry shard's compact sidecar."""
 
     with _http_client(http_client) as reusable_client:
         source_root.mkdir(parents=True, exist_ok=True)
         for source_path in plan.geometry_paths:
-            local_source = download_to_temp(
+            local_source = _download_geometry_source(
                 api,
-                plan.spec.source_repo,
+                plan,
                 source_path,
-                plan.source_revision,
                 source_root,
+                retain_source=retain_source,
                 client=reusable_client,
             )
             sidecar = _sidecar_path(sidecar_root, plan.spec, source_path)
@@ -270,7 +272,8 @@ def process_geometry_paths(
                 batch_size=batch_size,
             )
             next_sidecar.replace(sidecar)
-            local_source.unlink(missing_ok=True)
+            if not retain_source:
+                local_source.unlink(missing_ok=True)
             if progress is not None:
                 progress(
                     {"event": "sidecar_updated", "dataset": plan.spec.name, "path": source_path}
@@ -289,6 +292,33 @@ def _advance_commit(api: Any, target_repo: str, result: Any) -> str:
     return _commit_id(result) or capture_revision(api, target_repo)
 
 
+def _cached_geometry_path(root: Path, plan: DatasetPlan, source_path: str) -> Path:
+    return root / plan.spec.name / source_path.replace("/", "__")
+
+
+def _download_geometry_source(
+    api: Any,
+    plan: DatasetPlan,
+    source_path: str,
+    source_root: Path,
+    *,
+    retain_source: bool,
+    client: Any,
+) -> Path:
+    directory = source_root / plan.spec.name if retain_source else source_root
+    cached = _cached_geometry_path(source_root, plan, source_path)
+    if retain_source and cached.is_file():
+        return cached
+    return download_to_temp(
+        api,
+        plan.spec.source_repo,
+        source_path,
+        plan.source_revision,
+        directory,
+        client=client,
+    )
+
+
 def finalize_dataset(
     api: Any,
     plan: DatasetPlan,
@@ -300,6 +330,7 @@ def finalize_dataset(
     progress: Progress | None = None,
     http_client: Any | None = None,
     card: DatasetCardAccumulator | None = None,
+    source_cache_root: Path | None = None,
 ) -> tuple[tuple[ShardExpectation, ...], str]:
     """Append labels, upload changed shards, and clean successful staging files."""
 
@@ -314,6 +345,7 @@ def finalize_dataset(
             progress=progress,
             http_client=reusable_client,
             card=card,
+            source_cache_root=source_cache_root,
         )
 
 
@@ -328,6 +360,7 @@ def _finalize_dataset_with_client(
     progress: Progress | None,
     http_client: Any,
     card: DatasetCardAccumulator | None,
+    source_cache_root: Path | None,
 ) -> tuple[tuple[ShardExpectation, ...], str]:
     local_root.mkdir(parents=True, exist_ok=True)
     card_accumulator = card if card is not None else DatasetCardAccumulator()
@@ -346,6 +379,7 @@ def _finalize_dataset_with_client(
             parent_commit=current_commit,
             http_client=http_client,
             card=card_accumulator,
+            source_cache_root=source_cache_root,
         )
         expectations.extend(shard_expectations)
         if progress is not None:
@@ -365,8 +399,15 @@ def _finalize_shard(
     parent_commit: str,
     http_client: Any,
     card: DatasetCardAccumulator,
+    source_cache_root: Path | None,
 ) -> tuple[tuple[ShardExpectation, ...], str]:
-    local_source = download_to_temp(
+    cached_source = (
+        _cached_geometry_path(source_cache_root, plan, geometry_path)
+        if source_cache_root is not None
+        else None
+    )
+    reused_source = cached_source is not None and cached_source.is_file()
+    local_source = cached_source if reused_source else download_to_temp(
         api,
         plan.spec.source_repo,
         geometry_path,
@@ -412,7 +453,13 @@ def _finalize_shard(
             link_output.output,
             current_commit,
         )
-    _cleanup_shard(local_source, local_output, sidecar, link_output)
+    _cleanup_shard(
+        local_source,
+        local_output,
+        sidecar,
+        link_output,
+        delete_source=not reused_source,
+    )
     expectations = [geometry_expectation]
     if link_output is not None:
         expectations.append(link_output.expectation)
@@ -489,8 +536,11 @@ def _cleanup_shard(
     local_output: Path,
     sidecar: Path,
     link_output: _LinkOutput | None,
+    *,
+    delete_source: bool = True,
 ) -> None:
-    local_source.unlink(missing_ok=True)
+    if delete_source:
+        local_source.unlink(missing_ok=True)
     local_output.unlink(missing_ok=True)
     sidecar.unlink(missing_ok=True)
     if link_output is not None:
@@ -859,9 +909,8 @@ def run_release(
     _duplicate_outputs(api, plans, token)
     groups = resolve_config(reference_config)
     sidecar_root = workdir / "sidecars"
-    source_root = workdir / "source"
     checksums: dict[str, str] = {}
-    with _http_client(None) as reusable_client:
+    with _source_cache(workdir) as source_root, _http_client(None) as reusable_client:
         reference_identity = _reference_manifest(
             groups,
             {},
@@ -911,6 +960,7 @@ def run_release(
                 reference_info=reference_info,
                 progress=progress,
                 http_client=reusable_client,
+                source_cache_root=source_root,
             )
             for plan in plans
         )
@@ -967,6 +1017,7 @@ def _process_reference_groups(
                     batch_size=batch_size,
                     progress=progress,
                     http_client=http_client,
+                    retain_source=True,
                 )
 
 
@@ -980,6 +1031,7 @@ def _finalize_plan(
     reference_info: Mapping[str, object],
     progress: Progress | None,
     http_client: Any,
+    source_cache_root: Path | None = None,
 ) -> DatasetReceipt:
     target_revision = capture_revision(api, plan.spec.output_repo)
     card = DatasetCardAccumulator()
@@ -993,6 +1045,7 @@ def _finalize_plan(
         progress=progress,
         http_client=http_client,
         card=card,
+        source_cache_root=source_cache_root,
     )
     card_artifacts = card.write_artifacts(
         workdir / "cards" / plan.spec.name,
@@ -1132,3 +1185,16 @@ def _shared_blobs(
         for entry in list_repo_files(api, plan.spec.source_repo, plan.source_revision)
         if entry.path not in changed_paths and isinstance(getattr(entry, "blob_id", None), str)
     }
+
+
+def _cleanup_source_cache(root: Path) -> None:
+    shutil.rmtree(root, ignore_errors=True)
+
+
+@contextmanager
+def _source_cache(workdir: Path) -> Iterator[Path]:
+    root = workdir / "source"
+    try:
+        yield root
+    finally:
+        _cleanup_source_cache(root)
