@@ -48,6 +48,7 @@ from .transform import (
 Progress = Callable[[Mapping[str, object]], None]
 _RASTER_GROUP_BATCH_SIZE = 2
 _SOURCE_WORKERS = 4
+_SOURCE_MICRO_BATCH_SIZE = 32
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,7 +98,7 @@ class _ExistingManifest:
 
 @dataclass(frozen=True, slots=True)
 class _GeometryChunk:
-    """Pickleable work unit for one bounded reference batch."""
+    """Pickleable work unit for bounded source micro-batches."""
 
     groups: tuple[EeaGroup, ...]
     reference_directory: Path
@@ -283,7 +284,7 @@ def _reference_group_directory(root: Path, index: int, group: EeaGroup) -> Path:
 
 
 @contextmanager
-def _stage_reference_batch(
+def _stage_reference_groups(
     groups: tuple[EeaGroup, ...],
     *,
     workdir: Path,
@@ -308,17 +309,40 @@ def _stage_reference_batch(
 
 
 @contextmanager
+def _stage_reference_batch(
+    groups: tuple[EeaGroup, ...],
+    *,
+    workdir: Path,
+    threshold: int,
+    checksums: dict[str, str],
+    client: Any,
+) -> Iterator[Path]:
+    """Stage one reference batch for the legacy single-batch worker path."""
+
+    with _stage_reference_groups(
+        groups,
+        workdir=workdir,
+        threshold=threshold,
+        checksums=checksums,
+        client=client,
+    ) as root:
+        yield root
+
+
+@contextmanager
 def _open_local_reference_batch(
     groups: tuple[EeaGroup, ...],
     root: Path,
     threshold: int,
+    *,
+    start_index: int = 0,
 ) -> Iterator[tuple[OverlapReference, ...]]:
     with ExitStack() as stack:
         references = tuple(
             stack.enter_context(
                 _open_local_reference_group(
                     group,
-                    _reference_group_directory(root, index, group),
+                    _reference_group_directory(root, start_index + index, group),
                     threshold,
                 )
             )
@@ -1197,25 +1221,25 @@ def _process_reference_groups(
     http_client: Any,
     parallelism: int = 1,
 ) -> None:
-    """Process bounded reference batches while reusing downloaded sources."""
+    """Process bounded reference batches with resumable compact sidecars."""
 
+    if parallelism > 1:
+        _process_reference_groups_parallel(
+            api,
+            plans,
+            groups=groups,
+            sidecar_root=sidecar_root,
+            source_root=source_root,
+            workdir=workdir,
+            threshold=threshold,
+            checksums=checksums,
+            batch_size=batch_size,
+            progress=progress,
+            http_client=http_client,
+            parallelism=parallelism,
+        )
+        return
     for batch in _reference_group_batches(groups):
-        if parallelism > 1:
-            _process_reference_batch_parallel(
-                api,
-                plans,
-                groups=batch,
-                sidecar_root=sidecar_root,
-                source_root=source_root,
-                workdir=workdir,
-                threshold=threshold,
-                checksums=checksums,
-                batch_size=batch_size,
-                progress=progress,
-                http_client=http_client,
-                parallelism=parallelism,
-            )
-            continue
         _process_reference_batch_serial(
             api,
             plans,
@@ -1229,6 +1253,48 @@ def _process_reference_groups(
             progress=progress,
             http_client=http_client,
         )
+
+
+def _process_reference_groups_parallel(
+    api: Any,
+    plans: tuple[DatasetPlan, ...],
+    *,
+    groups: tuple[EeaGroup, ...],
+    sidecar_root: Path,
+    source_root: Path,
+    workdir: Path,
+    threshold: int,
+    checksums: dict[str, str],
+    batch_size: int,
+    progress: Progress | None,
+    http_client: Any,
+    parallelism: int,
+) -> None:
+    """Stream bounded source micro-batches through every reference batch."""
+
+    jobs = _geometry_jobs(plans)
+    if not jobs:
+        return
+    with _stage_reference_groups(
+        groups,
+        workdir=workdir,
+        threshold=threshold,
+        checksums=checksums,
+        client=http_client,
+    ) as reference_directory:
+        work = _geometry_work_units(
+            api,
+            plans,
+            groups,
+            jobs,
+            reference_directory=reference_directory,
+            sidecar_root=sidecar_root,
+            source_root=source_root,
+            threshold=threshold,
+            batch_size=batch_size,
+            parallelism=parallelism,
+        )
+        _run_geometry_workers(work, progress)
 
 
 def _process_reference_batch_serial(
@@ -1387,25 +1453,68 @@ def _geometry_chunks(
 def _process_geometry_chunk(chunk: _GeometryChunk) -> tuple[tuple[str, str], ...]:
     plans = {plan.spec.name: plan for plan in chunk.plans}
     api = HfApi(endpoint=chunk.endpoint, token=chunk.token)
-    with httpx.Client(follow_redirects=True, timeout=None) as client, _open_local_reference_batch(
-        chunk.groups,
-        chunk.reference_directory,
-        chunk.threshold,
-    ) as references:
-        for dataset, source_path in chunk.jobs:
-            _process_geometry_path(
-                api,
-                plans[dataset],
-                source_path=source_path,
-                references=references,
-                sidecar_root=chunk.sidecar_root,
-                source_root=chunk.source_root,
-                batch_size=chunk.batch_size,
-                progress=None,
-                http_client=client,
-                retain_source=True,
-            )
+    reference_batches = _indexed_reference_group_batches(chunk.groups)
+    with httpx.Client(follow_redirects=True, timeout=None) as client:
+        for jobs in _geometry_micro_batches(chunk.jobs):
+            _cache_geometry_jobs(api, plans, jobs, chunk.source_root, client)
+            try:
+                for start_index, groups in reference_batches:
+                    with _open_local_reference_batch(
+                        groups,
+                        chunk.reference_directory,
+                        chunk.threshold,
+                        start_index=start_index,
+                    ) as references:
+                        for dataset, source_path in jobs:
+                            _process_geometry_path(
+                                api,
+                                plans[dataset],
+                                source_path=source_path,
+                                references=references,
+                                sidecar_root=chunk.sidecar_root,
+                                source_root=chunk.source_root,
+                                batch_size=chunk.batch_size,
+                                progress=None,
+                                http_client=client,
+                                retain_source=True,
+                            )
+            finally:
+                _remove_cached_geometry_jobs(plans, jobs, chunk.source_root)
     return chunk.jobs
+
+
+def _cache_geometry_jobs(
+    api: Any,
+    plans: Mapping[str, DatasetPlan],
+    jobs: tuple[tuple[str, str], ...],
+    source_root: Path,
+    client: Any,
+) -> None:
+    for dataset, source_path in jobs:
+        _download_geometry_source(
+            api,
+            plans[dataset],
+            source_path,
+            source_root,
+            retain_source=True,
+            client=client,
+        )
+
+
+def _remove_cached_geometry_jobs(
+    plans: Mapping[str, DatasetPlan],
+    jobs: tuple[tuple[str, str], ...],
+    source_root: Path,
+) -> None:
+    for dataset, source_path in jobs:
+        _cached_geometry_path(source_root, plans[dataset], source_path).unlink(missing_ok=True)
+
+
+def _geometry_micro_batches(
+    jobs: tuple[tuple[str, str], ...],
+) -> Iterator[tuple[tuple[str, str], ...]]:
+    for start in range(0, len(jobs), _SOURCE_MICRO_BATCH_SIZE):
+        yield jobs[start : start + _SOURCE_MICRO_BATCH_SIZE]
 
 
 def _reference_group_batches(
@@ -1419,6 +1528,17 @@ def _reference_group_batches(
             batches.append([])
         batches[-1].append(group)
     return tuple(tuple(batch) for batch in batches)
+
+
+def _indexed_reference_group_batches(
+    groups: tuple[EeaGroup, ...],
+) -> tuple[tuple[int, tuple[EeaGroup, ...]], ...]:
+    indexed: list[tuple[int, tuple[EeaGroup, ...]]] = []
+    start_index = 0
+    for batch in _reference_group_batches(groups):
+        indexed.append((start_index, batch))
+        start_index += len(batch)
+    return tuple(indexed)
 
 
 def _starts_reference_batch(batches: list[list[EeaGroup]], group: EeaGroup) -> bool:

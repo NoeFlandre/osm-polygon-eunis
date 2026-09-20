@@ -480,7 +480,7 @@ def test_process_reference_groups_batches_reference_groups_for_all_plans(
     assert all(item[2] is client for item in seen)
 
 
-def test_process_reference_groups_dispatches_parallel_batches(
+def test_process_reference_groups_dispatches_streaming_parallel_batches(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -498,7 +498,7 @@ def test_process_reference_groups_dispatches_parallel_batches(
             (tuple(group.record_id for group in kwargs["groups"]), kwargs["parallelism"])
         )
 
-    monkeypatch.setattr(runner, "_process_reference_batch_parallel", fake_parallel)
+    monkeypatch.setattr(runner, "_process_reference_groups_parallel", fake_parallel)
     runner._process_reference_groups(
         object(),
         (plan,),
@@ -515,6 +515,17 @@ def test_process_reference_groups_dispatches_parallel_batches(
     )
 
     assert seen == [(("record",), 2)]
+
+
+def test_geometry_micro_batches_are_bounded_and_ordered(monkeypatch) -> None:
+    monkeypatch.setattr(runner, "_SOURCE_MICRO_BATCH_SIZE", 2)
+    jobs = tuple(("website", str(index)) for index in range(5))
+
+    assert list(runner._geometry_micro_batches(jobs)) == [
+        (("website", "0"), ("website", "1")),
+        (("website", "2"), ("website", "3")),
+        (("website", "4"),),
+    ]
 
 
 def test_reference_group_batches_bound_rasters_and_coalesce_vectors() -> None:
@@ -546,6 +557,10 @@ def test_reference_group_batches_bound_rasters_and_coalesce_vectors() -> None:
 
     reversed_batches = runner._reference_group_batches(vector_groups[:1] + raster_groups[:1])
     assert [[group.record_id for group in batch] for batch in reversed_batches] == [["4"], ["0"]]
+    assert [
+        (start, [group.record_id for group in batch])
+        for start, batch in runner._indexed_reference_group_batches(raster_groups + vector_groups)
+    ] == [(0, ["0", "1"]), (2, ["2", "3"]), (4, ["4", "5", "6"])]
 
 
 def test_finalize_plan_builds_manifest_and_verifies_target(monkeypatch, tmp_path: Path) -> None:

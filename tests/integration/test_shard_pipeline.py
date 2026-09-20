@@ -153,10 +153,10 @@ def test_parallel_reference_batch_processes_cached_geometry_shards(
     )
     progress: list[Mapping[str, object]] = []
 
-    runner._process_reference_batch_parallel(
+    runner._process_reference_groups(
         SimpleNamespace(endpoint="https://huggingface.co", token=None),
         (plan,),
-        groups=(group,),
+        (group,),
         sidecar_root=sidecar_root,
         source_root=source_root,
         workdir=tmp_path / "run",
@@ -173,4 +173,5 @@ def test_parallel_reference_batch_processes_cached_geometry_shards(
             sidecar_root / "website" / f"polygons__{name}.parquet.labels.parquet"
         )
         assert labels["eunis_code"].to_pylist() == ["R11"]
+    assert not list((source_root / "website").glob("*.parquet"))
     assert len(progress) == 2

@@ -29,9 +29,9 @@ may prune candidates, but never determine a label. Empty, invalid, or
 out-of-reference polygons receive null EUNIS fields. Equal-area ties use the
 ascending EUNIS code.
 
-The pipeline reads one Parquet shard at a time, uses bounded Arrow batches,
-streams temporary files, and deletes each shard after verification. It does not
-mirror a complete input or output dataset on the local disk.
+The pipeline reads bounded Parquet micro-batches, uses bounded Arrow batches,
+streams temporary files, and deletes source shards after their final reference
+pass. It does not mirror a complete input or output dataset on the local disk.
 
 The EEA resolver pins the catalog records, public asset metadata, the official
 2021 classification workbook, and downloaded SHA-256 checksums in each target's
