@@ -19,7 +19,7 @@ deleting it. Raster groups are capped at two per batch; adjacent vector groups
 share one batch. Each worker retains at most 128 source shards at a time, which
 keeps HDD usage bounded without redownloading a shard for each reference pass.
 It requires a valid `HF_TOKEN` with write access to the target repositories.
-Each release uses four bounded worker processes over disjoint source shards and
+Each release uses eight bounded worker processes over disjoint source shards and
 shared read-only reference files:
 
 ```bash
