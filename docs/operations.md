@@ -16,7 +16,7 @@ uv run osm-polygon-eunis plan
 The release command keeps four-column label sidecars, stages all EEA assets once,
 and processes each source shard through the bounded EEA reference batches before
 deleting it. Raster groups are capped at two per batch; adjacent vector groups
-share one batch. Each worker retains at most 32 source shards at a time, which
+share one batch. Each worker retains at most 128 source shards at a time, which
 keeps HDD usage bounded without redownloading a shard for each reference pass.
 It requires a valid `HF_TOKEN` with write access to the target repositories.
 Each release uses four bounded worker processes over disjoint source shards and
