@@ -49,6 +49,7 @@ Progress = Callable[[Mapping[str, object]], None]
 _RASTER_GROUP_BATCH_SIZE = 2
 _SOURCE_WORKERS = 8
 _SOURCE_MICRO_BATCH_SIZE = 128
+_GEOMETRY_TASKS_PER_WORKER = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -1294,7 +1295,7 @@ def _process_reference_groups_parallel(
             batch_size=batch_size,
             parallelism=parallelism,
         )
-        _run_geometry_workers(work, progress)
+        _run_geometry_workers(work, progress, max_workers=parallelism)
 
 
 def _process_reference_batch_serial(
@@ -1371,7 +1372,7 @@ def _process_reference_batch_parallel(
             batch_size=batch_size,
             parallelism=parallelism,
         )
-        _run_geometry_workers(work, progress)
+        _run_geometry_workers(work, progress, max_workers=parallelism)
 
 
 def _geometry_jobs(plans: tuple[DatasetPlan, ...]) -> tuple[tuple[str, str], ...]:
@@ -1417,8 +1418,11 @@ def _geometry_work_units(
 def _run_geometry_workers(
     work: tuple[_GeometryChunk, ...],
     progress: Progress | None,
+    *,
+    max_workers: int,
 ) -> None:
-    with ProcessPoolExecutor(max_workers=len(work)) as executor:
+    worker_count = min(max(max_workers, 1), len(work))
+    with ProcessPoolExecutor(max_workers=worker_count) as executor:
         for completed in executor.map(_process_geometry_chunk, work):
             _report_completed_geometry(completed, progress)
 
@@ -1443,11 +1447,15 @@ def _geometry_chunks(
     jobs: tuple[tuple[str, str], ...],
     parallelism: int,
 ) -> tuple[tuple[tuple[str, str], ...], ...]:
+    if not jobs:
+        return ()
     worker_count = min(max(parallelism, 1), len(jobs))
-    chunks: list[list[tuple[str, str]]] = [[] for _ in range(worker_count)]
-    for index, job in enumerate(jobs):
-        chunks[index % worker_count].append(job)
-    return tuple(tuple(chunk) for chunk in chunks)
+    task_count = min(len(jobs), worker_count * _GEOMETRY_TASKS_PER_WORKER)
+    chunk_size = max(1, (len(jobs) + task_count - 1) // task_count)
+    return tuple(
+        jobs[start : start + chunk_size]
+        for start in range(0, len(jobs), chunk_size)
+    )
 
 
 def _process_geometry_chunk(chunk: _GeometryChunk) -> tuple[tuple[str, str], ...]:

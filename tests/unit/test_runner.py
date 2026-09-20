@@ -528,6 +528,20 @@ def test_geometry_micro_batches_are_bounded_and_ordered(monkeypatch) -> None:
     ]
 
 
+def test_geometry_chunks_are_contiguous_and_dynamically_sized() -> None:
+    jobs = tuple(("website", str(index)) for index in range(10))
+
+    chunks = runner._geometry_chunks(jobs, parallelism=2)
+
+    assert chunks == (
+        (("website", "0"), ("website", "1")),
+        (("website", "2"), ("website", "3")),
+        (("website", "4"), ("website", "5")),
+        (("website", "6"), ("website", "7")),
+        (("website", "8"), ("website", "9")),
+    )
+
+
 def test_reference_group_batches_bound_rasters_and_coalesce_vectors() -> None:
     raster = _asset("/Prob_R11.tif")
     raster_groups = tuple(
