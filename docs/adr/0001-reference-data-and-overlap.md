@@ -28,8 +28,10 @@ Reference groups are staged once but opened in bounded batches: at most two
 raster groups are opened together, while adjacent vector groups share a batch.
 Workers retain only a bounded source micro-batch while applying every reference
 batch, then delete those source shards. Compact sidecars make interrupted
-batches resumable. This avoids mirroring the input inventory while also avoiding
-one source download per reference group.
+batches resumable. Each worker process reuses opened reference handles and their
+decoded-tile caches across geometry tasks. This avoids mirroring the input
+inventory while also avoiding one source download per reference group or
+repeated reference reads within a worker.
 
 ## Consequences
 

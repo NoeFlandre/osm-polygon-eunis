@@ -542,6 +542,32 @@ def test_geometry_chunks_are_contiguous_and_dynamically_sized() -> None:
     )
 
 
+def test_worker_reference_batch_reuses_open_handles(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    group = EeaGroup(
+        "record", "title", "folder", "service", {}, (), _asset("/habitats.gpkg", code=None)
+    )
+    opened: list[Path] = []
+
+    @contextmanager
+    def fake_open(group, directory, threshold):
+        del group, threshold
+        opened.append(directory)
+        yield object()
+
+    monkeypatch.setattr(runner, "_open_local_reference_group", fake_open)
+    runner._close_worker_reference_cache()
+
+    first = runner._worker_reference_batch((group,), tmp_path, 0, 0)
+    second = runner._worker_reference_batch((group,), tmp_path, 0, 0)
+
+    assert first is second
+    assert len(opened) == 1
+    runner._close_worker_reference_cache()
+
+
 def test_reference_group_batches_bound_rasters_and_coalesce_vectors() -> None:
     raster = _asset("/Prob_R11.tif")
     raster_groups = tuple(

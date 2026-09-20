@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import json
 import shutil
 from collections.abc import Callable, Iterator, Mapping
@@ -50,6 +51,11 @@ _RASTER_GROUP_BATCH_SIZE = 2
 _SOURCE_WORKERS = 8
 _SOURCE_MICRO_BATCH_SIZE = 128
 _GEOMETRY_TASKS_PER_WORKER = 4
+
+_WORKER_REFERENCE_STACKS: dict[tuple[str, int, int, tuple[str, ...]], ExitStack] = {}
+_WORKER_REFERENCES: dict[
+    tuple[str, int, int, tuple[str, ...]], tuple[OverlapReference, ...]
+] = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -350,6 +356,48 @@ def _open_local_reference_batch(
             for index, group in enumerate(groups)
         )
         yield references
+
+
+def _worker_reference_batch(
+    groups: tuple[EeaGroup, ...],
+    root: Path,
+    threshold: int,
+    start_index: int,
+) -> tuple[OverlapReference, ...]:
+    """Reuse one opened reference batch for the lifetime of a worker process."""
+
+    key = (str(root), start_index, threshold, tuple(group.record_id for group in groups))
+    cached = _WORKER_REFERENCES.get(key)
+    if cached is not None:
+        return cached
+    stack = ExitStack()
+    try:
+        references = tuple(
+            stack.enter_context(
+                _open_local_reference_group(
+                    group,
+                    _reference_group_directory(root, start_index + index, group),
+                    threshold,
+                )
+            )
+            for index, group in enumerate(groups)
+        )
+    except BaseException:
+        stack.close()
+        raise
+    _WORKER_REFERENCE_STACKS[key] = stack
+    _WORKER_REFERENCES[key] = references
+    return references
+
+
+def _close_worker_reference_cache() -> None:
+    for stack in _WORKER_REFERENCE_STACKS.values():
+        stack.close()
+    _WORKER_REFERENCE_STACKS.clear()
+    _WORKER_REFERENCES.clear()
+
+
+atexit.register(_close_worker_reference_cache)
 
 
 @contextmanager
@@ -1467,25 +1515,25 @@ def _process_geometry_chunk(chunk: _GeometryChunk) -> tuple[tuple[str, str], ...
             _cache_geometry_jobs(api, plans, jobs, chunk.source_root, client)
             try:
                 for start_index, groups in reference_batches:
-                    with _open_local_reference_batch(
+                    references = _worker_reference_batch(
                         groups,
                         chunk.reference_directory,
                         chunk.threshold,
                         start_index=start_index,
-                    ) as references:
-                        for dataset, source_path in jobs:
-                            _process_geometry_path(
-                                api,
-                                plans[dataset],
-                                source_path=source_path,
-                                references=references,
-                                sidecar_root=chunk.sidecar_root,
-                                source_root=chunk.source_root,
-                                batch_size=chunk.batch_size,
-                                progress=None,
-                                http_client=client,
-                                retain_source=True,
-                            )
+                    )
+                    for dataset, source_path in jobs:
+                        _process_geometry_path(
+                            api,
+                            plans[dataset],
+                            source_path=source_path,
+                            references=references,
+                            sidecar_root=chunk.sidecar_root,
+                            source_root=chunk.source_root,
+                            batch_size=chunk.batch_size,
+                            progress=None,
+                            http_client=client,
+                            retain_source=True,
+                        )
             finally:
                 _remove_cached_geometry_jobs(plans, jobs, chunk.source_root)
     return chunk.jobs

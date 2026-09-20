@@ -18,6 +18,8 @@ and processes each source shard through the bounded EEA reference batches before
 deleting it. Raster groups are capped at two per batch; adjacent vector groups
 share one batch. Each worker retains at most 128 source shards at a time, which
 keeps HDD usage bounded without redownloading a shard for each reference pass.
+Each worker process also reuses its opened reference handles and decoded-tile
+caches across its geometry tasks.
 It requires a valid `HF_TOKEN` with write access to the target repositories.
 Each release uses eight bounded worker processes over disjoint source shards and
 shared read-only reference files:
