@@ -47,7 +47,7 @@ from .transform import (
 
 Progress = Callable[[Mapping[str, object]], None]
 _RASTER_GROUP_BATCH_SIZE = 2
-_SOURCE_WORKERS = 2
+_SOURCE_WORKERS = 4
 
 
 @dataclass(frozen=True, slots=True)

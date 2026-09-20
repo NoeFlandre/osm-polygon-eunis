@@ -18,7 +18,7 @@ reference batches, and reuses each downloaded source geometry shard across
 batch passes. Raster groups are capped at two per batch; adjacent vector groups
 share one batch. This limits peak reference-data memory while avoiding one full
 source pass per individual group. It requires a valid `HF_TOKEN` with write
-access to the target repositories. Each batch uses two bounded worker
+access to the target repositories. Each batch uses four bounded worker
 processes over disjoint source shards and shared read-only reference files:
 
 ```bash
