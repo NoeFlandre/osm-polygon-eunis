@@ -453,3 +453,101 @@ def test_resolved_layer_manifest_validation(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert resolve_eea_layers(config, tmp_path)[0].code == "R11"
+
+
+def test_window_keeps_edge_cells_that_nearest_rounding_drops(tmp_path: Path) -> None:
+    """Overlap must include an edge cell a nearest-rounded window would drop.
+
+    The polygon starts a third of the way into column 62 and is just over two
+    cells wide, so rounding the offset and length to the nearest cell yields
+    columns 62-63. That stops one column short of column 64, which lives in
+    the next raster tile, so the only positive cell is never even read.
+    """
+
+    path = tmp_path / "Prob_R11_100m.tif"
+    values = np.zeros((4, 128), dtype="uint8")
+    values[0, 64] = 1  # sits in the second 64-wide tile
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        width=128,
+        height=4,
+        count=1,
+        dtype="uint8",
+        crs="EPSG:3035",
+        transform=from_origin(0, 40, 10, 10),
+        nodata=0,
+    ) as dataset:
+        dataset.write(values, 1)
+
+    reference = RasterReference((RasterLayer("R11", "steppe", path, "EEA-test"),))
+
+    # x 623.3 -> 643.8 reaches into column 64 (x 640..650); y stays in row 0.
+    result = reference.overlap(box(623.3, 33.3, 643.8, 39.0))
+
+    assert result.code == "R11", "edge cell in the next tile was dropped"
+    assert result.overlap_percentage is not None
+    assert result.overlap_percentage > 0.0
+
+
+def test_window_rounds_outwards_to_cover_bounds(tmp_path: Path) -> None:
+    """The window must cover the polygon's bounding box, never shrink inside it."""
+
+    raster = _write_raster(tmp_path / "Prob_R11_100m.tif", [[1, 1], [1, 1]])
+    reference = RasterReference((RasterLayer("R11", "steppe", raster, "EEA-test"),))
+    with reference as opened:
+        _, dataset = opened._datasets[0]
+        polygon = box(4.5, 4.5, 15.5, 15.5)
+        window = opened._window(dataset, polygon)
+
+    assert window is not None
+    assert (window.col_off, window.row_off) == (0, 0)
+    assert (window.width, window.height) == (2, 2)
+
+
+def test_wgs84_envelope_covers_the_curved_projected_boundary() -> None:
+    """The prune envelope must be a superset of the true projected extent.
+
+    Taking only the four corners under-covers an equal-area projection, whose
+    edges bow outwards, so densified bounds plus a pad are required.
+    """
+
+    from pyproj import Transformer
+
+    from osm_polygon_eunis.reference import wgs84_envelope
+
+    bounds = (2580000.0, 1360000.0, 7350000.0, 5445000.0)
+    left, bottom, right, top = wgs84_envelope(bounds)
+
+    transformer = Transformer.from_crs("EPSG:3035", "EPSG:4326", always_xy=True)
+    # Sample the whole projected boundary, not just its corners.
+    steps = [i / 50 for i in range(51)]
+    xs: list[float] = []
+    ys: list[float] = []
+    for t in steps:
+        x = bounds[0] + t * (bounds[2] - bounds[0])
+        y = bounds[1] + t * (bounds[3] - bounds[1])
+        for px, py in ((x, bounds[1]), (x, bounds[3]), (bounds[0], y), (bounds[2], y)):
+            lon, lat = transformer.transform(px, py)
+            xs.append(lon)
+            ys.append(lat)
+
+    assert left <= min(xs)
+    assert right >= max(xs)
+    assert bottom <= min(ys)
+    assert top >= max(ys)
+
+
+def test_raster_reference_reports_no_extent_until_opened(tmp_path: Path) -> None:
+    """A closed reference has no datasets, so it cannot claim an extent."""
+
+    raster = _write_raster(tmp_path / "Prob_R11_100m.tif", [[1, 0], [0, 0]])
+    reference = RasterReference((RasterLayer("R11", "steppe", raster, "EEA-test"),))
+
+    assert reference.source_extent_wgs84 is None
+
+    with reference as opened:
+        envelope = opened.source_extent_wgs84
+        assert envelope is not None
+        assert envelope == opened.source_extent_wgs84  # cached

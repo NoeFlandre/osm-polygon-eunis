@@ -16,7 +16,7 @@ from typing import Any, ClassVar, cast
 
 import numpy as np
 import rasterio
-from pyproj import CRS
+from pyproj import CRS, Transformer
 from rasterio.errors import NotGeoreferencedWarning
 from rasterio.features import shapes
 from rasterio.io import MemoryFile
@@ -32,7 +32,7 @@ from .matching import choose_winner
 
 _LAYER_CODE = re.compile(r"^Prob_(?P<code>[A-Z][A-Z0-9.]+)_\d+m\.tif$")
 _RASTER_TILE_SIZE = 64
-_RASTER_TILE_CACHE_SIZE = 1024
+_RASTER_TILE_CACHE_SIZE = 8192
 _GEOPACKAGE_TILE_CACHE_SIZE = 256
 
 
@@ -103,6 +103,25 @@ class RasterReference:
         self._stack: ExitStack | None = None
         self._datasets: tuple[tuple[RasterLayer, rasterio.DatasetReader], ...] = ()
         self._tile_cache: OrderedDict[tuple[str, int, int], BaseGeometry | None] = OrderedDict()
+        self._source_extent_wgs84: tuple[float, float, float, float] | None = None
+
+    @property
+    def source_extent_wgs84(self) -> tuple[float, float, float, float] | None:
+        """Conservative WGS84 box covering every open layer, or None if closed."""
+
+        if not self._datasets:
+            return None
+        if self._source_extent_wgs84 is None:
+            boxes = [dataset.bounds for _, dataset in self._datasets]
+            self._source_extent_wgs84 = wgs84_envelope(
+                (
+                    min(b.left for b in boxes),
+                    min(b.bottom for b in boxes),
+                    max(b.right for b in boxes),
+                    max(b.top for b in boxes),
+                )
+            )
+        return self._source_extent_wgs84
 
     def __enter__(self) -> RasterReference:
         if self._stack is not None:
@@ -161,8 +180,18 @@ class RasterReference:
         datasets: tuple[tuple[RasterLayer, rasterio.DatasetReader], ...],
     ) -> EunisResult:
         candidates: list[OverlapCandidate] = []
+        # Every EEA layer in a group shares one grid, so the covering window and
+        # the raster-bounds test depend on the grid, not the layer. Resolving
+        # them once per grid keeps identical windows while avoiding tens of
+        # repeated coordinate computations for each polygon.
+        windows: dict[tuple[object, ...], Window | None] = {}
         for layer, dataset in datasets:
-            cell_geometry = self._positive_cell_geometry(layer, dataset, polygon)
+            window = self._shared_window(windows, dataset, polygon)
+            if window is None:
+                continue
+            cell_geometry = _merge_tile_cells(
+                self._raster_tile_cells(layer, dataset, window)
+            )
             if cell_geometry is not None:
                 candidates.append(
                     OverlapCandidate(
@@ -173,6 +202,28 @@ class RasterReference:
                     )
                 )
         return choose_winner(polygon, candidates, source_version=self._source_version)
+
+    def _shared_window(
+        self,
+        windows: dict[tuple[object, ...], Window | None],
+        dataset: rasterio.DatasetReader,
+        polygon: BaseGeometry,
+    ) -> Window | None:
+        key = (tuple(dataset.transform)[:6], dataset.width, dataset.height)
+        if key in windows:
+            return windows[key]
+        window = self._covering_window(dataset, polygon)
+        windows[key] = window
+        return window
+
+    def _covering_window(
+        self,
+        dataset: rasterio.DatasetReader,
+        polygon: BaseGeometry,
+    ) -> Window | None:
+        if not polygon.intersects(box(*dataset.bounds)):
+            return None
+        return self._window(dataset, polygon)
 
     @staticmethod
     def _validate_crs(dataset: rasterio.DatasetReader, path: Path) -> None:
@@ -240,14 +291,18 @@ class RasterReference:
     ) -> Window | None:
         try:
             window = from_bounds(*polygon.bounds, transform=dataset.transform)
-            full_window = Window.from_slices(
-                (0, dataset.height),
-                (0, dataset.width),
-            )
-            window = window.intersection(full_window).round_offsets().round_lengths()
         except WindowError:
             return None
-        return window if window.width > 0 and window.height > 0 else None
+        # Round outwards. Rounding to nearest can shrink the window inside the
+        # polygon's bounding box and silently drop the partially covered cells
+        # on its edges, which undercounts the overlap area.
+        col_off = max(0, math.floor(window.col_off))
+        row_off = max(0, math.floor(window.row_off))
+        col_end = min(dataset.width, math.ceil(window.col_off + window.width))
+        row_end = min(dataset.height, math.ceil(window.row_off + window.height))
+        if col_end <= col_off or row_end <= row_off:
+            return None
+        return Window.from_slices((row_off, row_end), (col_off, col_end))
 
     def _positive_mask(
         self,
@@ -797,6 +852,24 @@ class GeoPackageReference:
         )
         min_x, min_y, max_x, max_y = polygon.bounds
         return connection.execute(query, (min_x, max_x, min_y, max_y)).fetchall()
+
+
+def wgs84_envelope(
+    bounds: tuple[float, float, float, float],
+    source_crs: str = "EPSG:3035",
+    pad: float = 1.0,
+) -> tuple[float, float, float, float]:
+    """Return a conservative WGS84 envelope for a projected extent.
+
+    ``transform_bounds`` densifies the edges, so the box covers the curved
+    projected boundary rather than only its corners, and the pad keeps it a
+    strict superset. It prunes polygons that cannot reach a reference at all;
+    every surviving polygon is still projected and intersected exactly.
+    """
+
+    transformer = Transformer.from_crs(source_crs, "EPSG:4326", always_xy=True)
+    left, bottom, right, top = transformer.transform_bounds(*bounds, densify_pts=101)
+    return (left - pad, bottom - pad, right + pad, top + pad)
 
 
 def _merge_tile_cells(cells: list[BaseGeometry]) -> BaseGeometry | None:

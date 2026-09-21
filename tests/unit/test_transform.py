@@ -187,3 +187,53 @@ def test_build_label_map_joins_polygon_ids_to_a_sidecar_in_batches(tmp_path: Pat
         "a": EunisResult("R11", "steppe", 50.0, "test"),
         "b": EunisResult(None, None, None, None),
     }
+
+
+def test_reaches_prunes_only_boxes_outside_the_envelope() -> None:
+    """The lon/lat prune must keep anything that could still touch a reference."""
+
+    from shapely.geometry import box as shapely_box
+
+    from osm_polygon_eunis.transform import _reaches
+
+    envelope = (-10.0, 30.0, 40.0, 70.0)
+
+    assert _reaches(envelope, shapely_box(0, 40, 1, 41)) is True  # inside
+    assert _reaches(envelope, shapely_box(-12, 40, -9, 41)) is True  # straddles the edge
+    assert _reaches(envelope, shapely_box(-10, 30, -10, 30)) is True  # touches a corner
+    assert _reaches(envelope, shapely_box(-30, 40, -20, 41)) is False  # west
+    assert _reaches(envelope, shapely_box(50, 40, 60, 41)) is False  # east
+    assert _reaches(envelope, shapely_box(0, 10, 1, 20)) is False  # south
+    assert _reaches(envelope, shapely_box(0, 80, 1, 90)) is False  # north
+
+
+def test_reaches_is_permissive_without_an_envelope_or_geometry() -> None:
+    """An unknown extent or unparsable geometry must never prune."""
+
+    from shapely.geometry import box as shapely_box
+
+    from osm_polygon_eunis.transform import _reaches
+
+    assert _reaches(None, shapely_box(0, 0, 1, 1)) is True
+    assert _reaches((-10.0, 30.0, 40.0, 70.0), None) is True
+
+
+def test_reference_envelopes_reads_optional_extent() -> None:
+    """References without an extent report None rather than failing."""
+
+    from osm_polygon_eunis.domain import EunisResult
+    from osm_polygon_eunis.transform import _reference_envelopes
+
+    class _WithExtent:
+        source_extent_wgs84 = (-1.0, -2.0, 3.0, 4.0)
+
+        def overlap(self, polygon: object) -> EunisResult:  # pragma: no cover - unused
+            return EunisResult(None, None, None, None)
+
+    class _WithoutExtent:
+        def overlap(self, polygon: object) -> EunisResult:  # pragma: no cover - unused
+            return EunisResult(None, None, None, None)
+
+    envelopes = _reference_envelopes((_WithExtent(), _WithoutExtent()))
+
+    assert envelopes == ((-1.0, -2.0, 3.0, 4.0), None)

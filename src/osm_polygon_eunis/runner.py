@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import atexit
+import hashlib
 import json
+import os
 import shutil
 from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import ProcessPoolExecutor
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -117,6 +119,7 @@ class _GeometryChunk:
     batch_size: int
     endpoint: str
     token: str | bool | None
+    reference_signature: str
 
 
 def _settings(config_path: Path) -> tuple[str, str, int, Mapping[str, object]]:
@@ -224,7 +227,26 @@ def _stage_reference_group(
     directory.mkdir(parents=True, exist_ok=True)
     for asset in _reference_assets_for_staging(group):
         path = directory / _asset_filename(asset)
-        checksums[_asset_key(group, asset)] = download_asset(client, asset, path)
+        digest = _staged_asset_digest(asset, path)
+        if digest is None:
+            digest = download_asset(client, asset, path)
+        checksums[_asset_key(group, asset)] = digest
+
+
+def _staged_asset_digest(asset: RemoteAsset, path: Path) -> str | None:
+    """Return the SHA-256 of an already-staged asset, or None to download it.
+
+    The digest is always recomputed from the bytes on disk, so a reused file is
+    held to exactly the same checksum contract as a freshly downloaded one.
+    """
+
+    if not path.is_file() or path.stat().st_size != asset.size:
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _reference_assets_for_staging(group: EeaGroup) -> tuple[RemoteAsset, ...]:
@@ -286,6 +308,89 @@ def _open_local_vector_reference(
         yield reference
 
 
+def _sidecar_root(workdir: Path) -> Path:
+    """Resolve where compact label sidecars live.
+
+    Defaults to ``<workdir>/sidecars``. ``EUNIS_SIDECAR_DIR`` moves these small,
+    repeatedly rewritten files onto faster storage; they are a few megabytes in
+    total but are read-modify-written once per reference batch.
+    """
+
+    override = os.environ.get("EUNIS_SIDECAR_DIR")
+    root = Path(override) if override else workdir / "sidecars"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _checkpoint_path(sidecar: Path) -> Path:
+    return sidecar.with_name(f"{sidecar.name}.done")
+
+
+# Bump when a change alters computed overlap values, so stored checkpoints from
+# an older kernel are rejected instead of being trusted. v2 fixes a raster
+# window that rounded to the nearest cell and dropped covered edge cells.
+_OVERLAP_KERNEL_VERSION: int = 2
+
+
+def _reference_signature(checksums: Mapping[str, str], threshold: int) -> str:
+    payload = json.dumps(
+        {
+            "checksums": dict(sorted(checksums.items())),
+            "threshold": threshold,
+            "kernel": _OVERLAP_KERNEL_VERSION,
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _completed_batches(sidecar: Path, signature: str) -> set[int]:
+    """Read which reference batches are already merged into this sidecar."""
+
+    try:
+        payload = json.loads(_checkpoint_path(sidecar).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    if not isinstance(payload, Mapping) or payload.get("signature") != signature:
+        return set()
+    batches = payload.get("batches")
+    if not isinstance(batches, list):
+        return set()
+    return {item for item in batches if isinstance(item, int)}
+
+
+def _record_completed_batch(sidecar: Path, signature: str, completed: set[int]) -> None:
+    """Persist the merged-batch set atomically, after the sidecar is in place."""
+
+    path = _checkpoint_path(sidecar)
+    temporary = path.with_name(f"{path.name}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps({"signature": signature, "batches": sorted(completed)}),
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+
+
+def _reference_cache_root(workdir: Path) -> Path:
+    """Resolve where EEA reference assets are staged.
+
+    Defaults to the workdir. ``EUNIS_REFERENCE_DIR`` moves only these
+    read-only, random-access assets onto faster storage; sidecars and source
+    shards stay in the workdir. The staged tree remains a TemporaryDirectory
+    and is removed when the release exits.
+    """
+
+    override = os.environ.get("EUNIS_REFERENCE_DIR")
+    if not override:
+        return workdir
+    root = Path(override)
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
 def _reference_group_directory(root: Path, index: int, group: EeaGroup) -> Path:
     return root / f"{index:02d}-{group.record_id[:8]}"
 
@@ -300,11 +405,7 @@ def _stage_reference_groups(
     client: Any,
 ) -> Iterator[Path]:
     first_record = groups[0].record_id[:8]
-    with TemporaryDirectory(
-        dir=workdir,
-        prefix=f"reference-{first_record}-",
-    ) as directory:
-        root = Path(directory)
+    with _reference_staging_root(workdir, first_record) as root:
         for index, group in enumerate(groups):
             _stage_reference_group(
                 client,
@@ -313,6 +414,29 @@ def _stage_reference_groups(
                 checksums,
             )
         yield root
+
+
+@contextmanager
+def _reference_staging_root(workdir: Path, first_record: str) -> Iterator[Path]:
+    """Yield the staging root, persisting it only when an override is set.
+
+    Without ``EUNIS_REFERENCE_DIR`` this is the original TemporaryDirectory in
+    the workdir. With it, the tree is kept under a stable name so an
+    interrupted release can re-verify the staged assets instead of
+    re-downloading them.
+    """
+
+    override = os.environ.get("EUNIS_REFERENCE_DIR")
+    if not override:
+        with TemporaryDirectory(
+            dir=workdir,
+            prefix=f"reference-{first_record}-",
+        ) as directory:
+            yield Path(directory)
+        return
+    root = Path(override) / f"reference-{first_record}"
+    root.mkdir(parents=True, exist_ok=True)
+    yield root
 
 
 @contextmanager
@@ -1185,7 +1309,7 @@ def run_release(
     plans = plan_datasets(api)
     _duplicate_outputs(api, plans, token)
     groups = resolve_config(reference_config)
-    sidecar_root = workdir / "sidecars"
+    sidecar_root = _sidecar_root(workdir)
     checksums: dict[str, str] = {}
     with _source_cache(workdir) as source_root, _http_client(None) as reusable_client:
         reference_identity = _reference_manifest(
@@ -1342,6 +1466,7 @@ def _process_reference_groups_parallel(
             threshold=threshold,
             batch_size=batch_size,
             parallelism=parallelism,
+            reference_signature=_reference_signature(checksums, threshold),
         )
         _run_geometry_workers(work, progress, max_workers=parallelism)
 
@@ -1419,6 +1544,7 @@ def _process_reference_batch_parallel(
             threshold=threshold,
             batch_size=batch_size,
             parallelism=parallelism,
+            reference_signature=_reference_signature(checksums, threshold),
         )
         _run_geometry_workers(work, progress, max_workers=parallelism)
 
@@ -1443,6 +1569,7 @@ def _geometry_work_units(
     threshold: int,
     batch_size: int,
     parallelism: int,
+    reference_signature: str,
 ) -> tuple[_GeometryChunk, ...]:
     endpoint = str(getattr(api, "endpoint", None) or "https://huggingface.co")
     token = getattr(api, "token", None)
@@ -1458,6 +1585,7 @@ def _geometry_work_units(
             batch_size=batch_size,
             endpoint=endpoint,
             token=token,
+            reference_signature=reference_signature,
         )
         for chunk in _geometry_chunks(jobs, parallelism)
     )
@@ -1510,18 +1638,33 @@ def _process_geometry_chunk(chunk: _GeometryChunk) -> tuple[tuple[str, str], ...
     plans = {plan.spec.name: plan for plan in chunk.plans}
     api = HfApi(endpoint=chunk.endpoint, token=chunk.token)
     reference_batches = _indexed_reference_group_batches(chunk.groups)
+    batch_indexes = {start_index for start_index, _ in reference_batches}
     with httpx.Client(follow_redirects=True, timeout=None) as client:
-        for jobs in _geometry_micro_batches(chunk.jobs):
+        for micro_batch in _geometry_micro_batches(chunk.jobs):
+            pending = {
+                job: _completed_batches(
+                    _sidecar_path(chunk.sidecar_root, plans[job[0]].spec, job[1]),
+                    chunk.reference_signature,
+                )
+                for job in micro_batch
+            }
+            # Never fetch a shard whose every reference batch is already merged.
+            jobs = tuple(job for job in micro_batch if not batch_indexes <= pending[job])
+            if not jobs:
+                continue
             _cache_geometry_jobs(api, plans, jobs, chunk.source_root, client)
             try:
                 for start_index, groups in reference_batches:
+                    outstanding = [job for job in jobs if start_index not in pending[job]]
+                    if not outstanding:
+                        continue
                     references = _worker_reference_batch(
                         groups,
                         chunk.reference_directory,
                         chunk.threshold,
                         start_index=start_index,
                     )
-                    for dataset, source_path in jobs:
+                    for dataset, source_path in outstanding:
                         _process_geometry_path(
                             api,
                             plans[dataset],
@@ -1533,6 +1676,13 @@ def _process_geometry_chunk(chunk: _GeometryChunk) -> tuple[tuple[str, str], ...
                             progress=None,
                             http_client=client,
                             retain_source=True,
+                        )
+                        completed = pending[(dataset, source_path)]
+                        completed.add(start_index)
+                        _record_completed_batch(
+                            _sidecar_path(chunk.sidecar_root, plans[dataset].spec, source_path),
+                            chunk.reference_signature,
+                            completed,
                         )
             finally:
                 _remove_cached_geometry_jobs(plans, jobs, chunk.source_root)
@@ -1563,7 +1713,10 @@ def _remove_cached_geometry_jobs(
     source_root: Path,
 ) -> None:
     for dataset, source_path in jobs:
-        _cached_geometry_path(source_root, plans[dataset], source_path).unlink(missing_ok=True)
+        cached = _cached_geometry_path(source_root, plans[dataset], source_path)
+        # Best effort: reclaiming a consumed shard must never fail a release.
+        with suppress(OSError):
+            cached.unlink(missing_ok=True)
 
 
 def _geometry_micro_batches(

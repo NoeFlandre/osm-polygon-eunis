@@ -240,3 +240,19 @@ def test_candidate_permutation_does_not_change_result(polygon, geometries) -> No
     assert choose_winner(polygon, candidates, source_version="test") == choose_winner(
         polygon, tuple(reversed(candidates)), source_version="test"
     )
+
+
+def test_intersection_area_is_none_for_unusable_candidate_geometry() -> None:
+    """An empty or invalid candidate contributes nothing."""
+
+    from shapely.geometry import Polygon, box
+
+    from osm_polygon_eunis.domain import OverlapCandidate
+    from osm_polygon_eunis.matching import _intersection_area
+
+    polygon = box(0, 0, 10, 10)
+    empty = OverlapCandidate("R11", "steppe", Polygon(), components_are_disjoint=False)
+    assert _intersection_area(polygon, empty) is None
+
+    disjoint = OverlapCandidate("R11", "steppe", box(50, 50, 60, 60), components_are_disjoint=False)
+    assert _intersection_area(polygon, disjoint) is None

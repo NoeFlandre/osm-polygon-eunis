@@ -21,6 +21,34 @@ class OverlapReference(Protocol):
     def overlap(self, polygon: BaseGeometry | None) -> EunisResult: ...
 
 
+_EMPTY_RESULT = EunisResult(None, None, None, None)
+
+
+def _reference_envelopes(
+    references: tuple[OverlapReference, ...],
+) -> tuple[tuple[float, float, float, float] | None, ...]:
+    """Read each reference's conservative WGS84 extent, None when unknown."""
+
+    return tuple(getattr(reference, "source_extent_wgs84", None) for reference in references)
+
+
+def _reaches(
+    envelope: tuple[float, float, float, float] | None,
+    geometry: BaseGeometry | None,
+) -> bool:
+    """True unless the geometry's lon/lat box is disjoint from the envelope.
+
+    A disjoint box means the projected polygon cannot meet that reference, so
+    its overlap would be empty. Unknown extents always return True.
+    """
+
+    if envelope is None or geometry is None:
+        return True
+    min_x, min_y, max_x, max_y = geometry.bounds
+    left, bottom, right, top = envelope
+    return not (max_x < left or min_x > right or max_y < bottom or min_y > top)
+
+
 def _validate_batch_size(batch_size: int) -> None:
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
@@ -114,9 +142,13 @@ def enrich_parquet_shard(
         for batch in parquet_file.iter_batches(batch_size=batch_size):
             table = pa.Table.from_batches([batch], schema=source_schema)
             results = []
+            envelope = _reference_envelopes((reference,))[0]
             for value in table[geometry_column].to_pylist():
-                geometry = to_equal_area(parse_geometry(value))
-                results.append(reference.overlap(geometry))
+                parsed = parse_geometry(value)
+                if not _reaches(envelope, parsed):
+                    results.append(_EMPTY_RESULT)
+                    continue
+                results.append(reference.overlap(to_equal_area(parsed)))
             writer.write_table(_append_results(table, results))
             rows += batch.num_rows
     return rows
@@ -247,11 +279,24 @@ def _updated_results(
     previous: list[EunisResult],
     references: tuple[OverlapReference, ...],
 ) -> list[EunisResult]:
+    envelopes = _reference_envelopes(references)
     results: list[EunisResult] = []
     for value, existing in zip(geometries, previous, strict=True):
-        geometry = to_equal_area(parse_geometry(value))
+        parsed = parse_geometry(value)
+        reachable = tuple(
+            reference
+            for reference, envelope in zip(references, envelopes, strict=True)
+            if _reaches(envelope, parsed)
+        )
+        if not reachable:
+            # Every reference is out of reach, so each overlap would be empty
+            # and would leave the existing result unchanged. Skip the
+            # projection entirely rather than compute a guaranteed miss.
+            results.append(existing)
+            continue
+        geometry = to_equal_area(parsed)
         result = existing
-        for reference in references:
+        for reference in reachable:
             result = prefer_result(result, reference.overlap(geometry))
         results.append(result)
     return results

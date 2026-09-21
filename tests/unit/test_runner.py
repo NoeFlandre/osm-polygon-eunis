@@ -887,3 +887,143 @@ def test_verify_no_op_dataset_reuses_manifest_expectations(monkeypatch, tmp_path
 
     assert result.no_op is True
     assert result.expectations == (ShardExpectation("polygons/a.parquet", 1, "schema"),)
+
+
+def test_checkpoints_persist_accumulate_and_invalidate(tmp_path: Path) -> None:
+    """Checkpoints must only be trusted for the reference they were written for."""
+
+    from osm_polygon_eunis.runner import (
+        _completed_batches,
+        _record_completed_batch,
+        _reference_signature,
+    )
+
+    sidecar = tmp_path / "shard.labels.parquet"
+    signature = _reference_signature({"a": "aa", "b": "bb"}, 0)
+    other = _reference_signature({"a": "aa", "b": "CHANGED"}, 0)
+
+    assert _completed_batches(sidecar, signature) == set()
+
+    _record_completed_batch(sidecar, signature, {0})
+    assert _completed_batches(sidecar, signature) == {0}
+
+    _record_completed_batch(sidecar, signature, {0, 4})
+    assert _completed_batches(sidecar, signature) == {0, 4}
+
+    # A different reference identity must not reuse the stored batches.
+    assert _completed_batches(sidecar, other) == set()
+
+
+def test_checkpoints_degrade_safely_when_unreadable(tmp_path: Path) -> None:
+    """A corrupt or malformed checkpoint means "redo the work", never a crash."""
+
+    from osm_polygon_eunis.runner import (
+        _checkpoint_path,
+        _completed_batches,
+        _reference_signature,
+    )
+
+    sidecar = tmp_path / "shard.labels.parquet"
+    signature = _reference_signature({"a": "aa"}, 0)
+
+    _checkpoint_path(sidecar).write_text("{not json", encoding="utf-8")
+    assert _completed_batches(sidecar, signature) == set()
+
+    _checkpoint_path(sidecar).write_text('["not", "a", "mapping"]', encoding="utf-8")
+    assert _completed_batches(sidecar, signature) == set()
+
+    _checkpoint_path(sidecar).write_text(
+        json.dumps({"signature": signature, "batches": "not-a-list"}), encoding="utf-8"
+    )
+    assert _completed_batches(sidecar, signature) == set()
+
+
+def test_reference_signature_tracks_the_overlap_kernel_version() -> None:
+    """Bumping the kernel must invalidate checkpoints from an older kernel."""
+
+    import osm_polygon_eunis.runner as runner_module
+
+    base = runner_module._reference_signature({"a": "aa"}, 0)
+    original = runner_module._OVERLAP_KERNEL_VERSION
+    try:
+        runner_module._OVERLAP_KERNEL_VERSION = original + 1
+        bumped = runner_module._reference_signature({"a": "aa"}, 0)
+    finally:
+        runner_module._OVERLAP_KERNEL_VERSION = original
+
+    assert base != bumped
+
+
+def test_sidecar_and_reference_roots_follow_their_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hot directories may move to faster storage without touching the workdir."""
+
+    from osm_polygon_eunis.runner import _reference_cache_root, _sidecar_root
+
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+
+    monkeypatch.delenv("EUNIS_SIDECAR_DIR", raising=False)
+    monkeypatch.delenv("EUNIS_REFERENCE_DIR", raising=False)
+    assert _sidecar_root(workdir) == workdir / "sidecars"
+    assert _reference_cache_root(workdir) == workdir
+
+    monkeypatch.setenv("EUNIS_SIDECAR_DIR", str(tmp_path / "fast-sidecars"))
+    monkeypatch.setenv("EUNIS_REFERENCE_DIR", str(tmp_path / "fast-reference"))
+    assert _sidecar_root(workdir) == tmp_path / "fast-sidecars"
+    assert _reference_cache_root(workdir) == tmp_path / "fast-reference"
+
+
+def test_geometry_chunk_skips_shards_whose_batches_are_all_checkpointed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fully merged shard must not be downloaded, let alone reprocessed."""
+
+    spec = DatasetSpec("website", "source", "target", "polygons/*.parquet")
+    plan = DatasetPlan(spec, "rev", ("polygons/a.parquet", "polygons/b.parquet"), (), ())
+    sidecar_root = tmp_path / "sidecars"
+    signature = "sig"
+
+    # "a" is fully done for the single batch that exists; "b" has nothing.
+    done = runner._sidecar_path(sidecar_root, spec, "polygons/a.parquet")
+    done.parent.mkdir(parents=True, exist_ok=True)
+    runner._record_completed_batch(done, signature, {0})
+
+    downloaded: list[str] = []
+    processed: list[str] = []
+
+    def _fake_cache(api, plans, jobs, source_root, client):
+        downloaded.extend(path for _, path in jobs)
+
+    def _fake_process(api, plan_arg, *, source_path, **kwargs):
+        processed.append(source_path)
+
+    monkeypatch.setattr(runner, "_cache_geometry_jobs", _fake_cache)
+    monkeypatch.setattr(runner, "_remove_cached_geometry_jobs", lambda *a, **k: None)
+    monkeypatch.setattr(runner, "_process_geometry_path", _fake_process)
+    monkeypatch.setattr(runner, "_worker_reference_batch", lambda *a, **k: ())
+    monkeypatch.setattr(runner, "_indexed_reference_group_batches", lambda groups: ((0, ()),))
+    monkeypatch.setattr(runner, "HfApi", lambda **kwargs: SimpleNamespace())
+
+    chunk = runner._GeometryChunk(
+        groups=(),
+        reference_directory=tmp_path / "ref",
+        plans=(plan,),
+        jobs=(("website", "polygons/a.parquet"), ("website", "polygons/b.parquet")),
+        sidecar_root=sidecar_root,
+        source_root=tmp_path / "source",
+        threshold=0,
+        batch_size=8,
+        endpoint="https://example.invalid",
+        token=None,
+        reference_signature=signature,
+    )
+
+    runner._process_geometry_chunk(chunk)
+
+    assert downloaded == ["polygons/b.parquet"], "a completed shard was still fetched"
+    assert processed == ["polygons/b.parquet"]
+    # The outstanding shard is now checkpointed too.
+    outstanding = runner._sidecar_path(sidecar_root, spec, "polygons/b.parquet")
+    assert runner._completed_batches(outstanding, signature) == {0}

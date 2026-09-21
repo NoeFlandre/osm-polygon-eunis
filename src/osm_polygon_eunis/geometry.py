@@ -7,11 +7,12 @@ from collections.abc import Mapping
 from functools import lru_cache
 from typing import Any
 
+import numpy as np
+import shapely
 from pyproj import Transformer
 from shapely.errors import GEOSException
 from shapely.geometry import shape
 from shapely.geometry.base import BaseGeometry
-from shapely.ops import transform
 from shapely.validation import make_valid
 from shapely.wkb import loads as load_wkb
 
@@ -63,8 +64,25 @@ def to_equal_area(
 
     if not _is_usable(geometry):
         return None
-    projected = transform(_transformer(source_crs, target_crs).transform, geometry)
+    projected = shapely.transform(geometry, _projector(source_crs, target_crs))
     return _valid_geometry(projected)
+
+
+def _projector(source_crs: str, target_crs: str) -> Any:
+    """Project a whole coordinate array at once.
+
+    Equivalent to ``shapely.ops.transform`` over the same pyproj transformer,
+    but it rebuilds each geometry in a single pass instead of walking the
+    coordinate sequences from Python.
+    """
+
+    transformer = _transformer(source_crs, target_crs)
+
+    def project(coordinates: Any) -> Any:
+        x, y = transformer.transform(coordinates[:, 0], coordinates[:, 1])
+        return np.column_stack((x, y))
+
+    return project
 
 
 def _is_usable(geometry: BaseGeometry | None) -> bool:
