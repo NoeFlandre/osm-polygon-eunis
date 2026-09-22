@@ -45,6 +45,15 @@ including polygons that received no label. The map is built while the final
 Parquet shards stream through the pipeline, using bounded 2-degree bins rather
 than retaining source geometries.
 
+## Production execution
+
+The current production release is **Grid'5000-only** and finishes the
+`description` source only. The Mac performs tests and the submission/monitoring
+commands; it does not compute Parquet or raster enrichment. The worker uses one
+CPU host in Lille's `chuc` cluster, persistent sidecars, and node-local
+scratch for large files. Follow [the operations runbook](docs/operations.md)
+for the policy check, submission, receipt, verification, and no-op rerun.
+
 ## Local development
 
 Use a task-scoped uv cache when working on the mounted data volume:
