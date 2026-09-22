@@ -47,10 +47,12 @@ than retaining source geometries.
 
 ## Production execution
 
-The current production release is **Grid'5000-only** and finishes the
-`description` source only. The Mac performs tests and the submission/monitoring
-commands; it does not compute Parquet or raster enrichment. The worker uses one
-CPU host in Lille's `chuc` cluster, persistent sidecars, and node-local
+The current production release is **Grid'5000-only** and processes all three
+sources in one resumable job: `website`, `wikidata`, and `description`. The Mac
+performs tests and the submission/monitoring commands; it does not compute
+Parquet or raster enrichment. The controller accepts any Grid'5000
+site/frontend/cluster explicitly, requests one CPU host, and never submits
+duplicate jobs across sites. The worker uses persistent sidecars and node-local
 scratch for large files. Follow [the operations runbook](docs/operations.md)
 for the policy check, submission, receipt, verification, and no-op rerun.
 

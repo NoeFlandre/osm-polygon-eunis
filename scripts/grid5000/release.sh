@@ -13,11 +13,11 @@ esac
 source_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 persistent_root="$GRID5000_PERSISTENT_ROOT"
 scratch="${TMPDIR:-/tmp}/osm-polygon-eunis-${OAR_JOB_ID}"
-workdir="$persistent_root/runs/description"
-sidecars="$persistent_root/sidecars/description"
+workdir="$persistent_root/runs/eunis"
+sidecars="$persistent_root/sidecars/eunis"
 logs="$persistent_root/logs"
 receipts="$persistent_root/receipts"
-receipt="$receipts/description-${OAR_JOB_ID}.json"
+receipt="$receipts/eunis-${OAR_JOB_ID}.json"
 
 mkdir -p "$scratch" "$workdir" "$sidecars" "$logs" "$receipts"
 
@@ -25,7 +25,7 @@ write_failure_receipt() {
   status=$?
   if [[ "$status" -ne 0 && ! -e "$receipt" ]]; then
     temporary="$receipt.tmp"
-    printf '{"dataset":"description","job_id":"%s","status":"failed"}\n' \
+    printf '{"datasets":["website","wikidata","description"],"job_id":"%s","status":"failed"}\n' \
       "$OAR_JOB_ID" > "$temporary"
     mv -- "$temporary" "$receipt"
   fi
@@ -44,7 +44,6 @@ exec > >(tee -a "$logs/job-${OAR_JOB_ID}.log") 2>&1
 cd -- "$source_root"
 uv sync --frozen --no-dev
 uv run --frozen --no-dev osm-polygon-eunis release \
-  --dataset description \
   --execution grid5000 \
   --reference-config "$source_root/config/eea-2021-reference.json" \
   --workdir "$workdir" \

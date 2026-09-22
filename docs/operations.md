@@ -1,30 +1,37 @@
 # Operations
 
-The current production scope is the `description` source only. The heavy
-release must run on Grid'5000; the Mac is used only for tests, command
-construction, source synchronization, submission, and monitoring.
+Production enrichment runs on one reserved Grid'5000 CPU host. The Mac is only
+the controller: it runs checks, synchronizes code, submits one job, and
+monitors or cancels that job. It does not download or compute Parquet or raster
+data.
 
-Grid'5000 is reserved for approved research or education. The controller runs
-`usagepolicycheck -t` on the frontend before and after every submission. It
-uses one CPU host in Lille's `chuc` cluster: 16 cores, 16 bounded source
-workers, the `default` queue (`-q default`), `night` scheduling (`-t night`),
-and the `chuc` property (`-p chuc`) with a 12-hour walltime. No GPU is
-requested. Hardware pages describe inventory, not live availability;
-OAR decides whether the reservation can be admitted.
+The standard job processes all three sources:
+
+- `website`
+- `wikidata`
+- `description`
+
+The controller is site-neutral. Give it one available site, frontend, and
+cluster for each run; it does not assume Lille and does not submit duplicate
+reservations across sites. OAR decides whether that one request is available.
+The generated filter is the documented SQL predicate `cluster='CLUSTER'`.
+See the official [usage policy](https://www.grid5000.fr/w/Grid5000:UsagePolicy),
+[Getting Started](https://grid5000.fr/w/Getting_Started), and
+[OAR syntax](https://grid5000.fr/w/OAR_Syntax_simplification) pages.
 
 ## Storage and credentials
 
 Create a project directory on remote persistent storage, for example
-`/home/$USER/osm-polygon-eunis`. Grid'5000 storage is not backed up, so copy
-the final receipt, logs, and any released metadata outside Grid'5000 after the
-run. The controller refuses Mac paths, relative paths, `/tmp`, and other
-ephemeral roots.
+`/home/$USER/osm-polygon-eunis`. `/home`, `/groups`, and `/srv` are accepted;
+Mac paths, relative paths, and node-local `/tmp` paths are rejected for the
+persistent root. Grid'5000 storage is site-local and not backed up, so copy
+the final receipt, logs, and released metadata outside Grid'5000 after the run.
 
 Keep `HF_TOKEN` only in the reserved-node environment. It is never copied by
-rsync, placed in a command argument, written to the local job state, or put in
-the receipt. The worker keeps large source shards, EEA rasters, and the uv
-cache on node-local scratch. Compact checkpoints remain in persistent storage:
-`EUNIS_SIDECAR_DIR` and the persistent description work directory.
+rsync, placed in a command argument, written to local job state, or put in the
+receipt. The worker keeps source shards, EEA rasters, the virtual environment,
+and the uv cache on node-local scratch. Persistent storage contains only code,
+compact sidecars, logs, receipts, and resumability metadata.
 
 ## Local checks and submission
 
@@ -40,69 +47,78 @@ UV_CACHE_DIR=/private/tmp/osm-polygon-eunis-uv \
 uv run pytest
 ```
 
-Commit the source tree before submission. A clean source revision is recorded
-in the local job state and the remote receipt. First build the commands without
-contacting Grid'5000:
+Commit the source tree before submission. First build the commands without
+contacting Grid'5000. Replace the example values with a site and cluster that
+are available to your account:
 
 ```bash
 UV_CACHE_DIR=/private/tmp/osm-polygon-eunis-uv \
 uv run osm-polygon-eunis grid5000 submit \
-  --frontend flille \
+  --site SITE \
+  --frontend FRONTEND \
+  --cluster CLUSTER \
   --persistent-root /home/$USER/osm-polygon-eunis \
   --source-root . \
   --dry-run
 ```
 
-Submit one description worker and keep the returned job ID:
+The dry run prints the policy checks, code-only rsync, and one `oarsub`
+request. A normal submission uses the same explicit profile and saves one
+numeric job ID:
 
 ```bash
 UV_CACHE_DIR=/private/tmp/osm-polygon-eunis-uv \
 uv run osm-polygon-eunis grid5000 submit \
-  --frontend flille \
+  --site SITE \
+  --frontend FRONTEND \
+  --cluster CLUSTER \
   --persistent-root /home/$USER/osm-polygon-eunis \
   --source-root . \
-  --state-file .grid5000-description-job.json
+  --state-file .grid5000-eunis-job.json
 ```
 
-The Mac-side command only checks policy, creates the remote source directory,
-syncs code/configuration with secrets and run data excluded, submits
-`host=1/core=16` to `chuc`, and checks policy again. It does not download
-Parquet or rasters and does not invoke the release runner locally.
+The controller runs `usagepolicycheck -t` before and after the submission. It
+rejects a dirty source tree by default, records the source revision, and
+blocks a second submission while the saved OAR job is still visible. It asks
+for `host=1/core=16` with 16 bounded workers by default; override resources
+only when the selected site requires it. The default OAR queue and job type are
+`-q default` and `-t night`.
 
-Monitor or cancel only the exact numeric job ID:
+Monitor or cancel only the exact job ID:
 
 ```bash
-uv run osm-polygon-eunis grid5000 status --frontend flille --job-id JOB_ID
-uv run osm-polygon-eunis grid5000 cancel --frontend flille --job-id JOB_ID
+uv run osm-polygon-eunis grid5000 status --frontend FRONTEND --job-id JOB_ID
+uv run osm-polygon-eunis grid5000 cancel --frontend FRONTEND --job-id JOB_ID
 ```
 
-The controller rejects a second submission while the saved job is still
-visible to OAR. After a terminal job, keep the persistent sidecars and use a
-new state-file name for a deliberate retry. The worker's description command
-is resumable: it reuses valid checkpoints keyed by source checksum and kernel
-version, and a completed shard is not downloaded again.
+The controller never carries `HF_TOKEN` in its commands. A new submission
+after a terminal job should use the retained sidecars and a deliberate new
+state-file name.
 
 ## Reserved-node worker
 
-OAR runs `scripts/grid5000/description-release.sh` from the synchronized
-source tree. It requires `OAR_JOB_ID`, `HF_TOKEN`, and a persistent root under
-`/home`, `/groups`, or `/srv`. It sets `EUNIS_SOURCE_DIR` and
-`EUNIS_REFERENCE_DIR` under node-local scratch, `EUNIS_SIDECAR_DIR` under the
-persistent root, and `UV_CACHE_DIR` under scratch. It runs only:
+OAR runs `scripts/grid5000/release.sh` from the synchronized source tree. It
+requires `OAR_JOB_ID`, `HF_TOKEN`, and a persistent root under `/home`,
+`/groups`, or `/srv`. It sets `EUNIS_SOURCE_DIR` and `EUNIS_REFERENCE_DIR`
+under node-local scratch, `EUNIS_SIDECAR_DIR` under persistent storage, and
+`UV_CACHE_DIR` under scratch. It invokes the release CLI without a dataset
+filter, so all three sources are selected:
 
 ```text
 uv run --frozen --no-dev osm-polygon-eunis release \
-  --dataset description --execution grid5000
+  --execution grid5000 --reference-config ... --workdir ... --receipt ...
 ```
 
-The runner writes a token-free JSON receipt with the source revision, target
-repository and revision, reference identity, no-op value, and OAR job ID. A
-failure trap leaves a small failure receipt and the persistent log in place.
-Copy these artifacts outside Grid'5000 before cleaning any remote storage.
+The runner checkpoints labels using source checksums and the overlap-kernel
+version. A fully checkpointed shard is not downloaded again. The worker writes
+a token-free receipt with every source revision, target revision, changed
+shards, no-op values, reference identity, and OAR job ID. A failure trap leaves
+a small failure receipt and persistent log. Copy these artifacts outside
+Grid'5000 before cleaning remote storage.
 
 ## Verification gates
 
-Before submission, run the deterministic local gates in this order:
+Before submission, run the deterministic local gates:
 
 ```bash
 uv run ruff check src tests scripts
@@ -114,8 +130,8 @@ uv run python scripts/smoke.py
 uv run mutmut run
 ```
 
-The remote completion check is separate: inspect the worker log and receipt,
-verify the description target's rows, schemas, manifest, card, map, and remote
-tree, then submit the same release again only after the first OAR job is
-terminal. The second run must be a verified no-op. Website and Wikidata are
-outside this production run and remain untouched.
+Remote completion is separate from local QA. Inspect the worker log and
+receipt, then verify all three target datasets: rows, schemas, manifests,
+cards, maps, and remote trees. Only after the first job is terminal, rerun the
+same release and require an exact verified no-op for all three targets. Cancel
+any remaining job and copy important artifacts off Grid'5000 before cleanup.

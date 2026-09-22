@@ -16,7 +16,9 @@ CommandRunner = Callable[[Command], str]
 
 _JOB_ID_PATTERN: Final = re.compile(r"\bAdding job\s+(\d+)\b")
 _WALLTIME_PATTERN: Final = re.compile(r"\d+:[0-5]\d:[0-5]\d")
+_TOKEN_PATTERN: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 _PERSISTENT_PREFIXES: Final = ("/home/", "/groups/", "/srv/")
+DEFAULT_DATASETS: Final = ("website", "wikidata", "description")
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,8 +27,8 @@ class Grid5000Config:
 
     frontend: str
     persistent_root: str
-    site: str = "lille"
-    cluster: str = "chuc"
+    site: str
+    cluster: str
     queue: str = "default"
     job_type: str = "night"
     cores: int = 16
@@ -53,7 +55,7 @@ class Grid5000Submission:
     """Result of a submission or a no-contact dry run."""
 
     job: Grid5000Job | None
-    dataset: str
+    datasets: tuple[str, ...]
     source_revision: str
     commands: tuple[Command, ...]
 
@@ -85,7 +87,7 @@ def _validate_config_values(config: Grid5000Config) -> None:
 
 
 def _validate_host(value: str, field_name: str) -> None:
-    if not value or any(character.isspace() for character in value):
+    if not _TOKEN_PATTERN.fullmatch(value):
         suffix = " host name" if field_name == "frontend" else " value"
         raise ValueError(f"{field_name} must be a non-empty{suffix}")
 
@@ -135,7 +137,7 @@ def build_oarsub_command(config: Grid5000Config, script: str) -> Command:
         "-t",
         config.job_type,
         "-p",
-        config.cluster,
+        f"cluster='{config.cluster}'",
         "-l",
         f"host=1/core={config.cores},walltime={config.walltime}",
         "-S",
@@ -192,7 +194,7 @@ def build_rsync_command(local_root: Path, frontend: str, remote_root: str) -> Co
         "--exclude=.venv",
         "--exclude=.eunis-run",
         "--exclude=.eunis-run-final",
-        "--exclude=.grid5000-description-job.json",
+        "--exclude=.grid5000-*.json",
         "--exclude=.env",
         "--exclude=.cache",
         "--exclude=.uv-cache",
@@ -211,7 +213,7 @@ def _remote_source_root(config: Grid5000Config) -> str:
 
 
 def _remote_worker_script(config: Grid5000Config) -> str:
-    return f"{_remote_source_root(config)}/scripts/grid5000/description-release.sh"
+    return f"{_remote_source_root(config)}/scripts/grid5000/release.sh"
 
 
 def _state_job_id(state_path: Path) -> str:
@@ -235,12 +237,14 @@ def _reject_active_state(
     raise RuntimeError(f"Grid'5000 job {job_id} is already active")
 
 
-def _write_job_state(path: Path, job: Grid5000Job, *, dataset: str) -> None:
+def _write_job_state(path: Path, job: Grid5000Job) -> None:
     payload = {
-        "dataset": dataset,
+        "cluster": job.config.cluster,
+        "datasets": list(DEFAULT_DATASETS),
         "frontend": job.config.frontend,
         "job_id": job.job_id,
         "persistent_root": job.config.persistent_root,
+        "site": job.config.site,
         "source_revision": job.source_revision,
         "submitted_at": job.submitted_at,
     }
@@ -295,7 +299,7 @@ def submit_grid5000(
     state_path: Path | None = None,
     dry_run: bool = False,
 ) -> Grid5000Submission:
-    """Submit the description worker after policy and duplicate checks."""
+    """Submit the all-source worker after policy and duplicate checks."""
 
     _validate_source_revision(source_revision)
     command_runner = _command_runner(runner)
@@ -303,7 +307,7 @@ def submit_grid5000(
 
     commands = _submission_commands(config, local_root)
     if dry_run:
-        return Grid5000Submission(None, "description", source_revision, commands)
+        return Grid5000Submission(None, DEFAULT_DATASETS, source_revision, commands)
 
     job_id = _run_submission(commands, command_runner)
     job = Grid5000Job(
@@ -313,7 +317,7 @@ def submit_grid5000(
         source_revision=source_revision,
     )
     _write_optional_state(state_path, job)
-    return Grid5000Submission(job, "description", source_revision, commands)
+    return Grid5000Submission(job, DEFAULT_DATASETS, source_revision, commands)
 
 
 def _validate_source_revision(source_revision: str) -> None:
@@ -353,7 +357,7 @@ def _run_submission(commands: tuple[Command, ...], runner: CommandRunner) -> str
 
 def _write_optional_state(path: Path | None, job: Grid5000Job) -> None:
     if path is not None:
-        _write_job_state(path, job, dataset="description")
+        _write_job_state(path, job)
 
 
 def run_command(command: Command, *, cwd: Path | None = None) -> str:

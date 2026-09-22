@@ -19,12 +19,35 @@ from osm_polygon_eunis.grid5000 import (
 )
 
 
-def test_default_profile_requests_one_lille_cpu_host() -> None:
-    config = Grid5000Config(frontend="flille", persistent_root="/home/u/eunis")
+def _config(
+    *,
+    frontend: str = "fgrenoble",
+    persistent_root: str = "/home/u/eunis",
+    site: str = "grenoble",
+    cluster: str = "dahu",
+    cores: int = 16,
+    workers: int = 16,
+    walltime: str = "12:00:00",
+    batch_size: int = 256,
+) -> Grid5000Config:
+    return Grid5000Config(
+        frontend=frontend,
+        persistent_root=persistent_root,
+        site=site,
+        cluster=cluster,
+        cores=cores,
+        workers=workers,
+        walltime=walltime,
+        batch_size=batch_size,
+    )
+
+
+def test_profile_requests_one_cpu_host_on_any_explicit_site() -> None:
+    config = _config()
 
     assert build_oarsub_command(
         config,
-        "/home/u/eunis/source/scripts/grid5000/description-release.sh",
+        "/home/u/eunis/source/scripts/grid5000/release.sh",
     ) == (
         "oarsub",
         "-q",
@@ -32,25 +55,25 @@ def test_default_profile_requests_one_lille_cpu_host() -> None:
         "-t",
         "night",
         "-p",
-        "chuc",
+        "cluster='dahu'",
         "-l",
         "host=1/core=16,walltime=12:00:00",
         "-S",
-        "/home/u/eunis/source/scripts/grid5000/description-release.sh",
+        "/home/u/eunis/source/scripts/grid5000/release.sh",
     )
 
 
 def test_config_rejects_invalid_resource_values() -> None:
     with pytest.raises(ValueError, match="frontend"):
-        Grid5000Config(frontend="", persistent_root="/home/u/eunis")
+        _config(frontend="")
     with pytest.raises(ValueError, match="cores"):
-        Grid5000Config(frontend="flille", persistent_root="/home/u/eunis", cores=0)
+        _config(cores=0)
     with pytest.raises(ValueError, match="workers"):
-        Grid5000Config(frontend="flille", persistent_root="/home/u/eunis", workers=0)
+        _config(workers=0)
     with pytest.raises(ValueError, match="walltime"):
-        Grid5000Config(frontend="flille", persistent_root="/home/u/eunis", walltime="forever")
+        _config(walltime="forever")
     with pytest.raises(ValueError, match="persistent"):
-        Grid5000Config(frontend="flille", persistent_root="relative/eunis")
+        _config(persistent_root="relative/eunis")
 
 
 def test_persistent_root_rejects_ephemeral_or_mac_paths() -> None:
@@ -79,9 +102,9 @@ def test_policy_status_cancel_and_ssh_commands_are_argument_arrays() -> None:
     assert build_policy_command() == ("usagepolicycheck", "-t")
     assert build_status_command("123456") == ("oarstat", "-j", "123456")
     assert build_cancel_command("123456") == ("oardel", "123456")
-    assert build_ssh_command("flille", ("usagepolicycheck", "-t")) == (
+    assert build_ssh_command("fgrenoble", ("usagepolicycheck", "-t")) == (
         "ssh",
-        "flille",
+        "fgrenoble",
         "usagepolicycheck",
         "-t",
     )
@@ -92,7 +115,7 @@ def test_policy_status_cancel_and_ssh_commands_are_argument_arrays() -> None:
 def test_rsync_excludes_credentials_and_ephemeral_project_state() -> None:
     command = build_rsync_command(
         Path("/workspace/eunis"),
-        "flille",
+        "fgrenoble",
         "/home/u/eunis/source",
     )
 
@@ -100,12 +123,12 @@ def test_rsync_excludes_credentials_and_ephemeral_project_state() -> None:
     assert "--exclude=.git" in command
     assert "--exclude=.venv" in command
     assert "--exclude=.eunis-run-final" in command
-    assert "--exclude=.grid5000-description-job.json" in command
+    assert "--exclude=.grid5000-*.json" in command
     assert "--exclude=.env" in command
     assert "--exclude=.cache" in command
     assert command[-2:] == (
         "/workspace/eunis/",
-        "flille:/home/u/eunis/source/",
+        "fgrenoble:/home/u/eunis/source/",
     )
     assert "HF_TOKEN" not in " ".join(command)
 
@@ -114,7 +137,7 @@ def test_grid_job_is_immutable() -> None:
     job = Grid5000Job(
         job_id="123456",
         submitted_at="2026-09-22T10:00:00Z",
-        config=Grid5000Config(frontend="flille", persistent_root="/home/u/eunis"),
+        config=_config(),
         source_revision="abc123",
     )
 
@@ -123,12 +146,12 @@ def test_grid_job_is_immutable() -> None:
 
 
 def test_submit_runs_policy_sync_oar_and_post_policy_without_secrets(tmp_path: Path) -> None:
-    config = Grid5000Config(frontend="flille", persistent_root="/home/u/eunis")
+    config = _config()
     calls: list[tuple[str, ...]] = []
 
     def fake_runner(command: tuple[str, ...]) -> str:
         calls.append(command)
-        if command[:3] == ("ssh", "flille", "oarsub"):
+        if command[:3] == ("ssh", "fgrenoble", "oarsub"):
             return "[AO] Adding job 123456\n"
         return ""
 
@@ -141,24 +164,26 @@ def test_submit_runs_policy_sync_oar_and_post_policy_without_secrets(tmp_path: P
 
     assert result.job is not None
     assert result.job.job_id == "123456"
-    assert result.dataset == "description"
+    assert result.datasets == ("website", "wikidata", "description")
     assert result.source_revision == "abc123"
-    assert calls[0] == ("ssh", "flille", "usagepolicycheck", "-t")
+    assert calls[0] == ("ssh", "fgrenoble", "usagepolicycheck", "-t")
     assert calls[1] == (
         "ssh",
-        "flille",
+        "fgrenoble",
         "mkdir",
         "-p",
         "/home/u/eunis/source",
     )
     assert calls[2][0:2] == ("rsync", "-az")
-    assert calls[3][:3] == ("ssh", "flille", "oarsub")
-    assert calls[4] == ("ssh", "flille", "usagepolicycheck", "-t")
+    assert calls[3][:3] == ("ssh", "fgrenoble", "oarsub")
+    assert "cluster='dahu'" in calls[3]
+    assert calls[3][-1] == "/home/u/eunis/source/scripts/grid5000/release.sh"
+    assert calls[4] == ("ssh", "fgrenoble", "usagepolicycheck", "-t")
     assert all("HF_TOKEN" not in " ".join(command) for command in calls)
 
 
 def test_submit_rejects_an_existing_active_job(tmp_path: Path) -> None:
-    config = Grid5000Config(frontend="flille", persistent_root="/home/u/eunis")
+    config = _config()
     state = tmp_path / "job.json"
     state.write_text('{"job_id": "123456"}\n', encoding="utf-8")
     calls: list[tuple[str, ...]] = []
@@ -176,16 +201,16 @@ def test_submit_rejects_an_existing_active_job(tmp_path: Path) -> None:
             runner=fake_runner,
         )
 
-    assert calls == [("ssh", "flille", "oarstat", "-j", "123456")]
+    assert calls == [("ssh", "fgrenoble", "oarstat", "-j", "123456")]
 
 
 def test_config_rejects_capacity_batch_and_blank_profile_fields() -> None:
     with pytest.raises(ValueError, match="workers must not exceed"):
-        Grid5000Config(frontend="flille", persistent_root="/home/u/eunis", workers=17)
+        _config(workers=17)
     with pytest.raises(ValueError, match="batch_size"):
-        Grid5000Config(frontend="flille", persistent_root="/home/u/eunis", batch_size=0)
+        _config(batch_size=0)
     with pytest.raises(ValueError, match="site"):
-        Grid5000Config(frontend="flille", persistent_root="/home/u/eunis", site=" ")
+        _config(site=" ")
 
 
 def test_path_and_command_builders_reject_unsafe_inputs() -> None:
@@ -193,17 +218,17 @@ def test_path_and_command_builders_reject_unsafe_inputs() -> None:
         with pytest.raises(ValueError):
             validate_persistent_root(path)
 
-    config = Grid5000Config(frontend="flille", persistent_root="/home/u/eunis")
+    config = _config()
     with pytest.raises(ValueError, match="absolute remote"):
         build_oarsub_command(config, "scripts/worker.sh")
     with pytest.raises(ValueError, match="frontend"):
         build_ssh_command("fl ille", ("true",))
     with pytest.raises(ValueError, match="must not be empty"):
-        build_ssh_command("flille", ())
+        build_ssh_command("fgrenoble", ())
 
 
 def test_submit_dry_run_builds_commands_without_contacting_grid5000(tmp_path: Path) -> None:
-    config = Grid5000Config(frontend="flille", persistent_root="/home/u/eunis")
+    config = _config()
     calls: list[tuple[str, ...]] = []
 
     def fake_runner(command: tuple[str, ...]) -> str:
@@ -219,22 +244,22 @@ def test_submit_dry_run_builds_commands_without_contacting_grid5000(tmp_path: Pa
     )
 
     assert result.job is None
-    assert result.commands[0] == ("ssh", "flille", "usagepolicycheck", "-t")
+    assert result.commands[0] == ("ssh", "fgrenoble", "usagepolicycheck", "-t")
     assert calls == []
 
 
 def test_submit_replaces_state_after_terminal_job_and_writes_safe_state(
     tmp_path: Path,
 ) -> None:
-    config = Grid5000Config(frontend="flille", persistent_root="/home/u/eunis")
+    config = _config()
     state = tmp_path / "state.json"
     calls: list[tuple[str, ...]] = []
 
     def fake_runner(command: tuple[str, ...]) -> str:
         calls.append(command)
-        if command[:3] == ("ssh", "flille", "oarstat"):
+        if command[:3] == ("ssh", "fgrenoble", "oarstat"):
             raise subprocess.CalledProcessError(1, command)
-        if command[:3] == ("ssh", "flille", "oarsub"):
+        if command[:3] == ("ssh", "fgrenoble", "oarsub"):
             return "Adding job 654321"
         return ""
 
@@ -259,12 +284,15 @@ def test_submit_replaces_state_after_terminal_job_and_writes_safe_state(
     assert second.job.job_id == "654321"
     payload = state.read_text(encoding="utf-8")
     assert '"job_id": "654321"' in payload
+    assert '"cluster": "dahu"' in payload
+    assert '"datasets": [\n    "website",\n    "wikidata",\n    "description"\n  ]' in payload
+    assert '"site": "grenoble"' in payload
     assert "HF_TOKEN" not in payload
-    assert calls[0] == ("ssh", "flille", "oarstat", "-j", first.job.job_id)
+    assert calls[0] == ("ssh", "fgrenoble", "oarstat", "-j", first.job.job_id)
 
 
 def test_submit_rejects_corrupt_or_incomplete_state(tmp_path: Path) -> None:
-    config = Grid5000Config(frontend="flille", persistent_root="/home/u/eunis")
+    config = _config()
     for contents in ("not json", "{}"):
         state = tmp_path / "state.json"
         state.write_text(contents, encoding="utf-8")
@@ -276,6 +304,11 @@ def test_submit_rejects_corrupt_or_incomplete_state(tmp_path: Path) -> None:
                 runner=lambda command: "",
                 state_path=state,
             )
+
+
+def test_config_rejects_unsafe_cluster() -> None:
+    with pytest.raises(ValueError, match="cluster"):
+        _config(cluster="dahu' OR 1=1")
 
 
 def test_resolve_source_revision_checks_cleanliness() -> None:

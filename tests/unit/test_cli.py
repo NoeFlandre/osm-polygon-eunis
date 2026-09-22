@@ -55,7 +55,7 @@ def test_release_command_prints_verified_summary(monkeypatch, capsys, tmp_path: 
     assert '"verified_revision": "target-revision"' in capsys.readouterr().out
 
 
-def test_release_defaults_to_description_on_grid5000(monkeypatch, tmp_path: Path) -> None:
+def test_release_defaults_to_all_sources_on_grid5000(monkeypatch, tmp_path: Path) -> None:
     calls: dict[str, object] = {}
 
     monkeypatch.setattr(cli, "_api", lambda endpoint: SimpleNamespace(endpoint=endpoint))
@@ -78,7 +78,7 @@ def test_release_defaults_to_description_on_grid5000(monkeypatch, tmp_path: Path
         )
         == 0
     )
-    assert calls["dataset_names"] == ("description",)
+    assert calls["dataset_names"] is None
     assert calls["execution"] == "grid5000"
 
 
@@ -91,8 +91,8 @@ def test_grid5000_status_calls_only_remote_oarstat(monkeypatch, capsys) -> None:
 
     monkeypatch.setattr(cli, "run_command", fake_runner)
 
-    assert cli.main(["grid5000", "status", "--frontend", "flille", "--job-id", "123456"]) == 0
-    assert calls == [("ssh", "flille", "oarstat", "-j", "123456")]
+    assert cli.main(["grid5000", "status", "--frontend", "fgrenoble", "--job-id", "123456"]) == 0
+    assert calls == [("ssh", "fgrenoble", "oarstat", "-j", "123456")]
     assert "job status" in capsys.readouterr().out
 
 
@@ -105,12 +105,12 @@ def test_grid5000_cancel_calls_only_remote_oardel(monkeypatch, capsys) -> None:
 
     monkeypatch.setattr(cli, "run_command", fake_runner)
 
-    assert cli.main(["grid5000", "cancel", "--frontend", "flille", "--job-id", "123456"]) == 0
-    assert calls == [("ssh", "flille", "oardel", "123456")]
+    assert cli.main(["grid5000", "cancel", "--frontend", "fgrenoble", "--job-id", "123456"]) == 0
+    assert calls == [("ssh", "fgrenoble", "oardel", "123456")]
     assert "cancelled" in capsys.readouterr().out
 
 
-def test_grid5000_submit_prints_job_dataset_and_source_without_token(
+def test_grid5000_submit_prints_all_datasets_and_source_without_token(
     monkeypatch, capsys, tmp_path: Path
 ) -> None:
     from osm_polygon_eunis.grid5000 import Grid5000Job, Grid5000Submission
@@ -126,9 +126,9 @@ def test_grid5000_submit_prints_job_dataset_and_source_without_token(
                 args[0],
                 "abc123",
             ),
-            "description",
+            ("website", "wikidata", "description"),
             "abc123",
-            (("ssh", "flille", "oarsub"),),
+                (("ssh", "fgrenoble", "oarsub"),),
         ),
     )
 
@@ -138,7 +138,11 @@ def test_grid5000_submit_prints_job_dataset_and_source_without_token(
                 "grid5000",
                 "submit",
                 "--frontend",
-                "flille",
+                "fgrenoble",
+                "--site",
+                "grenoble",
+                "--cluster",
+                "dahu",
                 "--persistent-root",
                 "/home/u/eunis",
                 "--source-root",
@@ -148,7 +152,9 @@ def test_grid5000_submit_prints_job_dataset_and_source_without_token(
         == 0
     )
     output = capsys.readouterr().out
-    assert '"dataset": "description"' in output
+    assert '"datasets": [' in output
+    assert '"website"' in output
+    assert '"description"' in output
     assert '"job_id": "123456"' in output
     assert '"source_revision": "abc123"' in output
     assert "HF_TOKEN" not in output

@@ -44,18 +44,19 @@ def _parser() -> argparse.ArgumentParser:
     )
     release.add_argument("--receipt", type=Path, default=None)
     grid5000 = subparsers.add_parser(
-        "grid5000", help="submit and monitor the description release on Grid'5000"
+        "grid5000", help="submit and monitor the all-source release on Grid'5000"
     )
     grid_commands = grid5000.add_subparsers(dest="grid_command", required=True)
-    submit = grid_commands.add_parser("submit", help="submit one description worker")
+    submit = grid_commands.add_parser("submit", help="submit one all-source worker")
     submit.add_argument("--frontend", required=True)
+    submit.add_argument("--site", required=True)
     submit.add_argument("--persistent-root", required=True)
     submit.add_argument("--source-root", type=Path, default=Path("."))
     submit.add_argument("--source-revision", default=None)
     submit.add_argument("--allow-dirty-source", action="store_true")
     submit.add_argument("--state-file", type=Path, default=None)
     submit.add_argument("--dry-run", action="store_true")
-    submit.add_argument("--cluster", default="chuc")
+    submit.add_argument("--cluster", required=True)
     submit.add_argument("--queue", default="default")
     submit.add_argument("--job-type", default="night")
     submit.add_argument("--cores", type=int, default=16)
@@ -90,6 +91,7 @@ def _grid5000_submit(args: argparse.Namespace) -> int:
     config = Grid5000Config(
         frontend=args.frontend,
         persistent_root=args.persistent_root,
+        site=args.site,
         cluster=args.cluster,
         queue=args.queue,
         job_type=args.job_type,
@@ -107,8 +109,10 @@ def _grid5000_submit(args: argparse.Namespace) -> int:
     )
     payload: dict[str, object] = {
         "commands": [list(command) for command in submission.commands],
-        "dataset": submission.dataset,
+        "cluster": config.cluster,
+        "datasets": list(submission.datasets),
         "dry_run": submission.job is None,
+        "site": config.site,
         "source_revision": submission.source_revision,
     }
     if submission.job is not None:
@@ -165,7 +169,7 @@ def _release_command(args: argparse.Namespace) -> int:
         batch_size=args.batch_size,
         token=os.environ.get("HF_TOKEN"),
         progress=_print_progress,
-        dataset_names=tuple(args.datasets or ("description",)),
+        dataset_names=tuple(args.datasets) if args.datasets else None,
         execution=args.execution,
         receipt_path=args.receipt,
     )
