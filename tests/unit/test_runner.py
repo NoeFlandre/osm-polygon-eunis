@@ -728,6 +728,27 @@ def test_select_dataset_plans_keeps_requested_order() -> None:
     )
 
 
+def test_plan_datasets_does_not_inspect_unselected_sources(monkeypatch) -> None:
+    calls: list[str] = []
+    plan = DatasetPlan(
+        DatasetSpec("description", "source", "target", "data/*.parquet"),
+        "revision",
+        (),
+        (),
+        (),
+    )
+
+    def fake_plan(api, name):
+        del api
+        calls.append(name)
+        return plan
+
+    monkeypatch.setattr(runner, "_plan_dataset", fake_plan)
+
+    assert runner.plan_datasets(object(), ("description",)) == (plan,)
+    assert calls == ["description"]
+
+
 def test_select_dataset_plans_rejects_unknown_or_empty_selection() -> None:
     plan = DatasetPlan(
         DatasetSpec("website", "source", "target", "polygons/*.parquet"),

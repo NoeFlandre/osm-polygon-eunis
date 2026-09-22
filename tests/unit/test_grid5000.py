@@ -100,6 +100,7 @@ def test_rsync_excludes_credentials_and_ephemeral_project_state() -> None:
     assert "--exclude=.git" in command
     assert "--exclude=.venv" in command
     assert "--exclude=.eunis-run-final" in command
+    assert "--exclude=.grid5000-description-job.json" in command
     assert "--exclude=.env" in command
     assert "--exclude=.cache" in command
     assert command[-2:] == (

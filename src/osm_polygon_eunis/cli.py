@@ -135,30 +135,29 @@ def _grid5000_main(args: argparse.Namespace) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
-    if args.command == "plan":
-        plans = plan_datasets(_api(args.endpoint))
-        print(
-            json.dumps(
-                [
-                    {
-                        "dataset": plan.spec.name,
-                        "source_repo": plan.spec.source_repo,
-                        "source_revision": plan.source_revision,
-                        "source_files": len(plan.source_files),
-                        "geometry_shards": len(plan.geometry_paths),
-                        "link_shards": len(plan.link_paths),
-                    }
-                    for plan in plans
-                ],
-                sort_keys=True,
-                indent=2,
-            )
+def _plan_command(args: argparse.Namespace) -> int:
+    plans = plan_datasets(_api(args.endpoint))
+    print(
+        json.dumps(
+            [
+                {
+                    "dataset": plan.spec.name,
+                    "source_repo": plan.spec.source_repo,
+                    "source_revision": plan.source_revision,
+                    "source_files": len(plan.source_files),
+                    "geometry_shards": len(plan.geometry_paths),
+                    "link_shards": len(plan.link_paths),
+                }
+                for plan in plans
+            ],
+            sort_keys=True,
+            indent=2,
         )
-        return 0
-    if args.command == "grid5000":
-        return _grid5000_main(args)
+    )
+    return 0
+
+
+def _release_command(args: argparse.Namespace) -> int:
     receipt = run_release(
         _api(args.endpoint),
         reference_config=args.reference_config,
@@ -170,22 +169,32 @@ def main(argv: list[str] | None = None) -> int:
         execution=args.execution,
         receipt_path=args.receipt,
     )
-    print(
-        json.dumps(
-            {
-                "datasets": [
-                    {
-                        "dataset": item.plan.spec.name,
-                        "target_repo": item.plan.spec.output_repo,
-                        "verified_revision": item.verification.target_revision,
-                        "changed_shards": len(item.expectations),
-                        "no_op": item.no_op,
-                    }
-                    for item in receipt.datasets
-                ]
-            },
-            sort_keys=True,
-            indent=2,
-        )
-    )
+    print(json.dumps(_release_summary(receipt), sort_keys=True, indent=2))
     return 0
+
+
+def _release_summary(receipt) -> dict[str, object]:
+    return {
+        "datasets": [
+            {
+                "dataset": item.plan.spec.name,
+                "target_repo": item.plan.spec.output_repo,
+                "verified_revision": item.verification.target_revision,
+                "changed_shards": len(item.expectations),
+                "no_op": item.no_op,
+            }
+            for item in receipt.datasets
+        ]
+    }
+
+
+def _dispatch(args: argparse.Namespace) -> int:
+    if args.command == "plan":
+        return _plan_command(args)
+    if args.command == "grid5000":
+        return _grid5000_main(args)
+    return _release_command(args)
+
+
+def main(argv: list[str] | None = None) -> int:
+    return _dispatch(_parser().parse_args(argv))

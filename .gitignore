@@ -14,5 +14,6 @@ __pycache__/
 tmp/
 staging/
 .eunis-run/
+.grid5000-description-job.json
 mutants/
 .DS_Store

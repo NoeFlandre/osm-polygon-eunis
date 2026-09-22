@@ -987,10 +987,23 @@ def _enrich_link(
     )
 
 
-def plan_datasets(api: Any) -> tuple[DatasetPlan, ...]:
-    """Capture source commits and validate all declared dataset layouts."""
+def plan_datasets(
+    api: Any, dataset_names: tuple[str, ...] | None = None
+) -> tuple[DatasetPlan, ...]:
+    """Capture source commits and validate the requested dataset layouts."""
 
-    return tuple(_plan_dataset(api, name) for name in ("website", "wikidata", "description"))
+    names = (
+        ("website", "wikidata", "description")
+        if dataset_names is None
+        else _validated_dataset_names(dataset_names)
+    )
+    return tuple(_plan_dataset(api, name) for name in names)
+
+
+def _release_plans(api: Any, dataset_names: tuple[str, ...] | None) -> tuple[DatasetPlan, ...]:
+    if dataset_names is None:
+        return plan_datasets(api)
+    return plan_datasets(api, dataset_names)
 
 
 def _select_dataset_plans(
@@ -1000,15 +1013,26 @@ def _select_dataset_plans(
 
     if dataset_names is None:
         return plans
+    requested = _validated_dataset_names(dataset_names)
+    by_name = {plan.spec.name: plan for plan in plans}
+    _reject_unknown_dataset(requested, by_name)
+    return tuple(by_name[name] for name in requested)
+
+
+def _validated_dataset_names(dataset_names: tuple[str, ...]) -> tuple[str, ...]:
     if not dataset_names:
         raise ValueError("at least one dataset must be selected")
     if len(set(dataset_names)) != len(dataset_names):
         raise ValueError("dataset selection must not contain duplicates")
-    by_name = {plan.spec.name: plan for plan in plans}
-    unknown = tuple(name for name in dataset_names if name not in by_name)
+    return dataset_names
+
+
+def _reject_unknown_dataset(
+    dataset_names: tuple[str, ...], plans: Mapping[str, DatasetPlan]
+) -> None:
+    unknown = tuple(name for name in dataset_names if name not in plans)
     if unknown:
         raise ValueError(f"unknown dataset {unknown[0]!r}")
-    return tuple(by_name[name] for name in dataset_names)
 
 
 def _plan_dataset(api: Any, name: str) -> DatasetPlan:
@@ -1340,14 +1364,11 @@ def run_release(
 ) -> ReleaseReceipt:
     """Run, publish, and independently verify the selected datasets."""
 
-    if execution not in {"local", "grid5000"}:
-        raise ValueError(f"unsupported execution mode {execution!r}")
-    if execution == "grid5000" and not os.environ.get("OAR_JOB_ID"):
-        raise RuntimeError("grid5000 execution requires OAR_JOB_ID on a reserved node")
+    _validate_execution(execution)
 
     source_version, crs, threshold, config = _settings(reference_config)
     workdir.mkdir(parents=True, exist_ok=True)
-    plans = _select_dataset_plans(plan_datasets(api), dataset_names)
+    plans = _release_plans(api, dataset_names)
     _duplicate_outputs(api, plans, token)
     groups = resolve_config(reference_config)
     sidecar_root = _sidecar_root(workdir)
@@ -1370,8 +1391,7 @@ def run_release(
             progress=progress,
         )
         if no_op_receipt is not None:
-            if receipt_path is not None:
-                _write_release_receipt(receipt_path, no_op_receipt, execution=execution)
+            _write_optional_release_receipt(receipt_path, no_op_receipt, execution=execution)
             return no_op_receipt
         _process_reference_groups(
             api,
@@ -1410,6 +1430,20 @@ def run_release(
             for plan in plans
         )
     return ReleaseReceipt(receipts, reference_info)
+
+
+def _validate_execution(execution: str) -> None:
+    if execution not in {"local", "grid5000"}:
+        raise ValueError(f"unsupported execution mode {execution!r}")
+    if execution == "grid5000" and not os.environ.get("OAR_JOB_ID"):
+        raise RuntimeError("grid5000 execution requires OAR_JOB_ID on a reserved node")
+
+
+def _write_optional_release_receipt(
+    path: Path | None, receipt: ReleaseReceipt, *, execution: str
+) -> None:
+    if path is not None:
+        _write_release_receipt(path, receipt, execution=execution)
 
 
 def _write_release_receipt(

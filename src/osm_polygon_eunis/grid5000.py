@@ -35,23 +35,7 @@ class Grid5000Config:
     batch_size: int = 256
 
     def __post_init__(self) -> None:
-        if not self.frontend or any(character.isspace() for character in self.frontend):
-            raise ValueError("frontend must be a non-empty host name")
-        validate_persistent_root(self.persistent_root)
-        if self.cores <= 0:
-            raise ValueError("cores must be positive")
-        if self.workers <= 0:
-            raise ValueError("workers must be positive")
-        if self.workers > self.cores:
-            raise ValueError("workers must not exceed cores")
-        if not _WALLTIME_PATTERN.fullmatch(self.walltime):
-            raise ValueError("walltime must use HH:MM:SS")
-        if self.batch_size <= 0:
-            raise ValueError("batch_size must be positive")
-        for field_name in ("site", "cluster", "queue", "job_type"):
-            value = getattr(self, field_name)
-            if not value or any(character.isspace() for character in value):
-                raise ValueError(f"{field_name} must be a non-empty value")
+        _validate_config_values(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,19 +61,60 @@ class Grid5000Submission:
 def validate_persistent_root(path: str) -> str:
     """Validate a persistent Grid'5000 path and return normalized POSIX text."""
 
-    if not path or "\x00" in path:
-        raise ValueError("persistent root must be a non-empty absolute path")
+    _validate_path_text(path)
     candidate = PurePosixPath(path)
     normalized = str(candidate)
-    if not candidate.is_absolute() or ".." in candidate.parts:
+    _validate_absolute_path(candidate)
+    _validate_persistent_prefix(normalized)
+    _validate_project_root(normalized)
+    return normalized
+
+
+def _validate_config_values(config: Grid5000Config) -> None:
+    _validate_host(config.frontend, "frontend")
+    validate_persistent_root(config.persistent_root)
+    _validate_positive("cores", config.cores)
+    _validate_positive("workers", config.workers)
+    if config.workers > config.cores:
+        raise ValueError("workers must not exceed cores")
+    if not _WALLTIME_PATTERN.fullmatch(config.walltime):
+        raise ValueError("walltime must use HH:MM:SS")
+    _validate_positive("batch_size", config.batch_size)
+    for field_name in ("site", "cluster", "queue", "job_type"):
+        _validate_host(getattr(config, field_name), field_name)
+
+
+def _validate_host(value: str, field_name: str) -> None:
+    if not value or any(character.isspace() for character in value):
+        suffix = " host name" if field_name == "frontend" else " value"
+        raise ValueError(f"{field_name} must be a non-empty{suffix}")
+
+
+def _validate_positive(field_name: str, value: int) -> None:
+    if value <= 0:
+        raise ValueError(f"{field_name} must be positive")
+
+
+def _validate_path_text(path: str) -> None:
+    if not path or "\x00" in path:
+        raise ValueError("persistent root must be a non-empty absolute path")
+
+
+def _validate_absolute_path(path: PurePosixPath) -> None:
+    if not path.is_absolute() or ".." in path.parts:
         raise ValueError("persistent root must be an absolute path")
-    if not normalized.startswith(_PERSISTENT_PREFIXES):
+
+
+def _validate_persistent_prefix(path: str) -> None:
+    if not path.startswith(_PERSISTENT_PREFIXES):
         raise ValueError(
             "persistent root must be on remote persistent storage under /home, /groups, or /srv"
         )
-    if normalized in {"/home", "/groups", "/srv"}:
+
+
+def _validate_project_root(path: str) -> None:
+    if path in {"/home", "/groups", "/srv"}:
         raise ValueError("persistent root must name a project directory")
-    return normalized
 
 
 def build_policy_command() -> Command:
@@ -167,6 +192,7 @@ def build_rsync_command(local_root: Path, frontend: str, remote_root: str) -> Co
         "--exclude=.venv",
         "--exclude=.eunis-run",
         "--exclude=.eunis-run-final",
+        "--exclude=.grid5000-description-job.json",
         "--exclude=.env",
         "--exclude=.cache",
         "--exclude=.uv-cache",
@@ -236,16 +262,28 @@ def resolve_source_revision(
 ) -> str:
     """Resolve a source commit and refuse uncommitted code by default."""
 
-    command_runner = runner or run_command
+    command_runner = _command_runner(runner)
     root = str(local_root.resolve())
-    status = command_runner(("git", "-C", root, "status", "--porcelain"))
-    dirty = bool(status.strip())
+    dirty = _source_tree_is_dirty(command_runner, root)
     if dirty and not allow_dirty:
         raise RuntimeError("source tree is dirty; commit it or pass --allow-dirty-source")
-    revision = explicit or command_runner(("git", "-C", root, "rev-parse", "HEAD")).strip()
+    revision = _resolve_revision(command_runner, root, explicit)
+    return f"{revision}-dirty" if dirty else revision
+
+
+def _command_runner(runner: CommandRunner | None) -> CommandRunner:
+    return run_command if runner is None else runner
+
+
+def _source_tree_is_dirty(runner: CommandRunner, root: str) -> bool:
+    return bool(runner(("git", "-C", root, "status", "--porcelain")).strip())
+
+
+def _resolve_revision(runner: CommandRunner, root: str, explicit: str | None) -> str:
+    revision = explicit or runner(("git", "-C", root, "rev-parse", "HEAD")).strip()
     if not revision or any(character.isspace() for character in revision):
         raise ValueError("source revision must be a non-empty token")
-    return f"{revision}-dirty" if dirty else revision
+    return revision
 
 
 def submit_grid5000(
@@ -259,14 +297,40 @@ def submit_grid5000(
 ) -> Grid5000Submission:
     """Submit the description worker after policy and duplicate checks."""
 
+    _validate_source_revision(source_revision)
+    command_runner = _command_runner(runner)
+    _reject_existing_state(config, state_path, command_runner)
+
+    commands = _submission_commands(config, local_root)
+    if dry_run:
+        return Grid5000Submission(None, "description", source_revision, commands)
+
+    job_id = _run_submission(commands, command_runner)
+    job = Grid5000Job(
+        job_id=job_id,
+        submitted_at=datetime.now(UTC).isoformat(),
+        config=config,
+        source_revision=source_revision,
+    )
+    _write_optional_state(state_path, job)
+    return Grid5000Submission(job, "description", source_revision, commands)
+
+
+def _validate_source_revision(source_revision: str) -> None:
     if not source_revision or any(character.isspace() for character in source_revision):
         raise ValueError("source_revision must be a non-empty token")
-    command_runner = runner or run_command
-    if state_path is not None and state_path.exists():
-        _reject_active_state(config, state_path, command_runner)
 
+
+def _reject_existing_state(
+    config: Grid5000Config, state_path: Path | None, runner: CommandRunner
+) -> None:
+    if state_path is not None and state_path.exists():
+        _reject_active_state(config, state_path, runner)
+
+
+def _submission_commands(config: Grid5000Config, local_root: Path) -> tuple[Command, ...]:
     source_root = _remote_source_root(config)
-    commands = (
+    return (
         build_ssh_command(config.frontend, build_policy_command()),
         build_ssh_command(config.frontend, ("mkdir", "-p", source_root)),
         build_rsync_command(local_root, config.frontend, source_root),
@@ -276,23 +340,20 @@ def submit_grid5000(
         ),
         build_ssh_command(config.frontend, build_policy_command()),
     )
-    if dry_run:
-        return Grid5000Submission(None, "description", source_revision, commands)
 
-    command_runner(commands[0])
-    command_runner(commands[1])
-    command_runner(commands[2])
-    job_id = parse_job_id(command_runner(commands[3]))
-    command_runner(commands[4])
-    job = Grid5000Job(
-        job_id=job_id,
-        submitted_at=datetime.now(UTC).isoformat(),
-        config=config,
-        source_revision=source_revision,
-    )
-    if state_path is not None:
-        _write_job_state(state_path, job, dataset="description")
-    return Grid5000Submission(job, "description", source_revision, commands)
+
+def _run_submission(commands: tuple[Command, ...], runner: CommandRunner) -> str:
+    runner(commands[0])
+    runner(commands[1])
+    runner(commands[2])
+    job_id = parse_job_id(runner(commands[3]))
+    runner(commands[4])
+    return job_id
+
+
+def _write_optional_state(path: Path | None, job: Grid5000Job) -> None:
+    if path is not None:
+        _write_job_state(path, job, dataset="description")
 
 
 def run_command(command: Command, *, cwd: Path | None = None) -> str:
