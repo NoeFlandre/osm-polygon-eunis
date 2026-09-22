@@ -46,8 +46,37 @@ def test_release_command_prints_verified_summary(monkeypatch, capsys, tmp_path: 
                 str(tmp_path / "run"),
                 "--batch-size",
                 "2",
+                "--execution",
+                "local",
             ]
         )
         == 0
     )
     assert '"verified_revision": "target-revision"' in capsys.readouterr().out
+
+
+def test_release_defaults_to_description_on_grid5000(monkeypatch, tmp_path: Path) -> None:
+    calls: dict[str, object] = {}
+
+    monkeypatch.setattr(cli, "_api", lambda endpoint: SimpleNamespace(endpoint=endpoint))
+
+    def fake_release(*args, **kwargs):
+        calls.update(kwargs)
+        return _receipt()
+
+    monkeypatch.setattr(cli, "run_release", fake_release)
+
+    assert (
+        cli.main(
+            [
+                "release",
+                "--reference-config",
+                str(tmp_path / "reference.json"),
+                "--workdir",
+                str(tmp_path / "run"),
+            ]
+        )
+        == 0
+    )
+    assert calls["dataset_names"] == ("description",)
+    assert calls["execution"] == "grid5000"

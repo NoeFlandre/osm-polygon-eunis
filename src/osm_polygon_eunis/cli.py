@@ -18,7 +18,7 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     plan = subparsers.add_parser("plan", help="inspect pinned public source layouts")
     plan.add_argument("--endpoint", default=None)
-    release = subparsers.add_parser("release", help="run and publish the three datasets")
+    release = subparsers.add_parser("release", help="run and publish selected datasets")
     release.add_argument(
         "--reference-config",
         type=Path,
@@ -27,6 +27,13 @@ def _parser() -> argparse.ArgumentParser:
     release.add_argument("--workdir", type=Path, default=Path(".eunis-run"))
     release.add_argument("--batch-size", type=int, default=256)
     release.add_argument("--endpoint", default=None)
+    release.add_argument("--dataset", action="append", dest="datasets")
+    release.add_argument(
+        "--execution",
+        choices=("grid5000", "local"),
+        default="grid5000",
+    )
+    release.add_argument("--receipt", type=Path, default=None)
     return parser
 
 
@@ -68,6 +75,9 @@ def main(argv: list[str] | None = None) -> int:
         batch_size=args.batch_size,
         token=os.environ.get("HF_TOKEN"),
         progress=_print_progress,
+        dataset_names=tuple(args.datasets or ("description",)),
+        execution=args.execution,
+        receipt_path=args.receipt,
     )
     print(
         json.dumps(

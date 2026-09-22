@@ -707,6 +707,122 @@ def test_run_release_coordinates_pooled_processing(monkeypatch, tmp_path: Path) 
     assert seen[0][1] == runner._SOURCE_WORKERS
 
 
+def test_select_dataset_plans_keeps_requested_order() -> None:
+    website = DatasetPlan(
+        DatasetSpec("website", "website-source", "website-target", "polygons/*.parquet"),
+        "website-revision",
+        (),
+        (),
+        (),
+    )
+    description = DatasetPlan(
+        DatasetSpec("description", "description-source", "description-target", "data/*.parquet"),
+        "description-revision",
+        (),
+        (),
+        (),
+    )
+
+    assert runner._select_dataset_plans((website, description), ("description",)) == (
+        description,
+    )
+
+
+def test_select_dataset_plans_rejects_unknown_or_empty_selection() -> None:
+    plan = DatasetPlan(
+        DatasetSpec("website", "source", "target", "polygons/*.parquet"),
+        "revision",
+        (),
+        (),
+        (),
+    )
+
+    with pytest.raises(ValueError, match="unknown dataset"):
+        runner._select_dataset_plans((plan,), ("missing",))
+    with pytest.raises(ValueError, match="at least one dataset"):
+        runner._select_dataset_plans((plan,), ())
+
+
+def test_grid5000_execution_requires_oar_job(monkeypatch, tmp_path: Path) -> None:
+    config = tmp_path / "reference.json"
+    config.write_text(
+        json.dumps({"source_version": "EEA-test", "crs": "EPSG:3035", "threshold": 0}),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("OAR_JOB_ID", raising=False)
+
+    with pytest.raises(RuntimeError, match="OAR_JOB_ID"):
+        runner.run_release(
+            object(),
+            reference_config=config,
+            workdir=tmp_path / "run",
+            batch_size=2,
+            dataset_names=("description",),
+            execution="grid5000",
+        )
+
+
+def test_source_cache_uses_and_cleans_the_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    override = tmp_path / "node-local-source"
+    monkeypatch.setenv("EUNIS_SOURCE_DIR", str(override))
+
+    with runner._source_cache(tmp_path / "run") as root:
+        assert root == override
+        root.mkdir(parents=True)
+        (root / "shard.parquet").write_bytes(b"source")
+
+    assert not override.exists()
+
+
+def test_release_receipt_is_atomic_and_token_free(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    plan = DatasetPlan(
+        DatasetSpec("description", "source", "target", "data/*.parquet"),
+        "source-revision",
+        (),
+        (),
+        (),
+    )
+    receipt = runner.ReleaseReceipt(
+        (
+            DatasetReceipt(
+                plan,
+                (ShardExpectation("data/a.parquet", 2, "schema"),),
+                VerificationReceipt("target", "target-revision", {}, (), None),
+                no_op=False,
+            ),
+        ),
+        {"source_version": "EEA-test", "assets": [{"sha256": "asset"}]},
+    )
+    monkeypatch.setenv("OAR_JOB_ID", "123456")
+    path = tmp_path / "receipt.json"
+
+    runner._write_release_receipt(path, receipt, execution="grid5000")
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload == {
+        "datasets": [
+            {
+                "changed_shards": 1,
+                "dataset": "description",
+                "no_op": False,
+                "source_repo": "source",
+                "source_revision": "source-revision",
+                "target_repo": "target",
+                "target_revision": "target-revision",
+            }
+        ],
+        "execution": "grid5000",
+        "oar_job_id": "123456",
+        "reference": {"assets": [{"sha256": "asset"}], "source_version": "EEA-test"},
+    }
+    assert not (tmp_path / ".receipt.json.tmp").exists()
+    assert "HF_TOKEN" not in path.read_text(encoding="utf-8")
+
+
 def test_run_release_verifies_matching_manifests_without_processing(
     monkeypatch,
     tmp_path: Path,

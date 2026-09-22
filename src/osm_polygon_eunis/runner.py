@@ -978,6 +978,24 @@ def plan_datasets(api: Any) -> tuple[DatasetPlan, ...]:
     return tuple(_plan_dataset(api, name) for name in ("website", "wikidata", "description"))
 
 
+def _select_dataset_plans(
+    plans: tuple[DatasetPlan, ...], dataset_names: tuple[str, ...] | None
+) -> tuple[DatasetPlan, ...]:
+    """Select named plans without changing their requested order."""
+
+    if dataset_names is None:
+        return plans
+    if not dataset_names:
+        raise ValueError("at least one dataset must be selected")
+    if len(set(dataset_names)) != len(dataset_names):
+        raise ValueError("dataset selection must not contain duplicates")
+    by_name = {plan.spec.name: plan for plan in plans}
+    unknown = tuple(name for name in dataset_names if name not in by_name)
+    if unknown:
+        raise ValueError(f"unknown dataset {unknown[0]!r}")
+    return tuple(by_name[name] for name in dataset_names)
+
+
 def _plan_dataset(api: Any, name: str) -> DatasetPlan:
     spec = dataset_spec(name)
     revision = capture_revision(api, spec.source_repo)
@@ -1301,12 +1319,20 @@ def run_release(
     batch_size: int,
     token: str | None = None,
     progress: Progress | None = None,
+    dataset_names: tuple[str, ...] | None = None,
+    execution: str = "local",
+    receipt_path: Path | None = None,
 ) -> ReleaseReceipt:
-    """Run, publish, and independently verify all three datasets."""
+    """Run, publish, and independently verify the selected datasets."""
+
+    if execution not in {"local", "grid5000"}:
+        raise ValueError(f"unsupported execution mode {execution!r}")
+    if execution == "grid5000" and not os.environ.get("OAR_JOB_ID"):
+        raise RuntimeError("grid5000 execution requires OAR_JOB_ID on a reserved node")
 
     source_version, crs, threshold, config = _settings(reference_config)
     workdir.mkdir(parents=True, exist_ok=True)
-    plans = plan_datasets(api)
+    plans = _select_dataset_plans(plan_datasets(api), dataset_names)
     _duplicate_outputs(api, plans, token)
     groups = resolve_config(reference_config)
     sidecar_root = _sidecar_root(workdir)
@@ -1329,6 +1355,8 @@ def run_release(
             progress=progress,
         )
         if no_op_receipt is not None:
+            if receipt_path is not None:
+                _write_release_receipt(receipt_path, no_op_receipt, execution=execution)
             return no_op_receipt
         _process_reference_groups(
             api,
@@ -1367,6 +1395,40 @@ def run_release(
             for plan in plans
         )
     return ReleaseReceipt(receipts, reference_info)
+
+
+def _write_release_receipt(
+    path: Path, receipt: ReleaseReceipt, *, execution: str
+) -> None:
+    """Write a compact, token-free receipt with an atomic replacement."""
+
+    payload: dict[str, object] = {
+        "execution": execution,
+        "datasets": [
+            {
+                "dataset": item.plan.spec.name,
+                "source_repo": item.plan.spec.source_repo,
+                "source_revision": item.plan.source_revision,
+                "target_repo": item.verification.target_repo,
+                "target_revision": item.verification.target_revision,
+                "no_op": item.no_op,
+                "changed_shards": len(item.expectations),
+            }
+            for item in receipt.datasets
+        ],
+        "reference": dict(receipt.reference),
+    }
+    job_id = os.environ.get("OAR_JOB_ID")
+    if job_id:
+        payload["oar_job_id"] = job_id
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    try:
+        temporary.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _duplicate_outputs(api: Any, plans: tuple[DatasetPlan, ...], token: str | None) -> None:
@@ -1960,7 +2022,7 @@ def _cleanup_source_cache(root: Path) -> None:
 
 @contextmanager
 def _source_cache(workdir: Path) -> Iterator[Path]:
-    root = workdir / "source"
+    root = Path(os.environ.get("EUNIS_SOURCE_DIR", str(workdir / "source")))
     try:
         yield root
     finally:
