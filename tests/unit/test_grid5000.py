@@ -1,7 +1,9 @@
+import subprocess
 from pathlib import Path
 
 import pytest
 
+import osm_polygon_eunis.grid5000 as grid5000
 from osm_polygon_eunis.grid5000 import (
     Grid5000Config,
     Grid5000Job,
@@ -116,7 +118,7 @@ def test_grid_job_is_immutable() -> None:
     )
 
     with pytest.raises(AttributeError):
-        setattr(job, "job_id", "654321")
+        job.__setattr__("job_id", "654321")
 
 
 def test_submit_runs_policy_sync_oar_and_post_policy_without_secrets(tmp_path: Path) -> None:
@@ -174,3 +176,133 @@ def test_submit_rejects_an_existing_active_job(tmp_path: Path) -> None:
         )
 
     assert calls == [("ssh", "flille", "oarstat", "-j", "123456")]
+
+
+def test_config_rejects_capacity_batch_and_blank_profile_fields() -> None:
+    with pytest.raises(ValueError, match="workers must not exceed"):
+        Grid5000Config(frontend="flille", persistent_root="/home/u/eunis", workers=17)
+    with pytest.raises(ValueError, match="batch_size"):
+        Grid5000Config(frontend="flille", persistent_root="/home/u/eunis", batch_size=0)
+    with pytest.raises(ValueError, match="site"):
+        Grid5000Config(frontend="flille", persistent_root="/home/u/eunis", site=" ")
+
+
+def test_path_and_command_builders_reject_unsafe_inputs() -> None:
+    for path in ("", "\x00", "/home", "/home/u/../eunis"):
+        with pytest.raises(ValueError):
+            validate_persistent_root(path)
+
+    config = Grid5000Config(frontend="flille", persistent_root="/home/u/eunis")
+    with pytest.raises(ValueError, match="absolute remote"):
+        build_oarsub_command(config, "scripts/worker.sh")
+    with pytest.raises(ValueError, match="frontend"):
+        build_ssh_command("fl ille", ("true",))
+    with pytest.raises(ValueError, match="must not be empty"):
+        build_ssh_command("flille", ())
+
+
+def test_submit_dry_run_builds_commands_without_contacting_grid5000(tmp_path: Path) -> None:
+    config = Grid5000Config(frontend="flille", persistent_root="/home/u/eunis")
+    calls: list[tuple[str, ...]] = []
+
+    def fake_runner(command: tuple[str, ...]) -> str:
+        calls.append(command)
+        return ""
+
+    result = submit_grid5000(
+        config,
+        tmp_path,
+        source_revision="abc123",
+        runner=fake_runner,
+        dry_run=True,
+    )
+
+    assert result.job is None
+    assert result.commands[0] == ("ssh", "flille", "usagepolicycheck", "-t")
+    assert calls == []
+
+
+def test_submit_replaces_state_after_terminal_job_and_writes_safe_state(
+    tmp_path: Path,
+) -> None:
+    config = Grid5000Config(frontend="flille", persistent_root="/home/u/eunis")
+    state = tmp_path / "state.json"
+    calls: list[tuple[str, ...]] = []
+
+    def fake_runner(command: tuple[str, ...]) -> str:
+        calls.append(command)
+        if command[:3] == ("ssh", "flille", "oarstat"):
+            raise subprocess.CalledProcessError(1, command)
+        if command[:3] == ("ssh", "flille", "oarsub"):
+            return "Adding job 654321"
+        return ""
+
+    first = submit_grid5000(
+        config,
+        tmp_path,
+        source_revision="abc123",
+        runner=fake_runner,
+        state_path=state,
+    )
+    calls.clear()
+    second = submit_grid5000(
+        config,
+        tmp_path,
+        source_revision="def456",
+        runner=fake_runner,
+        state_path=state,
+    )
+
+    assert first.job is not None
+    assert second.job is not None
+    assert second.job.job_id == "654321"
+    payload = state.read_text(encoding="utf-8")
+    assert '"job_id": "654321"' in payload
+    assert "HF_TOKEN" not in payload
+    assert calls[0] == ("ssh", "flille", "oarstat", "-j", first.job.job_id)
+
+
+def test_submit_rejects_corrupt_or_incomplete_state(tmp_path: Path) -> None:
+    config = Grid5000Config(frontend="flille", persistent_root="/home/u/eunis")
+    for contents in ("not json", "{}"):
+        state = tmp_path / "state.json"
+        state.write_text(contents, encoding="utf-8")
+        with pytest.raises(ValueError, match="job state"):
+            submit_grid5000(
+                config,
+                tmp_path,
+                source_revision="abc123",
+                runner=lambda command: "",
+                state_path=state,
+            )
+
+
+def test_resolve_source_revision_checks_cleanliness() -> None:
+    def clean_runner(command: tuple[str, ...]) -> str:
+        return "abc123\n" if command[-1] == "HEAD" else ""
+
+    assert grid5000.resolve_source_revision(
+        Path("/workspace/eunis"), runner=clean_runner
+    ) == "abc123"
+
+    def dirty_runner(command: tuple[str, ...]) -> str:
+        return "M README.md" if command[-1] == "--porcelain" else ""
+
+    with pytest.raises(RuntimeError, match="dirty"):
+        grid5000.resolve_source_revision(Path("/workspace/eunis"), runner=dirty_runner)
+    assert grid5000.resolve_source_revision(
+        Path("/workspace/eunis"),
+        explicit="def456",
+        allow_dirty=True,
+        runner=dirty_runner,
+    ) == "def456-dirty"
+
+
+def test_run_command_returns_stdout(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(command, **kwargs):
+        assert command == ("true",)
+        assert kwargs["check"] is True
+        return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(grid5000.subprocess, "run", fake_run)
+    assert grid5000.run_command(("true",)) == "ok"
