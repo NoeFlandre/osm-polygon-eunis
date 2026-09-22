@@ -80,3 +80,75 @@ def test_release_defaults_to_description_on_grid5000(monkeypatch, tmp_path: Path
     )
     assert calls["dataset_names"] == ("description",)
     assert calls["execution"] == "grid5000"
+
+
+def test_grid5000_status_calls_only_remote_oarstat(monkeypatch, capsys) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_runner(command: tuple[str, ...]) -> str:
+        calls.append(command)
+        return "job status"
+
+    monkeypatch.setattr(cli, "run_command", fake_runner)
+
+    assert cli.main(["grid5000", "status", "--frontend", "flille", "--job-id", "123456"]) == 0
+    assert calls == [("ssh", "flille", "oarstat", "-j", "123456")]
+    assert "job status" in capsys.readouterr().out
+
+
+def test_grid5000_cancel_calls_only_remote_oardel(monkeypatch, capsys) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_runner(command: tuple[str, ...]) -> str:
+        calls.append(command)
+        return "cancelled"
+
+    monkeypatch.setattr(cli, "run_command", fake_runner)
+
+    assert cli.main(["grid5000", "cancel", "--frontend", "flille", "--job-id", "123456"]) == 0
+    assert calls == [("ssh", "flille", "oardel", "123456")]
+    assert "cancelled" in capsys.readouterr().out
+
+
+def test_grid5000_submit_prints_job_dataset_and_source_without_token(
+    monkeypatch, capsys, tmp_path: Path
+) -> None:
+    from osm_polygon_eunis.grid5000 import Grid5000Job, Grid5000Submission
+
+    monkeypatch.setattr(cli, "resolve_source_revision", lambda *args, **kwargs: "abc123")
+    monkeypatch.setattr(
+        cli,
+        "submit_grid5000",
+        lambda *args, **kwargs: Grid5000Submission(
+            Grid5000Job(
+                "123456",
+                "2026-09-22T10:00:00+00:00",
+                args[0],
+                "abc123",
+            ),
+            "description",
+            "abc123",
+            (("ssh", "flille", "oarsub"),),
+        ),
+    )
+
+    assert (
+        cli.main(
+            [
+                "grid5000",
+                "submit",
+                "--frontend",
+                "flille",
+                "--persistent-root",
+                "/home/u/eunis",
+                "--source-root",
+                str(tmp_path),
+            ]
+        )
+        == 0
+    )
+    output = capsys.readouterr().out
+    assert '"dataset": "description"' in output
+    assert '"job_id": "123456"' in output
+    assert '"source_revision": "abc123"' in output
+    assert "HF_TOKEN" not in output

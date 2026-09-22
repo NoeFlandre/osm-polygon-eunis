@@ -743,6 +743,18 @@ def test_select_dataset_plans_rejects_unknown_or_empty_selection() -> None:
         runner._select_dataset_plans((plan,), ())
 
 
+def test_source_worker_override_is_validated(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("EUNIS_SOURCE_WORKERS", raising=False)
+    assert runner._source_workers() == runner._SOURCE_WORKERS
+
+    monkeypatch.setenv("EUNIS_SOURCE_WORKERS", "16")
+    assert runner._source_workers() == 16
+
+    monkeypatch.setenv("EUNIS_SOURCE_WORKERS", "0")
+    with pytest.raises(ValueError, match="positive"):
+        runner._source_workers()
+
+
 def test_grid5000_execution_requires_oar_job(monkeypatch, tmp_path: Path) -> None:
     config = tmp_path / "reference.json"
     config.write_text(

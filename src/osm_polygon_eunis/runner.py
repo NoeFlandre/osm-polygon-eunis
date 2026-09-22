@@ -60,6 +60,21 @@ _WORKER_REFERENCES: dict[
 ] = {}
 
 
+def _source_workers() -> int:
+    """Return the bounded source-worker count for this execution host."""
+
+    value = os.environ.get("EUNIS_SOURCE_WORKERS")
+    if value is None:
+        return _SOURCE_WORKERS
+    try:
+        workers = int(value)
+    except ValueError as error:
+        raise ValueError("EUNIS_SOURCE_WORKERS must be a positive integer") from error
+    if workers <= 0:
+        raise ValueError("EUNIS_SOURCE_WORKERS must be positive")
+    return workers
+
+
 @dataclass(frozen=True, slots=True)
 class DatasetPlan:
     """Pinned source layout for one dataset release."""
@@ -1370,7 +1385,7 @@ def run_release(
             batch_size=batch_size,
             progress=progress,
             http_client=reusable_client,
-            parallelism=_SOURCE_WORKERS,
+            parallelism=_source_workers(),
         )
         reference_info = _reference_manifest(
             groups,
