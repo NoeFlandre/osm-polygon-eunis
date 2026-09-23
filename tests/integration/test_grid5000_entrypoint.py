@@ -8,7 +8,10 @@ def test_release_entrypoint_is_checkpointed_and_all_source_grid5000_only() -> No
 
     assert "set -euo pipefail" in script
     assert ': "${OAR_JOB_ID:?' in script
-    assert ': "${HF_TOKEN:?' in script
+    assert ': "${HF_TOKEN:?HF_TOKEN must be provided on the reserved node}"' not in script
+    assert 'HF_HOME' in script
+    assert '"${HF_HOME:-$HOME/.cache/huggingface}/token"' in script
+    assert 'HF_TOKEN or the Hugging Face cache' in script
     assert 'EUNIS_SOURCE_DIR="$scratch/source"' in script
     assert 'EUNIS_REFERENCE_DIR="$scratch/reference"' in script
     assert 'UV_CACHE_DIR="$scratch/uv-cache"' in script

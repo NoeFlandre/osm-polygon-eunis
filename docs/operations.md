@@ -27,11 +27,13 @@ Mac paths, relative paths, and node-local `/tmp` paths are rejected for the
 persistent root. Grid'5000 storage is site-local and not backed up, so copy
 the final receipt, logs, and released metadata outside Grid'5000 after the run.
 
-Keep `HF_TOKEN` only in the reserved-node environment. It is never copied by
-rsync, placed in a command argument, written to local job state, or put in the
-receipt. The worker keeps source shards, EEA rasters, the virtual environment,
-and the uv cache on node-local scratch. Persistent storage contains only code,
-compact sidecars, logs, receipts, and resumability metadata.
+Keep `HF_TOKEN` only in the reserved-node environment, or use the standard
+Hugging Face token cache already configured on that site. The credential is
+never copied by rsync, placed in a command argument, written to local job
+state, or put in the receipt. The worker keeps source shards, EEA rasters, the
+virtual environment, and the uv cache on node-local scratch. Persistent
+storage contains only code, compact sidecars, logs, receipts, and resumability
+metadata.
 
 ## Local checks and submission
 
@@ -98,11 +100,12 @@ state-file name.
 ## Reserved-node worker
 
 OAR runs `scripts/grid5000/release.sh` from the synchronized source tree. It
-requires `OAR_JOB_ID`, `HF_TOKEN`, and a persistent root under `/home`,
-`/groups`, or `/srv`. It sets `EUNIS_SOURCE_DIR` and `EUNIS_REFERENCE_DIR`
-under node-local scratch, `EUNIS_SIDECAR_DIR` under persistent storage, and
-`UV_CACHE_DIR` under scratch. It invokes the release CLI without a dataset
-filter, so all three sources are selected:
+requires `OAR_JOB_ID`, either `HF_TOKEN` or the standard
+`$HF_HOME/token` (normally `$HOME/.cache/huggingface/token`), and a persistent
+root under `/home`, `/groups`, or `/srv`. It sets `EUNIS_SOURCE_DIR` and
+`EUNIS_REFERENCE_DIR` under node-local scratch, `EUNIS_SIDECAR_DIR` under
+persistent storage, and `UV_CACHE_DIR` under scratch. It invokes the release
+CLI without a dataset filter, so all three sources are selected:
 
 ```text
 uv run --frozen --no-dev osm-polygon-eunis release \

@@ -42,7 +42,8 @@ explicit numeric job ID.
 ## Worker
 
 The entrypoint is `scripts/grid5000/release.sh`. It requires an OAR job ID,
-`HF_TOKEN`, and a persistent root under `/home`, `/groups`, or `/srv`. It uses
+either `HF_TOKEN` or the standard Hugging Face token cache, and a persistent
+root under `/home`, `/groups`, or `/srv`. It uses
 the job's node-local temporary directory for source shards, reference assets,
 the virtual environment, and uv cache. It invokes:
 

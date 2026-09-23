@@ -2,8 +2,13 @@
 set -euo pipefail
 
 : "${OAR_JOB_ID:?this worker must run inside an OAR job}"
-: "${HF_TOKEN:?HF_TOKEN must be provided on the reserved node}"
 : "${GRID5000_PERSISTENT_ROOT:?set the remote persistent project root}"
+
+hf_token_file="${HF_HOME:-$HOME/.cache/huggingface}/token"
+if [[ -z "${HF_TOKEN:-}" && ! -s "$hf_token_file" ]]; then
+  echo "HF_TOKEN or the Hugging Face cache must be available on the reserved node" >&2
+  exit 2
+fi
 
 case "$GRID5000_PERSISTENT_ROOT" in
   /home/*|/groups/*|/srv/*) ;;
