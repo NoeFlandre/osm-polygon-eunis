@@ -201,6 +201,8 @@ def build_rsync_command(local_root: Path, frontend: str, remote_root: str) -> Co
         "--exclude=.env",
         "--exclude=.cache",
         "--exclude=.uv-cache",
+        "--exclude=.coverage*",
+        "--exclude=coverage.json",
         "--exclude=data",
         "--exclude=results",
         "--exclude=artifacts",

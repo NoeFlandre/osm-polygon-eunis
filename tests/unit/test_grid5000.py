@@ -124,6 +124,8 @@ def test_rsync_excludes_credentials_and_ephemeral_project_state() -> None:
     assert "--exclude=.grid5000-*.json" in command
     assert "--exclude=.env" in command
     assert "--exclude=.cache" in command
+    assert "--exclude=.coverage*" in command
+    assert "--exclude=coverage.json" in command
     assert command[-2:] == (
         "/workspace/eunis/",
         "fgrenoble:/home/u/eunis/source/",
