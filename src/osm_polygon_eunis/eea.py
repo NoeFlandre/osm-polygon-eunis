@@ -617,6 +617,30 @@ def _fetch_arcgis_page(client: _HttpClient, service_url: str, offset: int) -> Ma
     return page
 
 
+def _fallback_labels_cover_entries(
+    entries: Iterable[WebDavEntry],
+    fallback_labels: Mapping[str, str],
+) -> bool:
+    codes = {
+        parse_layer_code(Path(entry.path).name)
+        for entry in entries
+        if not entry.is_collection and entry.path.lower().endswith((".tif", ".tiff"))
+    }
+    return bool(fallback_labels) and codes <= fallback_labels.keys()
+
+
+def _group_labels(
+    client: _HttpClient,
+    service_url: str,
+    entries: Iterable[WebDavEntry],
+    fallback_labels: Mapping[str, str] | None,
+) -> dict[str, str]:
+    fallback = dict(fallback_labels or {})
+    if _fallback_labels_cover_entries(entries, fallback):
+        return fallback
+    return _fetch_arcgis_labels(client, service_url, fallback)
+
+
 def _merge_labels(labels: dict[str, str], additions: Mapping[str, str]) -> None:
     for code, name in additions.items():
         previous = labels.setdefault(code, name)
@@ -690,7 +714,7 @@ def resolve_group(
     share_page.raise_for_status()
     token = extract_share_token(share_page.text)
     entries = _discover_entries(client, _webdav_folder_url(folder_url, token))
-    labels = _fetch_arcgis_labels(client, service_url, fallback_labels)
+    labels = _group_labels(client, service_url, entries, fallback_labels)
     raster_assets = raster_assets_from_entries(
         entries,
         labels,

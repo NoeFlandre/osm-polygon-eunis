@@ -548,6 +548,47 @@ def test_arcgis_pagination_and_non_mapping_pages() -> None:
         _fetch_arcgis_labels(BadClient(), "https://example.test/service")
 
 
+def test_group_uses_complete_official_fallback_without_arcgis_fetch(monkeypatch) -> None:
+    entry = WebDavEntry(
+        "/Prob_N11_100m.tif", "https://example.test/Prob_N11_100m.tif", 1, None, False
+    )
+    monkeypatch.setattr(
+        eea,
+        "catalog_links",
+        lambda record: (
+            "title",
+            "https://sdi.eea.europa.eu/webdav/public/folder",
+            "https://example.test/service",
+        ),
+    )
+    monkeypatch.setattr(eea, "extract_share_token", lambda html: "token")
+    monkeypatch.setattr(eea, "_discover_entries", lambda *args, **kwargs: (entry,))
+    monkeypatch.setattr(
+        eea,
+        "_fetch_arcgis_labels",
+        lambda *args, **kwargs: pytest.fail("complete official labels should avoid ArcGIS"),
+    )
+
+    class Client:
+        def get(self, url, **kwargs):
+            del url, kwargs
+            return _FakeResponse(payload={})
+
+        def request(self, method, url, **kwargs):
+            del method, url, kwargs
+            raise AssertionError("WebDAV discovery should be stubbed")
+
+    group = resolve_group(
+        Client(),
+        "record",
+        source_version="EEA-test",
+        fallback_labels={"N11": "Atlantic sand beach"},
+    )
+
+    assert group.labels == {"N11": "Atlantic sand beach"}
+    assert [asset.code for asset in group.raster_assets] == ["N11"]
+
+
 def test_vector_asset_and_group_resolution_fail_closed(monkeypatch) -> None:
     first = WebDavEntry("/one.gpkg", "https://example.test/one", 1, None, False)
     second = WebDavEntry("/two.gpkg", "https://example.test/two", 1, None, False)
