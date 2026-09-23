@@ -56,8 +56,11 @@ def test_profile_requests_one_cpu_host_on_any_explicit_site() -> None:
         "cluster='dahu'",
         "-l",
         "host=1/core=16,walltime=12:00:00",
-        "-S",
-        "/home/u/eunis/source/scripts/grid5000/release.sh",
+        (
+            "GRID5000_PERSISTENT_ROOT=/home/u/eunis GRID5000_WORKERS=16 "
+            "GRID5000_BATCH_SIZE=256 "
+            "/home/u/eunis/source/scripts/grid5000/release.sh"
+        ),
     )
 
 
@@ -90,6 +93,7 @@ def test_persistent_root_rejects_ephemeral_or_mac_paths() -> None:
 
 def test_job_id_parser_accepts_oar_output_and_rejects_ambiguous_text() -> None:
     assert parse_job_id("[AO] Adding job 123456\n") == "123456"
+    assert parse_job_id("OAR_JOB_ID=123456\n") == "123456"
     with pytest.raises(ValueError):
         parse_job_id("submission failed")
     with pytest.raises(ValueError, match="exactly one"):
@@ -177,7 +181,11 @@ def test_submit_runs_policy_sync_oar_and_post_policy_without_secrets(tmp_path: P
     assert calls[2][0:2] == ("rsync", "-az")
     assert calls[3][:3] == ("ssh", "fgrenoble", "oarsub")
     assert "cluster='dahu'" in calls[3]
-    assert calls[3][-1] == "/home/u/eunis/source/scripts/grid5000/release.sh"
+    assert calls[3][-1] == (
+        "GRID5000_PERSISTENT_ROOT=/home/u/eunis "
+        "GRID5000_WORKERS=16 GRID5000_BATCH_SIZE=256 "
+        "/home/u/eunis/source/scripts/grid5000/release.sh"
+    )
     assert calls[4] == ("ssh", "fgrenoble", "usagepolicycheck", "-t")
     assert all("HF_TOKEN" not in " ".join(command) for command in calls)
 
@@ -332,11 +340,11 @@ def test_resolve_source_revision_checks_cleanliness() -> None:
     ) == "def456-dirty"
 
 
-def test_run_command_returns_stdout(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_command_returns_combined_output(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_run(command, **kwargs):
         assert command == ("true",)
         assert kwargs["check"] is True
-        return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="out", stderr="err")
 
     monkeypatch.setattr(grid5000.subprocess, "run", fake_run)
-    assert grid5000.run_command(("true",)) == "ok"
+    assert grid5000.run_command(("true",)) == "outerr"

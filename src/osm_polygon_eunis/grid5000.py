@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -14,7 +15,7 @@ from typing import Final
 Command = tuple[str, ...]
 CommandRunner = Callable[[Command], str]
 
-_JOB_ID_PATTERN: Final = re.compile(r"\bAdding job\s+(\d+)\b")
+_JOB_ID_PATTERN: Final = re.compile(r"(?:\bAdding job\s+|\bOAR_JOB_ID=)(\d+)\b")
 _WALLTIME_PATTERN: Final = re.compile(r"\d+:[0-5]\d:[0-5]\d")
 _TOKEN_PATTERN: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 _PERSISTENT_PREFIXES: Final = ("/home/", "/groups/", "/srv/")
@@ -135,14 +136,21 @@ def build_oarsub_command(config: Grid5000Config, script: str) -> Command:
     command = ["oarsub", "-q", config.queue]
     if config.job_type is not None:
         command.extend(("-t", config.job_type))
+    worker_command = " ".join(
+        (
+            f"GRID5000_PERSISTENT_ROOT={shlex.quote(config.persistent_root)}",
+            f"GRID5000_WORKERS={config.workers}",
+            f"GRID5000_BATCH_SIZE={config.batch_size}",
+            shlex.quote(script),
+        )
+    )
     command.extend(
         (
             "-p",
             f"cluster='{config.cluster}'",
             "-l",
             f"host=1/core={config.cores},walltime={config.walltime}",
-            "-S",
-            script,
+            worker_command,
         )
     )
     return tuple(command)
@@ -157,10 +165,10 @@ def _validate_job_id(job_id: str) -> str:
 def parse_job_id(output: str) -> str:
     """Extract exactly one job ID from OAR's submission output."""
 
-    matches = _JOB_ID_PATTERN.findall(output)
+    matches = set(_JOB_ID_PATTERN.findall(output))
     if len(matches) != 1:
         raise ValueError("submission output must contain exactly one OAR job ID")
-    return _validate_job_id(matches[0])
+    return _validate_job_id(matches.pop())
 
 
 def build_status_command(job_id: str) -> Command:
@@ -366,7 +374,7 @@ def _write_optional_state(path: Path | None, job: Grid5000Job) -> None:
 
 
 def run_command(command: Command, *, cwd: Path | None = None) -> str:
-    """Run one argument-array command and return stdout."""
+    """Run one argument-array command and return combined output."""
 
     completed = subprocess.run(
         command,
@@ -375,4 +383,4 @@ def run_command(command: Command, *, cwd: Path | None = None) -> str:
         capture_output=True,
         text=True,
     )
-    return completed.stdout
+    return completed.stdout + completed.stderr
