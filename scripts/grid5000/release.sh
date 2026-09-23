@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export PATH="$HOME/.local/bin:$PATH"
+
 : "${OAR_JOB_ID:?this worker must run inside an OAR job}"
 : "${GRID5000_PERSISTENT_ROOT:?set the remote persistent project root}"
 
