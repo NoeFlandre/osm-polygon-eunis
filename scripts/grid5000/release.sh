@@ -46,13 +46,31 @@ export EUNIS_SIDECAR_DIR="$sidecars"
 export EUNIS_SOURCE_WORKERS="${GRID5000_WORKERS:-16}"
 export UV_PROJECT_ENVIRONMENT="$scratch/venv"
 export UV_CACHE_DIR="$scratch/uv-cache"
+max_attempts="${GRID5000_MAX_ATTEMPTS:-20}"
+retry_delay="${GRID5000_RETRY_DELAY:-30}"
 
 exec > >(tee -a "$logs/job-${OAR_JOB_ID}.log") 2>&1
 cd -- "$source_root"
 uv sync --frozen --no-dev
-uv run --frozen --no-dev osm-polygon-eunis release \
-  --execution grid5000 \
-  --reference-config "$source_root/config/eea-2021-reference.json" \
-  --workdir "$workdir" \
-  --batch-size "${GRID5000_BATCH_SIZE:-256}" \
-  --receipt "$receipt"
+attempt=1
+status=1
+while (( attempt <= max_attempts )); do
+  echo "release attempt $attempt/$max_attempts"
+  if uv run --frozen --no-dev osm-polygon-eunis release \
+    --execution grid5000 \
+    --reference-config "$source_root/config/eea-2021-reference.json" \
+    --workdir "$workdir" \
+    --batch-size "${GRID5000_BATCH_SIZE:-256}" \
+    --receipt "$receipt"; then
+    exit 0
+  else
+    status=$?
+  fi
+  if (( status == 130 || status == 143 || attempt == max_attempts )); then
+    break
+  fi
+  echo "release attempt $attempt failed with rc=$status; retrying after checkpoints"
+  attempt=$((attempt + 1))
+  sleep "$retry_delay"
+done
+exit "$status"

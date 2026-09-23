@@ -18,6 +18,8 @@ def test_release_entrypoint_is_checkpointed_and_all_source_grid5000_only() -> No
     assert 'UV_CACHE_DIR="$scratch/uv-cache"' in script
     assert 'EUNIS_SIDECAR_DIR="$sidecars"' in script
     assert "uv run --frozen --no-dev osm-polygon-eunis release" in script
+    assert 'max_attempts="${GRID5000_MAX_ATTEMPTS:-20}"' in script
+    assert "while (( attempt <= max_attempts )); do" in script
     assert "--execution grid5000" in script
     assert "--receipt \"$receipt\"" in script
     assert "trap write_failure_receipt EXIT" in script

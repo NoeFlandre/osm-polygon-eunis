@@ -6,8 +6,9 @@ import hashlib
 import io
 import json
 import re
+import time
 import xml.etree.ElementTree as ET
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -26,6 +27,7 @@ _DEFAULT_CATALOG_API = "https://sdi.eea.europa.eu/catalogue/datahub/api/records"
 _DEFAULT_CLASSIFICATION_RECORD = "bfe4c237-e378-4a83-ab21-b3807f96c2e2"
 _WEBDAV_DEPTH = "1"
 _XLSX_MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+_RETRY_DELAYS = (1.0, 4.0, 16.0)
 
 
 class _HttpResponse(Protocol):
@@ -52,6 +54,35 @@ class _RequestClient(Protocol):
 
 class _HttpClient(_RequestClient, Protocol):
     def get(self, url: str, *, params: Any = None) -> _HttpResponse: ...
+
+
+def _get_with_retry(
+    client: _HttpClient,
+    url: str,
+    *,
+    params: Any = None,
+) -> _HttpResponse:
+    return _request_with_retry(lambda: client.get(url, params=params))
+
+
+def _request_with_retry(
+    operation: Callable[[], _HttpResponse],
+) -> _HttpResponse:
+    for attempt in range(len(_RETRY_DELAYS) + 1):
+        try:
+            response = operation()
+        except (httpx.TimeoutException, httpx.NetworkError):
+            if attempt == len(_RETRY_DELAYS):
+                raise
+        else:
+            status_code = getattr(response, "status_code", None)
+            retryable = status_code == 429 or (
+                isinstance(status_code, int) and 500 <= status_code <= 599
+            )
+            if not retryable or attempt == len(_RETRY_DELAYS):
+                return response
+        time.sleep(_RETRY_DELAYS[attempt])
+    raise AssertionError("unreachable retry state")
 
 
 @dataclass(frozen=True, slots=True)
@@ -552,7 +583,9 @@ def _discover_entries(
         if not _should_visit(url, depth, seen, max_depth):
             continue
         seen.add(url)
-        response = client.request("PROPFIND", url, headers={"Depth": _WEBDAV_DEPTH})
+        response = _request_with_retry(
+            lambda url=url: client.request("PROPFIND", url, headers={"Depth": _WEBDAV_DEPTH})
+        )
         response.raise_for_status()
         for entry in parse_webdav_entries(response.content):
             _collect_entry(entry, url, depth, max_depth, file_suffixes, queue, files)
@@ -599,7 +632,8 @@ def _fetch_arcgis_labels(
 
 
 def _fetch_arcgis_page(client: _HttpClient, service_url: str, offset: int) -> Mapping[str, object]:
-    response = client.get(
+    response = _get_with_retry(
+        client,
         f"{service_url.rstrip('/')}/query",
         params={
             "where": "1=1",
@@ -675,10 +709,10 @@ def resolve_classification_labels(
 ) -> dict[str, str]:
     """Fetch and parse the small authoritative 2021 EUNIS table in memory."""
 
-    response = client.get(f"{catalog_api.rstrip('/')}/{record_id}?language=eng")
+    response = _get_with_retry(client, f"{catalog_api.rstrip('/')}/{record_id}?language=eng")
     response.raise_for_status()
     _title, folder_url = _classification_catalog_links(response.json())
-    share_page = client.get(folder_url)
+    share_page = _get_with_retry(client, folder_url)
     share_page.raise_for_status()
     token = extract_share_token(share_page.text)
     entries = _discover_entries(
@@ -690,7 +724,7 @@ def resolve_classification_labels(
     entry = _select_classification_entry(entries)
     if entry.size is None:
         raise ValueError("EEA classification workbook has no byte size")
-    workbook = client.get(entry.url)
+    workbook = _get_with_retry(client, entry.url)
     workbook.raise_for_status()
     if len(workbook.content) != entry.size:
         raise ValueError("EEA classification workbook byte count differs from metadata")
@@ -707,10 +741,10 @@ def resolve_group(
 ) -> EeaGroup:
     """Resolve one official catalog record without downloading its data."""
 
-    response = client.get(f"{catalog_api.rstrip('/')}/{record_id}?language=eng")
+    response = _get_with_retry(client, f"{catalog_api.rstrip('/')}/{record_id}?language=eng")
     response.raise_for_status()
     title, folder_url, service_url = catalog_links(response.json())
-    share_page = client.get(folder_url)
+    share_page = _get_with_retry(client, folder_url)
     share_page.raise_for_status()
     token = extract_share_token(share_page.text)
     entries = _discover_entries(client, _webdav_folder_url(folder_url, token))

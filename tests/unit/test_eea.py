@@ -16,6 +16,7 @@ from osm_polygon_eunis.eea import (
     _classification_catalog_links,
     _discover_entries,
     _fetch_arcgis_labels,
+    _get_with_retry,
     _select_classification_entry,
     _vector_asset,
     _webdav_folder_url,
@@ -217,10 +218,11 @@ def test_webdav_folder_url_requires_public_path() -> None:
 
 
 class _FakeResponse:
-    def __init__(self, *, payload=None, text="", content=b"") -> None:
+    def __init__(self, *, payload=None, text="", content=b"", status_code=200) -> None:
         self._payload = payload
         self.text = text
         self.content = content
+        self.status_code = status_code
 
     def json(self):
         return self._payload
@@ -240,6 +242,33 @@ class _FakeHttpClient:
     def request(self, method, url, **kwargs):
         del method, kwargs
         return self.responses[url]
+
+
+def test_metadata_get_retries_timeout_and_server_error(monkeypatch) -> None:
+    monkeypatch.setattr(eea.time, "sleep", lambda delay: None)
+
+    class FlakyClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get(self, url, **kwargs):
+            del url, kwargs
+            self.calls += 1
+            if self.calls == 1:
+                raise httpx.ReadTimeout("temporary timeout")
+            if self.calls == 2:
+                return _FakeResponse(status_code=503)
+            return _FakeResponse(payload={"ok": True})
+
+        def request(self, method, url, **kwargs):
+            del method, url, kwargs
+            raise AssertionError("the retry test should use GET")
+
+    client = FlakyClient()
+    response = _get_with_retry(client, "https://example.test/metadata")
+
+    assert response.json() == {"ok": True}
+    assert client.calls == 3
 
 
 def _catalog_record(folder: str, service: str) -> dict[str, object]:
