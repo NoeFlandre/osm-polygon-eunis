@@ -71,18 +71,22 @@ def _request_with_retry(
     for attempt in range(len(_RETRY_DELAYS) + 1):
         try:
             response = operation()
-        except (httpx.TimeoutException, httpx.NetworkError):
+        except httpx.TransportError:
             if attempt == len(_RETRY_DELAYS):
                 raise
         else:
             status_code = getattr(response, "status_code", None)
-            retryable = status_code == 429 or (
-                isinstance(status_code, int) and 500 <= status_code <= 599
-            )
+            retryable = _retryable_status(status_code)
             if not retryable or attempt == len(_RETRY_DELAYS):
                 return response
         time.sleep(_RETRY_DELAYS[attempt])
     raise AssertionError("unreachable retry state")
+
+
+def _retryable_status(status_code: object) -> bool:
+    return status_code == 429 or (
+        isinstance(status_code, int) and 500 <= status_code <= 599
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -882,6 +886,22 @@ def download_asset(client: httpx.Client, asset: RemoteAsset, destination: Path) 
     """Stream one EEA asset and return its SHA-256 after size validation."""
 
     destination.parent.mkdir(parents=True, exist_ok=True)
+    for attempt in range(len(_RETRY_DELAYS) + 1):
+        try:
+            return _download_asset_once(client, asset, destination)
+        except (httpx.TransportError, ValueError) as error:
+            destination.unlink(missing_ok=True)
+            if attempt == len(_RETRY_DELAYS):
+                raise error
+        except httpx.HTTPStatusError as error:
+            if not _retryable_status(error.response.status_code) or attempt == len(_RETRY_DELAYS):
+                raise
+            destination.unlink(missing_ok=True)
+        time.sleep(_RETRY_DELAYS[attempt])
+    raise AssertionError("unreachable download retry state")
+
+
+def _download_asset_once(client: httpx.Client, asset: RemoteAsset, destination: Path) -> str:
     digest = hashlib.sha256()
     written = 0
     with client.stream("GET", asset.url) as response:
@@ -892,6 +912,5 @@ def download_asset(client: httpx.Client, asset: RemoteAsset, destination: Path) 
                 digest.update(chunk)
                 written += len(chunk)
     if written != asset.size:
-        destination.unlink(missing_ok=True)
         raise ValueError(f"EEA asset byte count {written} does not match metadata {asset.size}")
     return digest.hexdigest()

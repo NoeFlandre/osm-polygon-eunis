@@ -618,6 +618,58 @@ def test_group_uses_complete_official_fallback_without_arcgis_fetch(monkeypatch)
     assert [asset.code for asset in group.raster_assets] == ["N11"]
 
 
+def test_download_asset_retries_an_interrupted_stream(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(eea.time, "sleep", lambda delay: None)
+
+    class Response:
+        def __init__(self, attempt: int) -> None:
+            self.attempt = attempt
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def iter_bytes(self, *, chunk_size: int):
+            del chunk_size
+            yield b"ab"
+            if self.attempt == 1:
+                raise httpx.RemoteProtocolError("interrupted stream")
+            yield b"c"
+
+    class FlakyStreamClient:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        def stream(self, method, url):
+            assert method == "GET"
+            assert url.endswith("asset.bin")
+            self.attempts += 1
+            return Response(self.attempts)
+
+    destination = tmp_path / "asset.bin"
+    asset = RemoteAsset(
+        "/asset.bin",
+        "https://example.test/asset.bin",
+        3,
+        None,
+        None,
+        None,
+        "record",
+        "EEA-test",
+    )
+
+    client = FlakyStreamClient()
+    download_asset(cast(httpx.Client, client), asset, destination)
+
+    assert client.attempts == 2
+    assert destination.read_bytes() == b"abc"
+
+
 def test_vector_asset_and_group_resolution_fail_closed(monkeypatch) -> None:
     first = WebDavEntry("/one.gpkg", "https://example.test/one", 1, None, False)
     second = WebDavEntry("/two.gpkg", "https://example.test/two", 1, None, False)
