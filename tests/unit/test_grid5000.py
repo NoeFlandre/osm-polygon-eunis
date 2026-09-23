@@ -52,8 +52,6 @@ def test_profile_requests_one_cpu_host_on_any_explicit_site() -> None:
         "oarsub",
         "-q",
         "default",
-        "-t",
-        "night",
         "-p",
         "cluster='dahu'",
         "-l",

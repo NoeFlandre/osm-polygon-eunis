@@ -30,7 +30,7 @@ class Grid5000Config:
     site: str
     cluster: str
     queue: str = "default"
-    job_type: str = "night"
+    job_type: str | None = None
     cores: int = 16
     workers: int = 16
     walltime: str = "12:00:00"
@@ -82,8 +82,10 @@ def _validate_config_values(config: Grid5000Config) -> None:
     if not _WALLTIME_PATTERN.fullmatch(config.walltime):
         raise ValueError("walltime must use HH:MM:SS")
     _validate_positive("batch_size", config.batch_size)
-    for field_name in ("site", "cluster", "queue", "job_type"):
+    for field_name in ("site", "cluster", "queue"):
         _validate_host(getattr(config, field_name), field_name)
+    if config.job_type is not None:
+        _validate_host(config.job_type, "job_type")
 
 
 def _validate_host(value: str, field_name: str) -> None:
@@ -130,19 +132,20 @@ def build_oarsub_command(config: Grid5000Config, script: str) -> Command:
 
     if not script or not script.startswith("/"):
         raise ValueError("worker script must be an absolute remote path")
-    return (
-        "oarsub",
-        "-q",
-        config.queue,
-        "-t",
-        config.job_type,
-        "-p",
-        f"cluster='{config.cluster}'",
-        "-l",
-        f"host=1/core={config.cores},walltime={config.walltime}",
-        "-S",
-        script,
+    command = ["oarsub", "-q", config.queue]
+    if config.job_type is not None:
+        command.extend(("-t", config.job_type))
+    command.extend(
+        (
+            "-p",
+            f"cluster='{config.cluster}'",
+            "-l",
+            f"host=1/core={config.cores},walltime={config.walltime}",
+            "-S",
+            script,
+        )
     )
+    return tuple(command)
 
 
 def _validate_job_id(job_id: str) -> str:

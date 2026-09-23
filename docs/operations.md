@@ -83,8 +83,8 @@ The controller runs `usagepolicycheck -t` before and after the submission. It
 rejects a dirty source tree by default, records the source revision, and
 blocks a second submission while the saved OAR job is still visible. It asks
 for `host=1/core=16` with 16 bounded workers by default; override resources
-only when the selected site requires it. The default OAR queue and job type are
-`-q default` and `-t night`.
+only when the selected site requires it. The default OAR queue is `-q default`;
+no site-specific job type is added unless explicitly requested.
 
 Monitor or cancel only the exact job ID:
 

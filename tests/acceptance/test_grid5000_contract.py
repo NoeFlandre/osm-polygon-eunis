@@ -14,7 +14,7 @@ def test_production_contract_is_grid5000_all_source_and_site_neutral() -> None:
     assert "--site SITE" in operations
     assert "--cluster CLUSTER" in operations
     assert "cluster='CLUSTER'" in operations
-    assert "-t night" in operations
+    assert "-q default" in operations
     assert "website" in operations
     assert "wikidata" in operations
     assert "description" in operations

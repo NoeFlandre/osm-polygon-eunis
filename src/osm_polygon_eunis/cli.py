@@ -58,7 +58,7 @@ def _parser() -> argparse.ArgumentParser:
     submit.add_argument("--dry-run", action="store_true")
     submit.add_argument("--cluster", required=True)
     submit.add_argument("--queue", default="default")
-    submit.add_argument("--job-type", default="night")
+    submit.add_argument("--job-type", default=None)
     submit.add_argument("--cores", type=int, default=16)
     submit.add_argument("--workers", type=int, default=16)
     submit.add_argument("--walltime", default="12:00:00")
