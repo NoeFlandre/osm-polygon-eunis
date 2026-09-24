@@ -184,13 +184,13 @@ def build_cancel_command(job_id: str) -> Command:
 
 
 def build_ssh_command(frontend: str, command: Command) -> Command:
-    """Prefix a remote command with SSH without invoking a local shell."""
+    """Serialize a remote command so SSH's remote shell preserves its arguments."""
 
     if not frontend or any(character.isspace() for character in frontend):
         raise ValueError("frontend must be a non-empty host name")
     if not command:
         raise ValueError("remote command must not be empty")
-    return ("ssh", frontend, *command)
+    return ("ssh", frontend, shlex.join(command))
 
 
 def build_rsync_command(local_root: Path, frontend: str, remote_root: str) -> Command:

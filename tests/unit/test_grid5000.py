@@ -1,3 +1,4 @@
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -100,18 +101,26 @@ def test_job_id_parser_accepts_oar_output_and_rejects_ambiguous_text() -> None:
         parse_job_id("Adding job 1\nAdding job 2\n")
 
 
-def test_policy_status_cancel_and_ssh_commands_are_argument_arrays() -> None:
+def test_policy_status_cancel_and_ssh_commands() -> None:
     assert build_policy_command() == ("usagepolicycheck", "-t")
     assert build_status_command("123456") == ("oarstat", "-j", "123456")
     assert build_cancel_command("123456") == ("oardel", "123456")
     assert build_ssh_command("fgrenoble", ("usagepolicycheck", "-t")) == (
         "ssh",
         "fgrenoble",
-        "usagepolicycheck",
-        "-t",
+        "usagepolicycheck -t",
     )
     with pytest.raises(ValueError):
         build_status_command("not-a-job")
+
+
+def test_ssh_command_preserves_oar_expression_quotes_for_remote_shell() -> None:
+    remote_command = ("oarsub", "-p", "cluster='grappe'")
+
+    ssh_command = build_ssh_command("fnancy", remote_command)
+
+    assert ssh_command == ("ssh", "fnancy", shlex.join(remote_command))
+    assert tuple(shlex.split(ssh_command[2])) == remote_command
 
 
 def test_rsync_excludes_credentials_and_ephemeral_project_state() -> None:
@@ -155,7 +164,7 @@ def test_submit_runs_policy_sync_oar_and_post_policy_without_secrets(tmp_path: P
 
     def fake_runner(command: tuple[str, ...]) -> str:
         calls.append(command)
-        if command[:3] == ("ssh", "fgrenoble", "oarsub"):
+        if command[:2] == ("ssh", "fgrenoble") and shlex.split(command[2])[0] == "oarsub":
             return "[AO] Adding job 123456\n"
         return ""
 
@@ -170,23 +179,18 @@ def test_submit_runs_policy_sync_oar_and_post_policy_without_secrets(tmp_path: P
     assert result.job.job_id == "123456"
     assert result.datasets == ("website", "wikidata", "description")
     assert result.source_revision == "abc123"
-    assert calls[0] == ("ssh", "fgrenoble", "usagepolicycheck", "-t")
-    assert calls[1] == (
-        "ssh",
-        "fgrenoble",
-        "mkdir",
-        "-p",
-        "/home/u/eunis/source",
-    )
+    assert calls[0] == ("ssh", "fgrenoble", "usagepolicycheck -t")
+    assert calls[1] == ("ssh", "fgrenoble", "mkdir -p /home/u/eunis/source")
     assert calls[2][0:2] == ("rsync", "-az")
-    assert calls[3][:3] == ("ssh", "fgrenoble", "oarsub")
-    assert "cluster='dahu'" in calls[3]
-    assert calls[3][-1] == (
+    assert calls[3][:2] == ("ssh", "fgrenoble")
+    remote_oarsub = tuple(shlex.split(calls[3][2]))
+    assert remote_oarsub[remote_oarsub.index("-p") + 1] == "cluster='dahu'"
+    assert remote_oarsub[-1] == (
         "GRID5000_PERSISTENT_ROOT=/home/u/eunis "
         "GRID5000_WORKERS=16 GRID5000_BATCH_SIZE=256 "
         "/home/u/eunis/source/scripts/grid5000/release.sh"
     )
-    assert calls[4] == ("ssh", "fgrenoble", "usagepolicycheck", "-t")
+    assert calls[4] == ("ssh", "fgrenoble", "usagepolicycheck -t")
     assert all("HF_TOKEN" not in " ".join(command) for command in calls)
 
 
@@ -209,7 +213,7 @@ def test_submit_rejects_an_existing_active_job(tmp_path: Path) -> None:
             runner=fake_runner,
         )
 
-    assert calls == [("ssh", "fgrenoble", "oarstat", "-j", "123456")]
+    assert calls == [("ssh", "fgrenoble", "oarstat -j 123456")]
 
 
 def test_config_rejects_capacity_batch_and_blank_profile_fields() -> None:
@@ -252,7 +256,7 @@ def test_submit_dry_run_builds_commands_without_contacting_grid5000(tmp_path: Pa
     )
 
     assert result.job is None
-    assert result.commands[0] == ("ssh", "fgrenoble", "usagepolicycheck", "-t")
+    assert result.commands[0] == ("ssh", "fgrenoble", "usagepolicycheck -t")
     assert calls == []
 
 
@@ -265,9 +269,9 @@ def test_submit_replaces_state_after_terminal_job_and_writes_safe_state(
 
     def fake_runner(command: tuple[str, ...]) -> str:
         calls.append(command)
-        if command[:3] == ("ssh", "fgrenoble", "oarstat"):
+        if command[:2] == ("ssh", "fgrenoble") and shlex.split(command[2])[0] == "oarstat":
             raise subprocess.CalledProcessError(1, command)
-        if command[:3] == ("ssh", "fgrenoble", "oarsub"):
+        if command[:2] == ("ssh", "fgrenoble") and shlex.split(command[2])[0] == "oarsub":
             return "Adding job 654321"
         return ""
 
@@ -296,7 +300,11 @@ def test_submit_replaces_state_after_terminal_job_and_writes_safe_state(
     assert '"datasets": [\n    "website",\n    "wikidata",\n    "description"\n  ]' in payload
     assert '"site": "grenoble"' in payload
     assert "HF_TOKEN" not in payload
-    assert calls[0] == ("ssh", "fgrenoble", "oarstat", "-j", first.job.job_id)
+    assert calls[0] == (
+        "ssh",
+        "fgrenoble",
+        f"oarstat -j {first.job.job_id}",
+    )
 
 
 def test_submit_rejects_corrupt_or_incomplete_state(tmp_path: Path) -> None:
