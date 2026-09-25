@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from functools import lru_cache
-from typing import Any
+from typing import Any, TypeGuard
 
 from pyproj import Transformer
 from shapely.errors import GEOSException
@@ -61,20 +61,22 @@ def to_equal_area(
 ) -> BaseGeometry | None:
     """Project a geometry to the EEA equal-area CRS."""
 
-    if not _is_usable(geometry):
+    if not is_usable(geometry):
         return None
     projected = transform(_transformer(source_crs, target_crs).transform, geometry)
     return _valid_geometry(projected)
 
 
-def _is_usable(geometry: BaseGeometry | None) -> bool:
+def is_usable(geometry: BaseGeometry | None) -> TypeGuard[BaseGeometry]:
+    """Return whether a geometry is non-null, non-empty and valid."""
+
     return geometry is not None and not geometry.is_empty and geometry.is_valid
 
 
 def safe_area(geometry: BaseGeometry | None) -> float:
     """Return a positive area only for a usable geometry."""
 
-    if geometry is None or geometry.is_empty or not geometry.is_valid:
+    if not is_usable(geometry):
         return 0.0
     area = float(geometry.area)
     return area if area > 0.0 else 0.0

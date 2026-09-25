@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import html
 import math
 from collections.abc import Mapping
@@ -10,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .domain import EunisResult
+from .fileio import sha256_file
 from .geometry import parse_geometry
 
 _CELL_SIZE = 2.0
@@ -210,7 +210,7 @@ class DatasetCardAccumulator:
             encoding="utf-8",
         )
         files = {"README.md": readme_path, _MAP_PATH: map_path}
-        hashes = {path: _sha256(local_path) for path, local_path in files.items()}
+        hashes = {path: sha256_file(local_path) for path, local_path in files.items()}
         manifest = {
             "readme_path": "README.md",
             "map_path": _MAP_PATH,
@@ -466,9 +466,3 @@ def _markdown_cell(value: object) -> str:
     return str(value).replace("|", "\\|").replace("\n", " ")
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()

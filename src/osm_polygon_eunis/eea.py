@@ -16,6 +16,7 @@ from zipfile import BadZipFile, ZipFile
 
 import httpx
 
+from .fileio import write_chunks
 from .reference import parse_layer_code
 
 _SHARE_TOKEN = re.compile(
@@ -237,17 +238,16 @@ def parse_classification_rows(rows: Iterable[Iterable[object]]) -> dict[str, str
         label = _classification_label(row, code_index, name_index)
         if label is None:
             continue
-        _merge_classification_label(labels, label)
+        _merge_label(labels, *label, source="classification")
     if not labels:
         raise ValueError("EEA classification workbook has no code/name rows")
     return labels
 
 
-def _merge_classification_label(labels: dict[str, str], label: tuple[str, str]) -> None:
-    code, name = label
+def _merge_label(labels: dict[str, str], code: str, name: str, source: str) -> None:
     previous = labels.setdefault(code, name)
     if previous != name:
-        raise ValueError(f"EEA classification has conflicting names for {code}")
+        raise ValueError(f"EEA {source} has conflicting names for {code}")
 
 
 def _classification_indexes(row: tuple[object, ...]) -> tuple[int, int] | None:
@@ -619,9 +619,7 @@ def _fetch_arcgis_page(client: _HttpClient, service_url: str, offset: int) -> Ma
 
 def _merge_labels(labels: dict[str, str], additions: Mapping[str, str]) -> None:
     for code, name in additions.items():
-        previous = labels.setdefault(code, name)
-        if previous != name:
-            raise ValueError(f"EEA ImageServer has conflicting names for {code}")
+        _merge_label(labels, code, name, source="ImageServer")
 
 
 def _classification_catalog_links(record: Mapping[str, object]) -> tuple[str, str]:
@@ -825,14 +823,10 @@ def download_asset(client: httpx.Client, asset: RemoteAsset, destination: Path) 
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha256()
-    written = 0
     with client.stream("GET", asset.url) as response:
         response.raise_for_status()
         with destination.open("wb") as output:
-            for chunk in response.iter_bytes(chunk_size=8 * 1024 * 1024):
-                output.write(chunk)
-                digest.update(chunk)
-                written += len(chunk)
+            written = write_chunks(response.iter_bytes(chunk_size=8 * 1024 * 1024), output, digest)
     if written != asset.size:
         destination.unlink(missing_ok=True)
         raise ValueError(f"EEA asset byte count {written} does not match metadata {asset.size}")

@@ -14,6 +14,7 @@ import pyarrow.parquet as pq
 from huggingface_hub import duplicate_repo
 from huggingface_hub.utils import RepositoryNotFoundError
 
+from .fileio import sha256_file
 from .sources import capture_revision, download_to_temp
 
 
@@ -332,14 +333,8 @@ def _verify_artifacts(
             directory,
             client=http_client,
         )
-        actual_hash = _sha256_file(local)
+        actual_hash = sha256_file(local)
         if actual_hash != expected_hash:
             raise ValueError(f"remote artifact mismatch: {path}")
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()

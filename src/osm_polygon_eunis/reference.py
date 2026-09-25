@@ -28,6 +28,7 @@ from shapely.ops import unary_union
 from shapely.wkb import loads as load_wkb
 
 from .domain import EunisResult, OverlapCandidate
+from .geometry import is_usable
 from .matching import choose_winner
 
 _LAYER_CODE = re.compile(r"^Prob_(?P<code>[A-Z][A-Z0-9.]+)_\d+m\.tif$")
@@ -131,7 +132,7 @@ class RasterReference:
     def overlap(self, polygon: BaseGeometry | None) -> EunisResult:
         """Return the label with the largest actual intersection area."""
 
-        if polygon is None or polygon.is_empty or not polygon.is_valid:
+        if not is_usable(polygon):
             return choose_winner(polygon, (), source_version=self._source_version)
 
         if self._stack is not None:
@@ -443,7 +444,7 @@ class GeoPackageReference:
     def overlap(self, polygon: BaseGeometry | None) -> EunisResult:
         """Return the largest exact polygon intersection from indexed features."""
 
-        if polygon is None or polygon.is_empty or not polygon.is_valid:
+        if not is_usable(polygon):
             return choose_winner(polygon, (), source_version=self._source_version)
         if self._connection is None:
             with self:
@@ -482,7 +483,7 @@ class GeoPackageReference:
         code = _vector_code(row[0], self._labels)
         blob = _vector_blob(row[1])
         geometry = self.decode_geometry(blob)
-        return (code, geometry) if not geometry.is_empty and geometry.is_valid else None
+        return (code, geometry) if is_usable(geometry) else None
 
     def _tile_candidates(
         self,

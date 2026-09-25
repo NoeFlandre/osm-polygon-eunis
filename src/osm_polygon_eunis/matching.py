@@ -1,6 +1,7 @@
 """Pure deterministic selection of the largest actual geometry overlap."""
 
 from collections.abc import Iterable
+from typing import TypeGuard
 
 from shapely import area as shapely_area
 from shapely import get_parts
@@ -8,6 +9,7 @@ from shapely import intersection as shapely_intersection
 from shapely.geometry.base import BaseGeometry
 
 from .domain import EunisResult, OverlapCandidate
+from .geometry import is_usable
 
 
 def _empty_result() -> EunisResult:
@@ -24,7 +26,6 @@ def choose_winner(
 
     if not _usable_polygon(polygon):
         return _empty_result()
-    assert polygon is not None
 
     overlaps = _positive_overlaps(polygon, candidates)
     if not overlaps:
@@ -33,8 +34,8 @@ def choose_winner(
     return EunisResult(winner.code, winner.name, _percentage(area, polygon.area), source_version)
 
 
-def _usable_polygon(polygon: BaseGeometry | None) -> bool:
-    return polygon is not None and not polygon.is_empty and polygon.is_valid and polygon.area > 0
+def _usable_polygon(polygon: BaseGeometry | None) -> TypeGuard[BaseGeometry]:
+    return is_usable(polygon) and polygon.area > 0
 
 
 def _positive_overlaps(
@@ -53,7 +54,7 @@ def _intersection_area(
     polygon: BaseGeometry,
     candidate: OverlapCandidate,
 ) -> float | None:
-    if candidate.geometry.is_empty or not candidate.geometry.is_valid:
+    if not is_usable(candidate.geometry):
         return None
     try:
         area = _exact_intersection_area(polygon, candidate)
@@ -83,31 +84,21 @@ def prefer_result(current: EunisResult, candidate: EunisResult) -> EunisResult:
     if candidate.is_empty:
         return current
     _require_same_source_version(current, candidate)
-    assert current.overlap_percentage is not None
-    assert candidate.overlap_percentage is not None
-    return _prefer_non_empty(current, candidate)
+    return candidate if _outranks(_rank(candidate), _rank(current)) else current
+
+
+def _outranks(candidate: tuple[float, str], current: tuple[float, str]) -> bool:
+    if candidate[0] != current[0]:
+        return candidate[0] > current[0]
+    return candidate[1] < current[1]
+
+
+def _rank(result: EunisResult) -> tuple[float, str]:
+    assert result.overlap_percentage is not None
+    assert result.code is not None
+    return result.overlap_percentage, result.code
 
 
 def _require_same_source_version(current: EunisResult, candidate: EunisResult) -> None:
     if current.source_version != candidate.source_version:
         raise ValueError("cannot merge EUNIS results from different source versions")
-
-
-def _prefer_non_empty(current: EunisResult, candidate: EunisResult) -> EunisResult:
-    assert current.overlap_percentage is not None
-    assert candidate.overlap_percentage is not None
-    if candidate.overlap_percentage != current.overlap_percentage:
-        return _higher_percentage(current, candidate)
-    return _prefer_code(current, candidate)
-
-
-def _higher_percentage(current: EunisResult, candidate: EunisResult) -> EunisResult:
-    assert current.overlap_percentage is not None
-    assert candidate.overlap_percentage is not None
-    return candidate if candidate.overlap_percentage > current.overlap_percentage else current
-
-
-def _prefer_code(current: EunisResult, candidate: EunisResult) -> EunisResult:
-    assert current.code is not None
-    assert candidate.code is not None
-    return candidate if candidate.code < current.code else current
