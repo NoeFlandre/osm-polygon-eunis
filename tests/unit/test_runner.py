@@ -744,3 +744,139 @@ def test_verify_no_op_dataset_reuses_manifest_expectations(monkeypatch, tmp_path
 
     assert result.no_op is True
     assert result.expectations == (ShardExpectation("polygons/a.parquet", 1, "schema"),)
+
+
+class _TrackedReference:
+    def __init__(self, *args, **kwargs) -> None:
+        self.args = args
+        self.kwargs = kwargs
+        self.closed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args) -> None:
+        self.closed = True
+
+
+def test_worker_reference_batch_opens_local_groups_once_and_closes_on_exit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    opened: list[_TrackedReference] = []
+
+    def fake_reference(*args, **kwargs):
+        opened.append(_TrackedReference(*args, **kwargs))
+        return opened[-1]
+
+    monkeypatch.setattr(runner, "RasterReference", fake_reference)
+    monkeypatch.setattr(runner, "GeoPackageReference", fake_reference)
+    raster_group = EeaGroup(
+        "raster-record", "raster", "folder", "service", {}, (_asset("/Prob_R11.tif"),), None
+    )
+    vector_group = EeaGroup(
+        "vector-record",
+        "vector",
+        "folder",
+        "service",
+        {"Q11": "bog"},
+        (),
+        _asset("/habitats.gpkg", code=None),
+    )
+    groups = (raster_group, vector_group)
+
+    first = runner._worker_reference_batch(groups, tmp_path, 3, start_index=2)
+    second = runner._worker_reference_batch(groups, tmp_path, 3, start_index=2)
+
+    assert first is second
+    assert first == tuple(opened)
+    layers = opened[0].args[0]
+    assert [(layer.code, layer.name, layer.path) for layer in layers] == [
+        ("R11", "steppe", tmp_path / "02-raster-r" / "R11.tif")
+    ]
+    assert opened[0].kwargs == {"threshold": 3}
+    assert opened[1].args[0] == tmp_path / "03-vector-r" / "habitats.gpkg"
+    runner._close_worker_reference_cache()
+    assert all(reference.closed for reference in opened)
+    assert runner._WORKER_REFERENCES == {}
+
+
+def test_worker_reference_batch_closes_opened_groups_on_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    opened: list[_TrackedReference] = []
+
+    def fake_reference(*args, **kwargs):
+        opened.append(_TrackedReference(*args, **kwargs))
+        return opened[-1]
+
+    monkeypatch.setattr(runner, "RasterReference", fake_reference)
+    raster_group = EeaGroup(
+        "raster-record", "raster", "folder", "service", {}, (_asset("/Prob_R11.tif"),), None
+    )
+    empty_group = EeaGroup("empty", "empty", "folder", "service", {}, (), None)
+
+    with pytest.raises(ValueError, match="no reference asset"):
+        runner._worker_reference_batch((raster_group, empty_group), tmp_path, 0, start_index=0)
+
+    assert [reference.closed for reference in opened] == [True]
+    assert runner._WORKER_REFERENCES == {}
+
+
+def test_process_geometry_chunk_runs_each_micro_batch_against_each_reference_batch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    events: list[tuple] = []
+    plan = SimpleNamespace(spec=SimpleNamespace(name="dataset"))
+    monkeypatch.setattr(runner, "HfApi", lambda **kwargs: ("api", kwargs))
+    monkeypatch.setattr(
+        runner, "_indexed_reference_group_batches", lambda groups: ((0, groups), (5, groups))
+    )
+    monkeypatch.setattr(runner, "_geometry_micro_batches", lambda jobs: (jobs[:1], jobs[1:]))
+    monkeypatch.setattr(
+        runner,
+        "_cache_geometry_jobs",
+        lambda api, plans, jobs, root, client: events.append(("cache", jobs)),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_remove_cached_geometry_jobs",
+        lambda plans, jobs, root: events.append(("remove", jobs)),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_worker_reference_batch",
+        lambda groups, root, threshold, start_index: (f"refs-{start_index}",),
+    )
+
+    def fake_process(api, plan_arg, **kwargs):
+        assert plan_arg is plan
+        assert kwargs["retain_source"] is True
+        assert kwargs["progress"] is None
+        events.append(("process", kwargs["source_path"], kwargs["references"]))
+
+    monkeypatch.setattr(runner, "_process_geometry_path", fake_process)
+    jobs = (("dataset", "a.parquet"), ("dataset", "b.parquet"))
+    chunk = runner._GeometryChunk(
+        groups=(),
+        reference_directory=tmp_path,
+        plans=(plan,),  # ty: ignore[invalid-argument-type]
+        jobs=jobs,
+        sidecar_root=tmp_path,
+        source_root=tmp_path,
+        threshold=0,
+        batch_size=8,
+        endpoint="https://hub.test",
+        token=None,
+    )
+
+    assert runner._process_geometry_chunk(chunk) == jobs
+    assert events == [
+        ("cache", jobs[:1]),
+        ("process", "a.parquet", ("refs-0",)),
+        ("process", "a.parquet", ("refs-5",)),
+        ("remove", jobs[:1]),
+        ("cache", jobs[1:]),
+        ("process", "b.parquet", ("refs-0",)),
+        ("process", "b.parquet", ("refs-5",)),
+        ("remove", jobs[1:]),
+    ]
