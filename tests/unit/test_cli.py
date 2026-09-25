@@ -35,6 +35,10 @@ def test_plan_command_prints_pinned_layout(monkeypatch, capsys) -> None:
 def test_release_command_prints_verified_summary(monkeypatch, capsys, tmp_path: Path) -> None:
     monkeypatch.setattr(cli, "_api", lambda endpoint: SimpleNamespace(endpoint=endpoint))
     monkeypatch.setattr(cli, "run_release", lambda *args, **kwargs: _receipt())
+    monkeypatch.setenv("HF_TOKEN", "token")
+    (tmp_path / "reference.json").write_text(
+        '{"source_version": "v", "crs": "EPSG:3035", "threshold": 0}', encoding="utf-8"
+    )
 
     assert (
         cli.main(

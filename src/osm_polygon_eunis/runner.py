@@ -16,6 +16,8 @@ from .domain import EunisResult
 from .eea import EeaGroup, resolve_config_data
 from .geometry_jobs import _process_reference_groups, process_geometry_paths
 from .manifest_state import (
+    _compatible_manifests,
+    _load_existing_manifests,
     _reference_manifest,
     _shared_blobs,
     _try_no_op_release,
@@ -25,6 +27,7 @@ from .publish import (
     ShardExpectation,
     build_manifest,
     duplicate_source,
+    target_exists,
     upload_manifest,
     upload_replacement,
 )
@@ -50,13 +53,17 @@ from .transform import (
 __all__ = [
     "DatasetPlan",
     "DatasetReceipt",
+    "DryRunDataset",
+    "DryRunReport",
     "Progress",
     "ReleaseReceipt",
     "finalize_dataset",
     "open_reference_group",
     "plan_datasets",
+    "plan_release",
     "process_geometry_paths",
     "run_release",
+    "validate_reference_config",
 ]
 
 _SOURCE_WORKERS = 8
@@ -78,6 +85,39 @@ class _ReferenceSettings:
     crs: str
     threshold: int
     config: Mapping[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class DryRunDataset:
+    """What a release would do for one dataset, computed without Hub writes."""
+
+    plan: DatasetPlan
+    target_exists: bool
+    shards_to_upload: tuple[str, ...]
+
+    @property
+    def would_duplicate(self) -> bool:
+        return not self.target_exists
+
+
+@dataclass(frozen=True, slots=True)
+class DryRunReport:
+    """Read-only preview of a release."""
+
+    datasets: tuple[DryRunDataset, ...]
+    no_op: bool
+    reference_assets: int
+
+
+def validate_reference_config(config_path: Path) -> None:
+    """Fail fast when the reference config is missing, unreadable or invalid."""
+
+    if not config_path.is_file():
+        raise FileNotFoundError(f"reference config not found: {config_path}")
+    try:
+        _settings(config_path)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"reference config is not valid JSON: {config_path}: {error}") from error
 
 
 def _settings(config_path: Path) -> _ReferenceSettings:
@@ -449,11 +489,11 @@ def run_release(
     settings = _settings(reference_config)
     workdir.mkdir(parents=True, exist_ok=True)
     plans = plan_datasets(api)
-    _duplicate_outputs(api, plans, token)
     groups = resolve_config_data(settings.config)
     sidecar_root = workdir / "sidecars"
     checksums: dict[str, str] = {}
     with _source_cache(workdir) as source_root, _http_client(None) as reusable_client:
+        # Detect a verified no-op before any Hub write so a rerun stays read-only.
         no_op_receipt = _try_no_op_release(
             api,
             plans,
@@ -464,6 +504,7 @@ def run_release(
         )
         if no_op_receipt is not None:
             return no_op_receipt
+        _duplicate_outputs(api, plans, token)
         _process_reference_groups(
             api,
             plans,
@@ -494,6 +535,35 @@ def run_release(
             for plan in plans
         )
     return ReleaseReceipt(receipts, reference_info)
+
+
+def plan_release(
+    api: HubApi,
+    *,
+    reference_config: Path,
+    workdir: Path,
+) -> DryRunReport:
+    """Resolve plans, references and no-op status without writing to the Hub."""
+
+    settings = _settings(reference_config)
+    workdir.mkdir(parents=True, exist_ok=True)
+    plans = plan_datasets(api)
+    groups = resolve_config_data(settings.config)
+    reference = _reference_info(groups, {}, settings)
+    with _http_client(None) as client:
+        existing = _load_existing_manifests(api, plans, workdir / "dry-run", client)
+    no_op = _compatible_manifests(plans, existing, reference)
+    assets = reference.get("assets")
+    return DryRunReport(
+        tuple(_dry_run_dataset(api, plan, no_op=no_op) for plan in plans),
+        no_op,
+        len(assets) if isinstance(assets, list) else 0,
+    )
+
+
+def _dry_run_dataset(api: HubApi, plan: DatasetPlan, *, no_op: bool) -> DryRunDataset:
+    shards = () if no_op else (*plan.geometry_paths, *plan.link_paths)
+    return DryRunDataset(plan, target_exists(api, plan.spec.output_repo), tuple(shards))
 
 
 def _reference_info(

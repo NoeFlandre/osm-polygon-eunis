@@ -616,7 +616,11 @@ def test_run_release_verifies_matching_manifests_without_processing(
         no_op=True,
     )
     monkeypatch.setattr(runner, "plan_datasets", lambda api: (plan,))
-    monkeypatch.setattr(runner, "_duplicate_outputs", lambda *args: None)
+    monkeypatch.setattr(
+        runner,
+        "_duplicate_outputs",
+        lambda *args: pytest.fail("a verified no-op must not duplicate target repos"),
+    )
     monkeypatch.setattr(runner, "resolve_config_data", lambda config: ())
     monkeypatch.setattr(runner, "_reference_manifest", lambda *args, **kwargs: reference)
     monkeypatch.setattr(

@@ -39,6 +39,16 @@ class VerificationReceipt:
     manifest: Mapping[str, Any] | None
 
 
+def target_exists(api: HubApi, target_repo: str) -> bool:
+    """Return whether a target dataset repository already exists (read-only)."""
+
+    try:
+        api.repo_info(target_repo, repo_type="dataset")
+    except RepositoryNotFoundError:
+        return False
+    return True
+
+
 def duplicate_source(
     api: HubApi,
     source_repo: str,
@@ -49,9 +59,7 @@ def duplicate_source(
 ) -> bool:
     """Duplicate a dataset server-side only when the target does not exist."""
 
-    try:
-        api.repo_info(target_repo, repo_type="dataset")
-    except RepositoryNotFoundError:
+    if not target_exists(api, target_repo):
         duplicate(
             source_repo,
             target_repo,

@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
+from huggingface_hub.errors import RepositoryNotFoundError
+
 from ._protocols import HubApi, StreamClient
 from .eea import EeaGroup
 from .publish import (
@@ -129,7 +131,10 @@ def _load_existing_manifest(
 ) -> _ExistingManifest | None:
     """Load a tiny target manifest without using the persistent Hub cache."""
 
-    target_revision = capture_revision(api, plan.spec.output_repo)
+    try:
+        target_revision = capture_revision(api, plan.spec.output_repo)
+    except RepositoryNotFoundError:
+        return None
     paths = {entry.path for entry in list_repo_files(api, plan.spec.output_repo, target_revision)}
     if "eunis/manifest.json" not in paths:
         return None
