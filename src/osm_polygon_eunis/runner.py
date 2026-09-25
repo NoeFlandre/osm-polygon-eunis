@@ -19,7 +19,7 @@ from huggingface_hub import HfApi
 
 from .cards import CardArtifacts, DatasetCardAccumulator
 from .domain import EunisResult
-from .eea import EeaGroup, RemoteAsset, download_asset, resolve_config
+from .eea import EeaGroup, RemoteAsset, download_asset, resolve_config_data
 from .publish import (
     ShardExpectation,
     VerificationReceipt,
@@ -118,20 +118,28 @@ class _GeometryChunk:
     token: str | bool | None
 
 
-def _settings(config_path: Path) -> tuple[str, str, int, Mapping[str, object]]:
+@dataclass(frozen=True, slots=True)
+class _ReferenceSettings:
+    """Validated top-level reference config fields plus the parsed document."""
+
+    source_version: str
+    crs: str
+    threshold: int
+    config: Mapping[str, object]
+
+
+def _settings(config_path: Path) -> _ReferenceSettings:
     config = json.loads(config_path.read_text(encoding="utf-8"))
     if not isinstance(config, Mapping):
         raise ValueError("reference config must be an object")
     return _validated_settings(cast(Mapping[str, object], config))
 
 
-def _validated_settings(
-    config: Mapping[str, object],
-) -> tuple[str, str, int, Mapping[str, object]]:
+def _validated_settings(config: Mapping[str, object]) -> _ReferenceSettings:
     source_version = _required_setting(config, "source_version")
     crs = _required_setting(config, "crs")
     threshold = _threshold_setting(config)
-    return source_version, crs, threshold, config
+    return _ReferenceSettings(source_version, crs, threshold, config)
 
 
 def _required_setting(config: Mapping[str, object], field: str) -> str:
@@ -1178,21 +1186,21 @@ def run_release(
 ) -> ReleaseReceipt:
     """Run, publish, and independently verify all three datasets."""
 
-    source_version, crs, threshold, config = _settings(reference_config)
+    settings = _settings(reference_config)
     workdir.mkdir(parents=True, exist_ok=True)
     plans = plan_datasets(api)
     _duplicate_outputs(api, plans, token)
-    groups = resolve_config(reference_config)
+    groups = resolve_config_data(settings.config)
     sidecar_root = workdir / "sidecars"
     checksums: dict[str, str] = {}
     with _source_cache(workdir) as source_root, _http_client(None) as reusable_client:
         reference_identity = _reference_manifest(
             groups,
             {},
-            source_version=source_version,
-            crs=crs,
-            threshold=threshold,
-            config=config,
+            source_version=settings.source_version,
+            crs=settings.crs,
+            threshold=settings.threshold,
+            config=settings.config,
         )
         no_op_receipt = _try_no_op_release(
             api,
@@ -1211,7 +1219,7 @@ def run_release(
             sidecar_root=sidecar_root,
             source_root=source_root,
             workdir=workdir,
-            threshold=threshold,
+            threshold=settings.threshold,
             checksums=checksums,
             batch_size=batch_size,
             progress=progress,
@@ -1221,10 +1229,10 @@ def run_release(
         reference_info = _reference_manifest(
             groups,
             checksums,
-            source_version=source_version,
-            crs=crs,
-            threshold=threshold,
-            config=config,
+            source_version=settings.source_version,
+            crs=settings.crs,
+            threshold=settings.threshold,
+            config=settings.config,
         )
         receipts = tuple(
             _finalize_plan(

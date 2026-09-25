@@ -739,7 +739,12 @@ def _build_vector_asset(
 def resolve_config(config_path: Path) -> tuple[EeaGroup, ...]:
     """Resolve all configured EEA records using one bounded HTTP client."""
 
-    config = json.loads(config_path.read_text(encoding="utf-8"))
+    return resolve_config_data(json.loads(config_path.read_text(encoding="utf-8")))
+
+
+def resolve_config_data(config: object) -> tuple[EeaGroup, ...]:
+    """Resolve an already-parsed reference config document."""
+
     settings = _config_settings(config)
     with httpx.Client(
         headers={"Accept": "application/json", "User-Agent": _USER_AGENT},

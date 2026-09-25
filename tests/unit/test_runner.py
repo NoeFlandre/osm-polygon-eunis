@@ -547,7 +547,7 @@ def test_run_release_coordinates_pooled_processing(monkeypatch, tmp_path: Path) 
     monkeypatch.setattr(runner, "plan_datasets", lambda api: (plan,))
     monkeypatch.setattr(runner, "_duplicate_outputs", lambda *args: None)
     monkeypatch.setattr(runner, "_load_existing_manifest", lambda *args: None)
-    monkeypatch.setattr(runner, "resolve_config", lambda path: (group,))
+    monkeypatch.setattr(runner, "resolve_config_data", lambda config: (group,))
     monkeypatch.setattr(
         runner,
         "_process_reference_groups",
@@ -608,7 +608,7 @@ def test_run_release_verifies_matching_manifests_without_processing(
     )
     monkeypatch.setattr(runner, "plan_datasets", lambda api: (plan,))
     monkeypatch.setattr(runner, "_duplicate_outputs", lambda *args: None)
-    monkeypatch.setattr(runner, "resolve_config", lambda path: ())
+    monkeypatch.setattr(runner, "resolve_config_data", lambda config: ())
     monkeypatch.setattr(runner, "_reference_manifest", lambda *args, **kwargs: reference)
     monkeypatch.setattr(
         runner,
