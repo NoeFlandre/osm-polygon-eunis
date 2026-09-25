@@ -3,7 +3,8 @@
 Use a temporary directory on the HDD with enough room for one source shard,
 one replacement shard, and the resolved EEA reference assets. Set `UV_CACHE_DIR`
 outside the dataset root. Production commands emit JSON-line progress records
-and verify row counts and schemas after every upload.
+on stderr (silence them with `-q`, add a start record with `-v`) and print only
+the final JSON result on stdout. They verify row counts and schemas after every upload.
 
 Local checks use a task-scoped cache on the temporary volume:
 
@@ -72,6 +73,18 @@ information with examples.
 the remote tree, shared blob identities, Parquet rows and schemas, and card
 artifact hashes against it, pinned to the source revision the manifest records.
 It exits nonzero if a target has no manifest or does not match it.
+
+Global flags, accepted before or after the command: `--version`, `-q/--quiet`,
+`-v/--verbose` and `--debug` (show the full traceback instead of a one-line
+`error: ...` message on stderr).
+
+| Exit status | Meaning |
+|---|---|
+| 0 | success (including a verified no-op) |
+| 1 | unexpected error |
+| 2 | usage or config error (bad option, missing `HF_TOKEN`, invalid reference config) |
+| 3 | Hub/network or authentication error |
+| 4 | verification failed (published target does not match its expectation or manifest) |
 
 Before handoff, run the deterministic gates in this order (these mirror
 `.github/workflows/qa.yml`; keep the two in sync):

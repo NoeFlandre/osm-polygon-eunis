@@ -19,6 +19,10 @@ from .fileio import sha256_file
 from .sources import capture_revision, download_to_temp
 
 
+class VerificationError(ValueError):
+    """A published target does not match what the release expected."""
+
+
 @dataclass(frozen=True, slots=True)
 class ShardExpectation:
     """Expected remote row count and schema fingerprint for one Parquet file."""
@@ -258,9 +262,9 @@ def _validate_tree(remote: Mapping[str, Any], expected_tree_paths: Iterable[str]
     missing = sorted(expected_paths - set(remote))
     extra = sorted(set(remote) - expected_paths)
     if missing:
-        raise ValueError(f"missing target paths: {missing}")
+        raise VerificationError(f"missing target paths: {missing}")
     if extra:
-        raise ValueError(f"unexpected target paths: {extra}")
+        raise VerificationError(f"unexpected target paths: {extra}")
 
 
 def _verify_shared_blobs(
@@ -270,7 +274,7 @@ def _verify_shared_blobs(
     for path, expected_blob in (expected_shared_blobs or {}).items():
         actual_blob = getattr(remote[path], "blob_id", None)
         if actual_blob != expected_blob:
-            raise ValueError(f"shared path changed: {path}")
+            raise VerificationError(f"shared path changed: {path}")
 
 
 def _verify_expectations(
@@ -293,7 +297,7 @@ def _verify_expectations(
         )
         rows, schema = parquet_signature(local)
         if rows != expectation.rows or schema != expectation.schema:
-            raise ValueError(f"remote Parquet mismatch: {expectation.path}")
+            raise VerificationError(f"remote Parquet mismatch: {expectation.path}")
         rows_by_path[expectation.path] = rows
     return rows_by_path
 
@@ -318,7 +322,7 @@ def _verify_manifest(
     )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest != dict(expected_manifest):
-        raise ValueError("remote EUNIS manifest does not match expected manifest")
+        raise VerificationError("remote EUNIS manifest does not match expected manifest")
     return manifest
 
 
@@ -341,4 +345,4 @@ def _verify_artifacts(
         )
         actual_hash = sha256_file(local)
         if actual_hash != expected_hash:
-            raise ValueError(f"remote artifact mismatch: {path}")
+            raise VerificationError(f"remote artifact mismatch: {path}")

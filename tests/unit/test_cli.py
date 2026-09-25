@@ -1,8 +1,10 @@
 import argparse
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
+import httpx
 import pytest
 
 import osm_polygon_eunis.cli as cli
@@ -10,9 +12,11 @@ from osm_polygon_eunis._protocols import HubApi
 from osm_polygon_eunis.publish import ShardExpectation, VerificationReceipt
 from osm_polygon_eunis.runner import (
     DATASET_NAMES,
+    ConfigError,
     DatasetPlan,
     DatasetReceipt,
     ReleaseReceipt,
+    VerificationError,
     plan_datasets,
     selected_dataset_names,
 )
@@ -160,3 +164,101 @@ def test_verify_command_prints_receipt(monkeypatch, capsys, tmp_path: Path) -> N
     assert cli.main(["verify", "--dataset", "website", "--workdir", str(tmp_path)]) == 0
     assert seen["datasets"] == ["website"]
     assert '"verified_revision": "target-revision"' in capsys.readouterr().out
+
+
+def _raise(error: Exception):
+    def fail(*_args, **_kwargs):
+        raise error
+
+    return fail
+
+
+def _hub_error() -> Exception:
+    from huggingface_hub.errors import HfHubHTTPError
+
+    request = httpx.Request("GET", "https://example.test")
+    return HfHubHTTPError("401 unauthorized", response=httpx.Response(401, request=request))
+
+
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        (RuntimeError("boom"), cli.EXIT_ERROR),
+        (ConfigError("bad config"), cli.EXIT_USAGE),
+        (httpx.ConnectError("offline"), cli.EXIT_REMOTE),
+        (_hub_error(), cli.EXIT_REMOTE),
+        (VerificationError("remote Parquet mismatch: x"), cli.EXIT_VERIFICATION),
+    ],
+)
+def test_errors_map_to_documented_exit_codes_without_traceback(
+    monkeypatch, capsys, error: Exception, code: int
+) -> None:
+    monkeypatch.setattr(cli, "_api", lambda endpoint: object())
+    monkeypatch.setattr(cli, "verify_release", _raise(error))
+
+    assert cli.main(["verify"]) == code
+    err = capsys.readouterr().err
+    assert err.startswith("error: ")
+    assert "Traceback" not in err
+
+
+def test_debug_reraises_with_traceback(monkeypatch) -> None:
+    monkeypatch.setattr(cli, "_api", lambda endpoint: object())
+    monkeypatch.setattr(cli, "verify_release", _raise(VerificationError("mismatch")))
+
+    with pytest.raises(VerificationError):
+        cli.main(["verify", "--debug"])
+
+
+def test_version_prints_package_version(capsys) -> None:
+    with pytest.raises(SystemExit) as raised:
+        cli.main(["--version"])
+    assert raised.value.code == 0
+    assert capsys.readouterr().out.startswith("osm-polygon-eunis ")
+
+
+def test_version_falls_back_when_package_metadata_is_missing(monkeypatch) -> None:
+    monkeypatch.setattr(cli.metadata, "version", _raise(cli.metadata.PackageNotFoundError()))
+    assert cli._version() == "unknown"
+
+
+def _release_with_progress(monkeypatch, tmp_path: Path, *flags: str) -> None:
+    def fake_release(*_args, progress=None, **_kwargs):
+        if progress is not None:
+            progress({"event": "shards_uploaded", "dataset": "website"})
+        return _receipt()
+
+    config = tmp_path / "reference.json"
+    config.write_text('{"source_version": "v", "crs": "EPSG:3035", "threshold": 0}')
+    monkeypatch.setenv("HF_TOKEN", "token")
+    monkeypatch.setattr(cli, "_api", lambda endpoint: object())
+    monkeypatch.setattr(cli, "run_release", fake_release)
+    assert cli.main(["release", "--reference-config", str(config), *flags]) == 0
+
+
+def test_progress_goes_to_stderr_and_stdout_is_only_the_receipt(
+    monkeypatch, capsys, tmp_path: Path
+) -> None:
+    _release_with_progress(monkeypatch, tmp_path)
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["datasets"][0]["dataset"] == "website"
+    assert '"shards_uploaded"' in captured.err
+
+
+def test_quiet_release_prints_only_the_receipt(monkeypatch, capsys, tmp_path: Path) -> None:
+    _release_with_progress(monkeypatch, tmp_path, "-q")
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["datasets"]
+    assert captured.err == ""
+
+
+def test_verbose_adds_start_record(monkeypatch, capsys, tmp_path: Path) -> None:
+    _release_with_progress(monkeypatch, tmp_path, "-v")
+    err_lines = capsys.readouterr().err.splitlines()
+    assert json.loads(err_lines[0])["event"] == "start"
+
+
+def test_quiet_and_verbose_are_mutually_exclusive() -> None:
+    with pytest.raises(SystemExit) as raised:
+        cli.main(["release", "-q", "-v"])
+    assert raised.value.code == 2

@@ -27,6 +27,7 @@ from .manifest_state import (
 )
 from .publish import (
     ShardExpectation,
+    VerificationError,
     build_manifest,
     duplicate_source,
     target_exists,
@@ -57,12 +58,14 @@ from .transform import (
 __all__ = [
     "DATASET_NAMES",
     "DEFAULT_WORKERS",
+    "ConfigError",
     "DatasetPlan",
     "DatasetReceipt",
     "DryRunDataset",
     "DryRunReport",
     "Progress",
     "ReleaseReceipt",
+    "VerificationError",
     "finalize_dataset",
     "open_reference_group",
     "plan_datasets",
@@ -96,6 +99,10 @@ class _ReferenceSettings:
     config: Mapping[str, object]
 
 
+class ConfigError(ValueError):
+    """The reference config or a command input is missing or invalid."""
+
+
 @dataclass(frozen=True, slots=True)
 class DryRunDataset:
     """What a release would do for one dataset, computed without Hub writes."""
@@ -122,11 +129,13 @@ def validate_reference_config(config_path: Path) -> None:
     """Fail fast when the reference config is missing, unreadable or invalid."""
 
     if not config_path.is_file():
-        raise FileNotFoundError(f"reference config not found: {config_path}")
+        raise ConfigError(f"reference config not found: {config_path}")
     try:
         _settings(config_path)
     except json.JSONDecodeError as error:
-        raise ValueError(f"reference config is not valid JSON: {config_path}: {error}") from error
+        raise ConfigError(f"reference config is not valid JSON: {config_path}: {error}") from error
+    except (OSError, ValueError) as error:
+        raise ConfigError(f"{config_path}: {error}") from error
 
 
 def _settings(config_path: Path) -> _ReferenceSettings:
@@ -583,7 +592,7 @@ def verify_release(
 ) -> ReleaseReceipt:
     """Re-verify published targets against their own manifests without any Hub write.
 
-    Raises ``ValueError`` when a target has no EUNIS manifest or does not match it.
+    Raises ``VerificationError`` when a target has no EUNIS manifest or does not match it.
     """
 
     workdir.mkdir(parents=True, exist_ok=True)
@@ -608,7 +617,7 @@ def _verify_published(
     client: StreamClient,
 ) -> DatasetReceipt:
     if existing is None:
-        raise ValueError(f"{plan.spec.output_repo} has no EUNIS manifest to verify")
+        raise VerificationError(f"{plan.spec.output_repo} has no EUNIS manifest to verify")
     pinned = _manifest_plan(plan, existing.manifest)
     receipt = _verify_no_op_dataset(api, pinned, existing, workdir=workdir, client=client)
     return replace(receipt, no_op=False)
@@ -620,7 +629,7 @@ def _manifest_plan(plan: DatasetPlan, manifest: Mapping[str, object]) -> Dataset
     revision = manifest.get("source_revision")
     paths = manifest.get("source_paths")
     if not isinstance(revision, str) or not isinstance(paths, list):
-        raise ValueError(f"{plan.spec.output_repo} manifest lacks source revision or paths")
+        raise VerificationError(f"{plan.spec.output_repo} manifest lacks source revision or paths")
     return replace(plan, source_revision=revision, source_files=tuple(str(p) for p in paths))
 
 

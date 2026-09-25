@@ -120,7 +120,7 @@ def test_existing_manifest_is_absent_for_missing_target(tmp_path: Path) -> None:
 
 
 def test_validate_reference_config_rejects_missing_and_invalid(tmp_path: Path) -> None:
-    with pytest.raises(FileNotFoundError, match="not found"):
+    with pytest.raises(runner.ConfigError, match="not found"):
         runner.validate_reference_config(tmp_path / "missing.json")
     broken = tmp_path / "broken.json"
     broken.write_text("{", encoding="utf-8")
@@ -158,10 +158,12 @@ def test_release_fails_fast_before_any_hub_request(
     monkeypatch.chdir(tmp_path)
     base = ["release", "--reference-config", str(_config(tmp_path))]
 
-    with pytest.raises(SystemExit) as raised:
-        cli.main([*base, *argv])
+    try:
+        code = cli.main([*base, *argv])
+    except SystemExit as raised:  # argparse usage errors
+        code = raised.code
 
-    assert raised.value.code == 2
+    assert code == 2
     err = capsys.readouterr().err
     assert message in err
     assert "Traceback" not in err
