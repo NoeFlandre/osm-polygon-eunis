@@ -9,6 +9,7 @@ import re
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
@@ -18,6 +19,8 @@ import httpx
 
 from .fileio import write_chunks
 from .reference import parse_layer_code
+
+_USER_AGENT = "osm-polygon-eunis/" + ".".join(version("osm-polygon-eunis").split(".")[:2])
 
 _SHARE_TOKEN = re.compile(
     r"name=[\"']sharingToken[\"']\s+value=[\"']([^\"']+)[\"']",
@@ -739,7 +742,7 @@ def resolve_config(config_path: Path) -> tuple[EeaGroup, ...]:
     config = json.loads(config_path.read_text(encoding="utf-8"))
     settings = _config_settings(config)
     with httpx.Client(
-        headers={"Accept": "application/json", "User-Agent": "osm-polygon-eunis/0.1"},
+        headers={"Accept": "application/json", "User-Agent": _USER_AGENT},
         follow_redirects=True,
         timeout=60,
     ) as client:
