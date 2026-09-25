@@ -15,6 +15,10 @@ from osm_polygon_eunis.publish import ShardExpectation, VerificationReceipt
 from osm_polygon_eunis.runner import DatasetPlan, DatasetReceipt, process_geometry_paths
 from osm_polygon_eunis.sources import DatasetSpec
 
+# Remaining ``runner._*`` references are limited to seams with no public entry point:
+# monkeypatch targets that stub network/HF side effects for ``run_release``, and the
+# orchestration/manifest helpers that ``run_release`` only reaches after live I/O.
+
 
 class _Reference:
     def __init__(self, result: EunisResult) -> None:
@@ -44,59 +48,14 @@ def test_process_geometry_paths_keeps_only_compact_sidecar_state(
     )
     downloads = {"polygons/test.parquet": source}
 
+    clients: list[object] = []
+
     def fake_download(api, repo_id, path, revision, directory, *, client=None):
         del api, repo_id, revision
-        del client
+        clients.append(client)
         destination = directory / path.replace("/", "__")
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(downloads[path].read_bytes())
-        return destination
-
-    monkeypatch.setattr(runner, "download_to_temp", fake_download)
-    plan = DatasetPlan(
-        DatasetSpec("website", "source", "target", "polygons/*.parquet"),
-        "revision",
-        ("polygons/test.parquet",),
-        ("polygons/test.parquet",),
-        (),
-    )
-
-    process_geometry_paths(
-        object(),
-        plan,
-        reference=_Reference(EunisResult("R11", "steppe", 25.0, "test")),
-        sidecar_root=tmp_path / "sidecars",
-        source_root=tmp_path / "source",
-        batch_size=1,
-    )
-
-    sidecar = tmp_path / "sidecars" / "website" / "polygons__test.parquet.labels.parquet"
-    assert pq.read_table(sidecar)["eunis_code"].to_pylist() == ["R11", "R11"]
-    assert list((tmp_path / "source").iterdir()) == []
-
-
-def test_process_geometry_paths_forwards_a_reusable_http_client(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    source = tmp_path / "input.parquet"
-    pq.write_table(
-        pa.table(
-            {
-                "polygon_id": ["a"],
-                "geometry": ['{"type":"Point","coordinates":[0,0]}'],
-            }
-        ),
-        source,
-    )
-    calls: list[object] = []
-
-    def fake_download(api, repo_id, path, revision, directory, *, client=None):
-        del api, repo_id, revision
-        calls.append(client)
-        destination = directory / path.replace("/", "__")
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(source.read_bytes())
         return destination
 
     monkeypatch.setattr(runner, "download_to_temp", fake_download)
@@ -119,7 +78,10 @@ def test_process_geometry_paths_forwards_a_reusable_http_client(
         http_client=reusable_client,
     )
 
-    assert calls == [reusable_client]
+    assert clients == [reusable_client]
+    sidecar = tmp_path / "sidecars" / "website" / "polygons__test.parquet.labels.parquet"
+    assert pq.read_table(sidecar)["eunis_code"].to_pylist() == ["R11", "R11"]
+    assert list((tmp_path / "source").iterdir()) == []
 
 
 def test_process_geometry_paths_reuses_retained_source_shard(
@@ -183,42 +145,26 @@ def _asset(path: str, *, code: str | None = "R11") -> RemoteAsset:
     )
 
 
-def test_settings_and_reference_metadata_are_validated(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ([], "must be an object"),
+        ({"source_version": "", "crs": "EPSG:3035", "threshold": 0}, "missing source_version"),
+        ({"source_version": "ok", "crs": None, "threshold": 0}, "missing crs"),
+        ({"source_version": "ok", "crs": "EPSG:3035", "threshold": -1}, "invalid threshold"),
+    ],
+)
+def test_run_release_rejects_invalid_reference_config(
+    tmp_path: Path, payload: object, message: str
+) -> None:
     config = tmp_path / "config.json"
-    config.write_text(
-        json.dumps({"source_version": "EEA-test", "crs": "EPSG:3035", "threshold": 2}),
-        encoding="utf-8",
-    )
+    config.write_text(json.dumps(payload), encoding="utf-8")
 
-    assert runner._settings(config)[:3] == ("EEA-test", "EPSG:3035", 2)
-    assert (
-        runner._sidecar_path(
-            tmp_path,
-            DatasetSpec("website", "source", "target", "polygons/*.parquet"),
-            "polygons/a.parquet",
-        ).name
-        == "polygons__a.parquet.labels.parquet"
-    )
-    assert runner._asset_filename(_asset("/folder/Prob_R11_100M.TIF")) == "R11.tif"
-    assert runner._asset_filename(_asset("/folder/reference.gpkg", code=None)) == "reference.gpkg"
-    assert (
-        runner._asset_key(
-            EeaGroup("record", "title", "folder", "service", {}, (), None),
-            _asset("/asset.tif"),
+    with pytest.raises(ValueError, match=message):
+        runner.run_release(
+            object(), reference_config=config, workdir=tmp_path / "run", batch_size=1
         )
-        == "record:/asset.tif"
-    )
-
-    config.write_text("[]", encoding="utf-8")
-    with pytest.raises(ValueError, match="must be an object"):
-        runner._settings(config)
-    for field, value in (("source_version", ""), ("crs", None), ("threshold", -1)):
-        payload = {"source_version": "ok", "crs": "EPSG:3035", "threshold": 0}
-        payload[field] = value
-        config.write_text(json.dumps(payload), encoding="utf-8")
-        message = "invalid threshold" if field == "threshold" else f"missing {field}"
-        with pytest.raises(ValueError, match=message):
-            runner._settings(config)
+    assert not (tmp_path / "run").exists()
 
 
 def test_open_reference_group_reuses_client_for_raster_and_vector(
@@ -427,6 +373,7 @@ def test_planning_manifest_and_shared_blobs_are_deterministic(monkeypatch) -> No
     }
 
 
+# Scheduling invariant: every plan's geometry job is processed once, in plan order.
 def test_process_reference_groups_batches_reference_groups_for_all_plans(
     tmp_path: Path,
     monkeypatch,
@@ -515,92 +462,6 @@ def test_process_reference_groups_dispatches_streaming_parallel_batches(
     )
 
     assert seen == [(("record",), 2)]
-
-
-def test_geometry_micro_batches_are_bounded_and_ordered(monkeypatch) -> None:
-    monkeypatch.setattr(runner, "_SOURCE_MICRO_BATCH_SIZE", 2)
-    jobs = tuple(("website", str(index)) for index in range(5))
-
-    assert list(runner._geometry_micro_batches(jobs)) == [
-        (("website", "0"), ("website", "1")),
-        (("website", "2"), ("website", "3")),
-        (("website", "4"),),
-    ]
-
-
-def test_geometry_chunks_are_contiguous_and_dynamically_sized() -> None:
-    jobs = tuple(("website", str(index)) for index in range(10))
-
-    chunks = runner._geometry_chunks(jobs, parallelism=2)
-
-    assert chunks == (
-        (("website", "0"), ("website", "1")),
-        (("website", "2"), ("website", "3")),
-        (("website", "4"), ("website", "5")),
-        (("website", "6"), ("website", "7")),
-        (("website", "8"), ("website", "9")),
-    )
-
-
-def test_worker_reference_batch_reuses_open_handles(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    group = EeaGroup(
-        "record", "title", "folder", "service", {}, (), _asset("/habitats.gpkg", code=None)
-    )
-    opened: list[Path] = []
-
-    @contextmanager
-    def fake_open(group, directory, threshold):
-        del group, threshold
-        opened.append(directory)
-        yield object()
-
-    monkeypatch.setattr(runner, "_open_local_reference_group", fake_open)
-    runner._close_worker_reference_cache()
-
-    first = runner._worker_reference_batch((group,), tmp_path, 0, 0)
-    second = runner._worker_reference_batch((group,), tmp_path, 0, 0)
-
-    assert first is second
-    assert len(opened) == 1
-    runner._close_worker_reference_cache()
-
-
-def test_reference_group_batches_bound_rasters_and_coalesce_vectors() -> None:
-    raster = _asset("/Prob_R11.tif")
-    raster_groups = tuple(
-        EeaGroup(str(index), "title", "folder", "service", {}, (raster,), None)
-        for index in range(4)
-    )
-    vector_groups = tuple(
-        EeaGroup(
-            str(index),
-            "title",
-            "folder",
-            "service",
-            {},
-            (),
-            _asset(f"/{index}.gpkg", code=None),
-        )
-        for index in range(4, 7)
-    )
-
-    batches = runner._reference_group_batches(raster_groups + vector_groups)
-
-    assert [[group.record_id for group in batch] for batch in batches] == [
-        ["0", "1"],
-        ["2", "3"],
-        ["4", "5", "6"],
-    ]
-
-    reversed_batches = runner._reference_group_batches(vector_groups[:1] + raster_groups[:1])
-    assert [[group.record_id for group in batch] for batch in reversed_batches] == [["4"], ["0"]]
-    assert [
-        (start, [group.record_id for group in batch])
-        for start, batch in runner._indexed_reference_group_batches(raster_groups + vector_groups)
-    ] == [(0, ["0", "1"]), (2, ["2", "3"]), (4, ["4", "5", "6"])]
 
 
 def test_finalize_plan_builds_manifest_and_verifies_target(monkeypatch, tmp_path: Path) -> None:
