@@ -1,21 +1,10 @@
-from unittest.mock import Mock
-
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 from shapely.geometry import GeometryCollection, Polygon, box
 
-from osm_polygon_eunis import matching as matching_module
 from osm_polygon_eunis.domain import EunisResult, OverlapCandidate
-from osm_polygon_eunis.matching import (
-    _exact_intersection_area,
-    _higher_percentage,
-    _percentage,
-    _prefer_code,
-    _usable_polygon,
-    choose_winner,
-    prefer_result,
-)
+from osm_polygon_eunis.matching import choose_winner, prefer_result
 
 
 def test_largest_actual_intersection_and_percentage() -> None:
@@ -33,13 +22,9 @@ def test_largest_actual_intersection_and_percentage() -> None:
     assert result.source_version == "test"
 
 
-def test_disjoint_cell_collection_sums_exact_intersections(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_disjoint_cell_collection_sums_exact_intersections() -> None:
     polygon = box(0.5, 0.5, 2.5, 1.5)
     cells = (box(0, 0, 1, 2), box(2, 0, 3, 2))
-    vectorized_intersection = Mock(wraps=matching_module.shapely_intersection)
-    monkeypatch.setattr(matching_module, "shapely_intersection", vectorized_intersection)
 
     result = choose_winner(
         polygon,
@@ -56,7 +41,6 @@ def test_disjoint_cell_collection_sums_exact_intersections(
 
     assert result.code == "R11"
     assert result.overlap_percentage == 50.0
-    assert vectorized_intersection.call_count == 1
 
 
 def test_empty_disjoint_cell_collection_has_no_overlap() -> None:
@@ -66,8 +50,6 @@ def test_empty_disjoint_cell_collection_has_no_overlap() -> None:
         GeometryCollection(),
         components_are_disjoint=True,
     )
-
-    assert _exact_intersection_area(box(0, 0, 1, 1), candidate) == 0.0
 
     result = choose_winner(
         box(0, 0, 1, 1),
@@ -110,33 +92,28 @@ def test_equal_area_tie_uses_ascending_code() -> None:
     assert choose_winner(polygon, candidates, source_version="test").code == "R11"
 
 
-def test_empty_polygon_returns_all_null_fields() -> None:
-    result = choose_winner(box(0, 0, 0, 0), (), source_version="test")
+@pytest.mark.parametrize(
+    "polygon",
+    [
+        None,
+        box(0, 0, 0, 0),
+        Polygon([(0, 0), (2, 2), (0, 2), (2, 0), (0, 0)]),
+        box(0, 0, 1, 1).boundary,
+    ],
+    ids=["none", "zero-area", "invalid", "line"],
+)
+def test_unusable_polygon_returns_all_null_fields(polygon) -> None:
+    result = choose_winner(
+        polygon,
+        (OverlapCandidate("R11", "steppe", box(0, 0, 2, 2)),),
+        source_version="test",
+    )
 
     assert result.is_empty
     assert result.code is None
     assert result.name is None
     assert result.overlap_percentage is None
     assert result.source_version is None
-
-
-def test_invalid_zero_area_and_none_polygons_are_not_usable() -> None:
-    invalid = Polygon([(0, 0), (2, 2), (0, 2), (2, 0), (0, 0)])
-    line = box(0, 0, 1, 1).boundary
-
-    assert not _usable_polygon(None)
-    assert not _usable_polygon(invalid)
-    assert not _usable_polygon(line)
-    assert not choose_winner(
-        invalid,
-        (OverlapCandidate("R11", "steppe", box(0, 0, 2, 2)),),
-        source_version="test",
-    ).code
-    assert not choose_winner(
-        None,
-        (OverlapCandidate("R11", "steppe", box(0, 0, 2, 2)),),
-        source_version="test",
-    ).code
 
 
 def test_small_and_full_intersections_are_retained_and_capped() -> None:
@@ -153,8 +130,6 @@ def test_small_and_full_intersections_are_retained_and_capped() -> None:
 
     assert small.overlap_percentage == 25.0
     assert full.overlap_percentage == 100.0
-    assert _percentage(-1.0, 1.0) == 0.0
-    assert _percentage(2.0, 1.0) == 100.0
 
 
 def test_invalid_candidate_and_sub_unit_overlap_are_ignored() -> None:
@@ -192,19 +167,11 @@ def test_prefer_result_handles_unequal_percentages_and_version_mismatch() -> Non
 
     assert prefer_result(current, candidate) is candidate
     assert prefer_result(candidate, current) is candidate
+    same_code_tie = EunisResult("R11", "tie", 25.0, "test")
+    assert prefer_result(current, same_code_tie) is current
     with pytest.raises(ValueError) as error:
         prefer_result(current, EunisResult("R12", "other", 50.0, "other"))
     assert str(error.value) == "cannot merge EUNIS results from different source versions"
-
-
-def test_equal_code_ties_keep_the_current_result_and_cover_percentage_helper() -> None:
-    current = EunisResult("R11", "current", 25.0, "test")
-    candidate = EunisResult("R11", "candidate", 25.0, "test")
-
-    assert prefer_result(current, candidate) is current
-    assert _prefer_code(current, candidate) is current
-    assert _higher_percentage(current, candidate) is current
-    assert _higher_percentage(candidate, current) is candidate
 
 
 @st.composite

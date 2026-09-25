@@ -139,28 +139,23 @@ def test_verify_dataset_rejects_missing_target_paths() -> None:
         )
 
 
-def test_verify_dataset_checks_remote_parquet_shared_blobs_and_manifest(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
+class _FakeTargetApi:
+    def __init__(self, entries: tuple[SimpleNamespace, ...]) -> None:
+        self.entries = entries
+
+    def repo_info(self, *_args, **_kwargs):
+        return SimpleNamespace(sha="target-sha")
+
+    def list_repo_tree(self, *_args, **_kwargs):
+        return iter(self.entries)
+
+
+def _verification_kwargs(tmp_path: Path, monkeypatch) -> dict:
     parquet = tmp_path / "shard.parquet"
     pq.write_table(pa.table({"polygon_id": ["a"]}), parquet)
     rows, schema = parquet_signature(parquet)
     manifest = {"source_revision": "abc", "changed_paths": ["polygons/a.parquet"]}
     artifact = b"static-map"
-    entries = (
-        SimpleNamespace(path="README.md", blob_id="readme"),
-        SimpleNamespace(path="polygons/a.parquet", blob_id="new-shard"),
-        SimpleNamespace(path="eunis/manifest.json", blob_id="manifest"),
-        SimpleNamespace(path="eunis/world-map.svg", blob_id="map"),
-    )
-
-    class Api:
-        def repo_info(self, *_args, **_kwargs):
-            return SimpleNamespace(sha="target-sha")
-
-        def list_repo_tree(self, *_args, **_kwargs):
-            return iter(entries)
 
     def fake_download(api, repo_id, path, revision, directory, *, client=None):
         del api, repo_id, revision
@@ -176,24 +171,99 @@ def test_verify_dataset_checks_remote_parquet_shared_blobs_and_manifest(
         return destination
 
     monkeypatch.setattr("osm_polygon_eunis.publish.download_to_temp", fake_download)
-    receipt = verify_dataset(
-        Api(),
-        "org/target",
-        expectations=(ShardExpectation("polygons/a.parquet", rows, schema),),
-        expected_tree_paths=(
+    return {
+        "expectations": (ShardExpectation("polygons/a.parquet", rows, schema),),
+        "expected_tree_paths": (
             "README.md",
             "polygons/a.parquet",
             "eunis/manifest.json",
             "eunis/world-map.svg",
         ),
-        expected_shared_blobs={"README.md": "readme"},
-        expected_manifest=manifest,
-        expected_artifacts={
+        "expected_shared_blobs": {"README.md": "readme"},
+        "expected_manifest": manifest,
+        "expected_artifacts": {
             "eunis/world-map.svg": hashlib.sha256(artifact).hexdigest(),
         },
-        temp_dir=tmp_path / "verify",
-    )
+        "temp_dir": tmp_path / "verify",
+    }
+
+
+_TARGET_ENTRIES = (
+    SimpleNamespace(path="README.md", blob_id="readme"),
+    SimpleNamespace(path="polygons/a.parquet", blob_id="new-shard"),
+    SimpleNamespace(path="eunis/manifest.json", blob_id="manifest"),
+    SimpleNamespace(path="eunis/world-map.svg", blob_id="map"),
+)
+
+
+def test_verify_dataset_checks_remote_parquet_shared_blobs_and_manifest(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    kwargs = _verification_kwargs(tmp_path, monkeypatch)
+
+    receipt = verify_dataset(_FakeTargetApi(_TARGET_ENTRIES), "org/target", **kwargs)
 
     assert receipt.target_revision == "target-sha"
     assert receipt.rows_by_path == {"polygons/a.parquet": 1}
-    assert receipt.manifest == manifest
+    assert receipt.manifest == kwargs["expected_manifest"]
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        (
+            {"expected_tree_paths": ("README.md", "polygons/a.parquet", "eunis/manifest.json")},
+            "unexpected target paths",
+        ),
+        ({"expected_shared_blobs": {"README.md": "old-readme"}}, "shared path changed"),
+        (
+            {"expectations": (ShardExpectation("polygons/a.parquet", 2, "schema"),)},
+            "remote Parquet mismatch",
+        ),
+        (
+            {"expected_manifest": {"source_revision": "other"}},
+            "remote EUNIS manifest does not match",
+        ),
+        (
+            {"expected_artifacts": {"eunis/world-map.svg": "0" * 64}},
+            "remote artifact mismatch",
+        ),
+    ],
+    ids=["extra-path", "shared-blob", "parquet", "manifest", "artifact"],
+)
+def test_verify_dataset_fails_closed_on_remote_mismatch(
+    tmp_path: Path,
+    monkeypatch,
+    override: dict,
+    message: str,
+) -> None:
+    kwargs = _verification_kwargs(tmp_path, monkeypatch) | override
+
+    with pytest.raises(ValueError, match=message):
+        verify_dataset(_FakeTargetApi(_TARGET_ENTRIES), "org/target", **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("changed", "added", "message"),
+    [
+        (("polygons/missing.parquet",), (), "changed paths are not a subset"),
+        ((), ("polygons/a.parquet",), "added paths already exist"),
+        (("polygons/a.parquet",), ("polygons/a.parquet",), "cannot be both changed and added"),
+    ],
+    ids=["changed-not-in-source", "added-in-source", "added-and-changed"],
+)
+def test_build_manifest_rejects_inconsistent_path_sets(
+    changed: tuple[str, ...], added: tuple[str, ...], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        build_manifest(
+            source_repo="org/source",
+            target_repo="org/target",
+            source_revision="abc",
+            source_paths=("polygons/a.parquet",),
+            changed_paths=changed,
+            added_paths=added,
+            reference_manifest={"version": "EEA-test"},
+            rows_by_path={},
+        )
