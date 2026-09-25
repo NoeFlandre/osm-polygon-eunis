@@ -1,4 +1,3 @@
-import json
 import sqlite3
 import struct
 from pathlib import Path
@@ -19,10 +18,7 @@ from osm_polygon_eunis.reference import (
     GeoPackageReference,
     RasterLayer,
     RasterReference,
-    load_label_table,
     parse_layer_code,
-    raster_layer_from_file,
-    resolve_eea_layers,
 )
 
 
@@ -139,12 +135,8 @@ def _write_raster(path: Path, values: list[list[int]]) -> Path:
     return path
 
 
-def test_parse_layer_code_and_label_table(tmp_path: Path) -> None:
-    labels = tmp_path / "labels.json"
-    labels.write_text('{"R11": "Pannonian and Pontic sandy steppe"}', encoding="utf-8")
-
+def test_parse_layer_code() -> None:
     assert parse_layer_code("Prob_R11_100m.tif") == "R11"
-    assert load_label_table(labels) == {"R11": "Pannonian and Pontic sandy steppe"}
 
 
 def test_parse_layer_code_rejects_non_reference_files() -> None:
@@ -280,15 +272,6 @@ def test_raster_cell_collection_preserves_exact_intersection_area() -> None:
 
 
 def test_reference_metadata_and_raster_lifecycle_fail_closed(tmp_path: Path) -> None:
-    labels = tmp_path / "labels.json"
-    labels.write_text("[]", encoding="utf-8")
-    with pytest.raises(ValueError, match="JSON object"):
-        load_label_table(labels)
-    labels.write_text('{"R11": ""}', encoding="utf-8")
-    with pytest.raises(ValueError, match="empty name"):
-        load_label_table(labels)
-    with pytest.raises(ValueError, match="missing EUNIS"):
-        raster_layer_from_file(tmp_path / "Prob_R11_100m.tif", {}, "EEA-test")
     with pytest.raises(ValueError, match="non-negative"):
         RasterReference((), threshold=-1)
 
@@ -410,46 +393,3 @@ def test_geopackage_tile_cache_and_metadata_guards(tmp_path: Path) -> None:
             reference_module.GeoPackageReference._candidate_tile_rows(
                 connection, layer, box(1, 1, 19, 19)
             )
-
-
-def test_resolved_layer_manifest_validation(tmp_path: Path) -> None:
-    config = tmp_path / "resolved.json"
-    with pytest.raises(ValueError, match="no resolved layers"):
-        config.write_text(json.dumps({"source_version": "EEA-test"}), encoding="utf-8")
-        resolve_eea_layers(config, tmp_path)
-    with pytest.raises(ValueError, match="must be an object"):
-        config.write_text(
-            json.dumps({"source_version": "EEA-test", "layers": ["bad"]}), encoding="utf-8"
-        )
-        resolve_eea_layers(config, tmp_path)
-    with pytest.raises(FileNotFoundError):
-        config.write_text(
-            json.dumps(
-                {
-                    "source_version": "EEA-test",
-                    "layers": [{"path": "r.tif", "code": "R11", "name": "steppe"}],
-                }
-            ),
-            encoding="utf-8",
-        )
-        resolve_eea_layers(config, tmp_path)
-    with pytest.raises(ValueError, match="missing path"):
-        config.write_text(
-            json.dumps(
-                {"source_version": "EEA-test", "layers": [{"code": "R11", "name": "steppe"}]}
-            ),
-            encoding="utf-8",
-        )
-        resolve_eea_layers(config, tmp_path)
-
-    (tmp_path / "r.tif").write_bytes(b"placeholder")
-    config.write_text(
-        json.dumps(
-            {
-                "source_version": "EEA-test",
-                "layers": [{"path": "r.tif", "code": "R11", "name": "steppe"}],
-            }
-        ),
-        encoding="utf-8",
-    )
-    assert resolve_eea_layers(config, tmp_path)[0].code == "R11"

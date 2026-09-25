@@ -4,12 +4,14 @@ import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import httpx
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from osm_polygon_eunis._protocols import HubApi
 from osm_polygon_eunis.publish import (
     ShardExpectation,
     build_manifest,
@@ -31,7 +33,7 @@ def test_duplicate_source_skips_existing_target() -> None:
     def duplicate(source: str, target: str, **_kwargs):
         calls.append((source, target))
 
-    assert duplicate_source(Api(), "source", "target", duplicate=duplicate) is False
+    assert duplicate_source(cast(HubApi, Api()), "source", "target", duplicate=duplicate) is False
     assert calls == []
 
 
@@ -50,7 +52,7 @@ def test_duplicate_source_calls_server_side_copy_once_when_missing() -> None:
     def duplicate(source: str, target: str, **_kwargs):
         calls.append((source, target))
 
-    assert duplicate_source(Api(), "source", "target", duplicate=duplicate) is True
+    assert duplicate_source(cast(HubApi, Api()), "source", "target", duplicate=duplicate) is True
     assert calls == [("source", "target")]
 
 
@@ -104,8 +106,8 @@ def test_upload_replacement_and_manifest_use_explicit_paths(tmp_path: Path) -> N
             return "commit"
 
     api = Api()
-    upload_replacement(api, "org/target", "polygons/france.parquet", source)
-    upload_manifest(api, "org/target", {"source_revision": "abc"})
+    upload_replacement(cast(HubApi, api), "org/target", "polygons/france.parquet", source)
+    upload_manifest(cast(HubApi, api), "org/target", {"source_revision": "abc"})
 
     assert calls[0]["path_in_repo"] == "polygons/france.parquet"
     assert calls[1]["path_in_repo"] == "eunis/manifest.json"
@@ -132,7 +134,7 @@ def test_verify_dataset_rejects_missing_target_paths() -> None:
 
     with pytest.raises(ValueError, match="missing target paths"):
         verify_dataset(
-            Api(),
+            cast(HubApi, Api()),
             "org/target",
             expectations=(ShardExpectation("polygons/a.parquet", 1, "schema"),),
             expected_tree_paths=("polygons/a.parquet",),
@@ -202,7 +204,7 @@ def test_verify_dataset_checks_remote_parquet_shared_blobs_and_manifest(
 ) -> None:
     kwargs = _verification_kwargs(tmp_path, monkeypatch)
 
-    receipt = verify_dataset(_FakeTargetApi(_TARGET_ENTRIES), "org/target", **kwargs)
+    receipt = verify_dataset(cast(HubApi, _FakeTargetApi(_TARGET_ENTRIES)), "org/target", **kwargs)
 
     assert receipt.target_revision == "target-sha"
     assert receipt.rows_by_path == {"polygons/a.parquet": 1}
@@ -241,7 +243,7 @@ def test_verify_dataset_fails_closed_on_remote_mismatch(
     kwargs = _verification_kwargs(tmp_path, monkeypatch) | override
 
     with pytest.raises(ValueError, match=message):
-        verify_dataset(_FakeTargetApi(_TARGET_ENTRIES), "org/target", **kwargs)
+        verify_dataset(cast(HubApi, _FakeTargetApi(_TARGET_ENTRIES)), "org/target", **kwargs)
 
 
 @pytest.mark.parametrize(

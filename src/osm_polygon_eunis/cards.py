@@ -13,6 +13,10 @@ from .fileio import sha256_file
 from .geometry import parse_geometry
 
 _CELL_SIZE = 2.0
+_LON_MIN, _LON_MAX = -180.0, 180.0
+_LAT_MIN, _LAT_MAX = -90.0, 90.0
+_LON_RANGE = _LON_MAX - _LON_MIN
+_LAT_RANGE = _LAT_MAX - _LAT_MIN
 _MAP_PATH = "eunis/world-map.svg"
 _NO_LABEL = "No EUNIS label"
 _PALETTE = (
@@ -118,6 +122,24 @@ class CardArtifacts:
     manifest: Mapping[str, object]
 
 
+@dataclass(frozen=True, slots=True)
+class _MapLayout:
+    """Pixel geometry of the static SVG map canvas."""
+
+    width: int = 1200
+    height: int = 660
+    plot_x: int = 50
+    plot_y: int = 75
+    plot_width: int = 835
+    plot_height: int = 510
+    subtitle_y: int = 52
+    legend_x: int = 925
+    legend_y: int = 105
+
+
+_LAYOUT = _MapLayout()
+
+
 class DatasetCardAccumulator:
     """Collect label counts and bounded map bins while shards stream past."""
 
@@ -155,10 +177,10 @@ class DatasetCardAccumulator:
         point = geometry.representative_point()
         longitude = float(point.x)
         latitude = float(point.y)
-        if not (-180.0 <= longitude <= 180.0 and -90.0 <= latitude <= 90.0):
+        if not (_LON_MIN <= longitude <= _LON_MAX and _LAT_MIN <= latitude <= _LAT_MAX):
             return
-        longitude_index = _coordinate_index(longitude, -180.0, 180.0, self.cell_size)
-        latitude_index = _coordinate_index(latitude, -90.0, 90.0, self.cell_size)
+        longitude_index = _coordinate_index(longitude, _LON_MIN, _LON_MAX, self.cell_size)
+        latitude_index = _coordinate_index(latitude, _LAT_MIN, _LAT_MAX, self.cell_size)
         key = (code, longitude_index, latitude_index)
         self._bins[key] = self._bins.get(key, 0) + 1
 
@@ -256,7 +278,8 @@ class DatasetCardAccumulator:
             "",
             "![Static world map of EUNIS label distribution](./eunis/world-map.svg)",
             "",
-            "The map uses a representative point for each polygon and 2-degree geographic "
+            "The map uses a representative point for each polygon and "
+            f"{self.cell_size:g}-degree geographic "
             "bins to keep the static artifact small. Colors identify EUNIS codes; the "
             "complete distribution is listed below. Unlabeled polygons are shown in gray.",
             "",
@@ -288,55 +311,51 @@ class DatasetCardAccumulator:
         return "\n".join(lines) + "\n"
 
     def _render_map(self, dataset_name: str) -> str:
-        width, height = 1200, 660
-        plot_x, plot_y, plot_width, plot_height = 50, 75, 835, 510
+        layout = _LAYOUT
         summaries = self.summaries()
         colors = _label_colors(summaries)
         elements = [
             '<?xml version="1.0" encoding="UTF-8"?>',
             (
-                f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" '
-                f'height="{height}" viewBox="0 0 {width} {height}">'
+                f'<svg xmlns="http://www.w3.org/2000/svg" width="{layout.width}" '
+                f'height="{layout.height}" viewBox="0 0 {layout.width} {layout.height}">'
             ),
             '<rect width="100%" height="100%" fill="#ffffff"/>',
             (
-                f'<text x="{plot_x}" y="30" font-family="sans-serif" '
+                f'<text x="{layout.plot_x}" y="30" font-family="sans-serif" '
                 f'font-size="22" font-weight="600" fill="#1f2933">'
                 f"{html.escape(_title(dataset_name))}</text>"
             ),
             (
-                '<text x="50" y="52" font-family="sans-serif" font-size="12" '
-                'fill="#52606d">Representative polygon locations · 2° bins · '
-                "colors are EUNIS labels</text>"
+                f'<text x="{layout.plot_x}" y="{layout.subtitle_y}" font-family="sans-serif" '
+                'font-size="12" fill="#52606d">Representative polygon locations · '
+                f"{self.cell_size:g}° bins · colors are EUNIS labels</text>"
             ),
             (
-                f'<rect x="{plot_x}" y="{plot_y}" width="{plot_width}" '
-                f'height="{plot_height}" rx="4" fill="#f7fafc" stroke="#cbd5e0"/>'
+                f'<rect x="{layout.plot_x}" y="{layout.plot_y}" width="{layout.plot_width}" '
+                f'height="{layout.plot_height}" rx="4" fill="#f7fafc" stroke="#cbd5e0"/>'
             ),
         ]
-        elements.extend(_grid_elements(plot_x, plot_y, plot_width, plot_height))
-        elements.extend(_land_elements(plot_x, plot_y, plot_width, plot_height))
-        elements.extend(self._point_elements(plot_x, plot_y, plot_width, plot_height, colors))
-        elements.extend(_legend_elements(summaries, colors, x=925, y=105))
+        elements.extend(_grid_elements(layout))
+        elements.extend(_land_elements(layout))
+        elements.extend(self._point_elements(layout, colors))
+        elements.extend(_legend_elements(summaries, colors, x=layout.legend_x, y=layout.legend_y))
         elements.append("</svg>")
         return "\n".join(elements) + "\n"
 
     def _point_elements(
         self,
-        plot_x: int,
-        plot_y: int,
-        plot_width: int,
-        plot_height: int,
+        layout: _MapLayout,
         colors: Mapping[str | None, str],
     ) -> list[str]:
         elements: list[str] = []
         for (code, longitude_index, latitude_index), count in sorted(
             self._bins.items(), key=lambda item: (item[0][0] is None, item[0])
         ):
-            longitude = -180.0 + (longitude_index + 0.5) * self.cell_size
-            latitude = -90.0 + (latitude_index + 0.5) * self.cell_size
-            x = _map_x(longitude, plot_x, plot_width)
-            y = _map_y(latitude, plot_y, plot_height)
+            longitude = _LON_MIN + (longitude_index + 0.5) * self.cell_size
+            latitude = _LAT_MIN + (latitude_index + 0.5) * self.cell_size
+            x = _map_x(longitude, layout)
+            y = _map_y(latitude, layout)
             radius = min(11.0, 3.0 + math.sqrt(count))
             label = _label_text(code, self._names.get(code, _NO_LABEL))
             elements.append(
@@ -357,24 +376,26 @@ def _label_identity(result: EunisResult) -> tuple[str | None, str]:
     return code, result.name or (_NO_LABEL if code is None else "Unknown EUNIS label")
 
 
-def _map_x(longitude: float, plot_x: int, plot_width: int) -> float:
-    return plot_x + (longitude + 180.0) / 360.0 * plot_width
+def _map_x(longitude: float, layout: _MapLayout) -> float:
+    return layout.plot_x + (longitude - _LON_MIN) / _LON_RANGE * layout.plot_width
 
 
-def _map_y(latitude: float, plot_y: int, plot_height: int) -> float:
-    return plot_y + (90.0 - latitude) / 180.0 * plot_height
+def _map_y(latitude: float, layout: _MapLayout) -> float:
+    return layout.plot_y + (_LAT_MAX - latitude) / _LAT_RANGE * layout.plot_height
 
 
-def _grid_elements(plot_x: int, plot_y: int, plot_width: int, plot_height: int) -> list[str]:
+def _grid_elements(layout: _MapLayout) -> list[str]:
+    plot_x, plot_y = layout.plot_x, layout.plot_y
+    plot_width, plot_height = layout.plot_width, layout.plot_height
     elements: list[str] = []
     for longitude in range(-120, 180, 60):
-        x = _map_x(float(longitude), plot_x, plot_width)
+        x = _map_x(float(longitude), layout)
         elements.append(
             f'<line x1="{x:.2f}" y1="{plot_y}" x2="{x:.2f}" '
             f'y2="{plot_y + plot_height}" stroke="#dfe7ef" stroke-width="0.7"/>'
         )
     for latitude in range(-60, 90, 30):
-        y = _map_y(float(latitude), plot_y, plot_height)
+        y = _map_y(float(latitude), layout)
         elements.append(
             f'<line x1="{plot_x}" y1="{y:.2f}" '
             f'x2="{plot_x + plot_width}" y2="{y:.2f}" '
@@ -383,14 +404,11 @@ def _grid_elements(plot_x: int, plot_y: int, plot_width: int, plot_height: int) 
     return elements
 
 
-def _land_elements(plot_x: int, plot_y: int, plot_width: int, plot_height: int) -> list[str]:
+def _land_elements(layout: _MapLayout) -> list[str]:
     elements = []
     for landmass in _LANDMASSES:
         points = " ".join(
-            (
-                f"{_map_x(longitude, plot_x, plot_width):.2f},"
-                f"{_map_y(latitude, plot_y, plot_height):.2f}"
-            )
+            (f"{_map_x(longitude, layout):.2f},{_map_y(latitude, layout):.2f}")
             for longitude, latitude in landmass
         )
         elements.append(
@@ -464,5 +482,3 @@ def _markdown_code(code: str | None) -> str:
 
 def _markdown_cell(value: object) -> str:
     return str(value).replace("|", "\\|").replace("\n", " ")
-
-

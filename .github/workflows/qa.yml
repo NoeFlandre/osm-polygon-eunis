@@ -4,16 +4,25 @@ on:
   push:
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   deterministic-quality:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           enable-cache: true
-      - run: uv sync --group dev
+      - run: uv sync --locked --group dev
       - run: uv run ruff check src tests scripts
+      - run: uv run ruff format --check src tests scripts
       - run: uv run ty check src tests scripts
       - run: uv run pytest --cov --cov-report=json --cov-report=term-missing
       - run: uv run python scripts/check_architecture.py

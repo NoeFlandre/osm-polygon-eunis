@@ -163,9 +163,7 @@ def test_classification_links_accept_iso_json_character_strings() -> None:
                     "cit:linkage": {
                         "gco:CharacterString": {"#text": "https://example.test/folder"}
                     },
-                    "cit:protocol": {
-                        "gco:CharacterString": {"#text": "EEA:FOLDERPATH"}
-                    },
+                    "cit:protocol": {"gco:CharacterString": {"#text": "EEA:FOLDERPATH"}},
                 }
             }
         ],

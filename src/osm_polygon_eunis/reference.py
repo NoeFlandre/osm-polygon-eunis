@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import math
 import re
 import sqlite3
@@ -54,39 +53,6 @@ def parse_layer_code(filename: str) -> str:
     if match is None:
         raise ValueError(f"could not parse reference layer code from {filename!r}")
     return match.group("code")
-
-
-def load_label_table(path: Path) -> dict[str, str]:
-    """Load a compact code-to-name JSON table and reject incomplete values."""
-
-    value: Any = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict):
-        raise ValueError("EUNIS label table must be a JSON object")
-    return _validated_labels(value)
-
-
-def _validated_labels(value: dict[object, object]) -> dict[str, str]:
-    labels: dict[str, str] = {}
-    for code, name in value.items():
-        if not isinstance(code, str) or not isinstance(name, str) or not name.strip():
-            raise ValueError("EUNIS label table contains a non-string or empty name")
-        labels[code] = name
-    return labels
-
-
-def raster_layer_from_file(
-    path: Path,
-    labels: dict[str, str],
-    source_version: str,
-) -> RasterLayer:
-    """Create a layer only when its parsed code has a verified name."""
-
-    code = parse_layer_code(path.name)
-    try:
-        name = labels[code]
-    except KeyError as error:
-        raise ValueError(f"missing EUNIS name for reference code {code}") from error
-    return RasterLayer(code, name, path, source_version)
 
 
 class RasterReference:
@@ -520,7 +486,6 @@ class GeoPackageReference:
         envelope_size = _envelope_size(envelope_type)
         return load_wkb(data[8 + envelope_size :])
 
-
     @classmethod
     def _discover_layers(cls, connection: sqlite3.Connection) -> tuple[_VectorLayer, ...]:
         rows = cls._geometry_rows(connection)
@@ -572,9 +537,7 @@ class GeoPackageReference:
         connection: sqlite3.Connection,
         table: str,
     ) -> tuple[str, str]:
-        columns = connection.execute(
-            f"PRAGMA table_info({_sql_identifier(table)})"
-        ).fetchall()
+        columns = connection.execute(f"PRAGMA table_info({_sql_identifier(table)})").fetchall()
         if not columns:
             raise ValueError(f"GeoPackage geometry table is missing: {table}")
         primary_key = cast(str, next((column[1] for column in columns if column[5]), "rowid"))
@@ -671,7 +634,6 @@ class GeoPackageReference:
         dimensions = (matrix_width, matrix_height, tile_width, tile_height, zoom_level)
         _validate_tile_types(table, numeric, dimensions)
         _validate_tile_dimensions(table, pixel_x_size, pixel_y_size, matrix_width, matrix_height)
-
 
     def _positive_tile_geometry(
         self,
@@ -787,9 +749,7 @@ class GeoPackageReference:
         code = _sql_identifier(layer.code_column or "")
         rtree = _sql_identifier(layer.rtree_table)
         key = (
-            "t.rowid"
-            if layer.primary_key == "rowid"
-            else f"t.{_sql_identifier(layer.primary_key)}"
+            "t.rowid" if layer.primary_key == "rowid" else f"t.{_sql_identifier(layer.primary_key)}"
         )
         query = (
             f"SELECT t.{code}, t.{geometry} FROM {table} AS t "
@@ -852,49 +812,3 @@ def _envelope_size(envelope_type: int) -> int:
         return {0: 0, 1: 32, 2: 48, 3: 48, 4: 64}[envelope_type]
     except KeyError as error:
         raise ValueError("unsupported GeoPackage envelope type") from error
-
-
-def resolve_eea_layers(config_path: Path, workspace: Path) -> tuple[RasterLayer, ...]:
-    """Load a run-resolved local layer manifest produced from the EEA catalog."""
-
-    config: Any = json.loads(config_path.read_text(encoding="utf-8"))
-    if not isinstance(config, dict):
-        raise ValueError(
-            "reference config has no resolved layers; run the EEA catalog resolver first",
-        )
-    layer_specs = _resolved_layer_specs(config)
-    source_version = str(config["source_version"])
-    return tuple(
-        _resolved_layer(spec, workspace, source_version) for spec in layer_specs
-    )
-
-
-def _resolved_layer_specs(config: dict[object, object]) -> list[object]:
-    layer_specs = config.get("layers")
-    if not isinstance(layer_specs, list) or not layer_specs:
-        raise ValueError(
-            "reference config has no resolved layers; run the EEA catalog resolver first",
-        )
-    return layer_specs
-
-
-def _resolved_layer(spec: object, workspace: Path, source_version: str) -> RasterLayer:
-    if not isinstance(spec, dict):
-        raise ValueError("reference layer specification must be an object")
-    relative_path, code, name = _layer_values(spec)
-    path = workspace / relative_path
-    if not path.is_file():
-        raise FileNotFoundError(path)
-    return RasterLayer(code=code, name=name, path=path, source_version=source_version)
-
-
-def _layer_values(spec: dict[object, object]) -> tuple[str, str, str]:
-    values = tuple(_required_layer_text(spec, field) for field in ("path", "code", "name"))
-    return cast(tuple[str, str, str], values)
-
-
-def _required_layer_text(spec: dict[object, object], field: str) -> str:
-    value = spec.get(field)
-    if not isinstance(value, str) or not value:
-        raise ValueError("reference layer specification is missing path, code, or name")
-    return value

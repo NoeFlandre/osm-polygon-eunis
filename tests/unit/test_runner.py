@@ -2,12 +2,18 @@ import json
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+import osm_polygon_eunis.geometry_jobs as geometry_jobs
+import osm_polygon_eunis.manifest_state as manifest_state
+import osm_polygon_eunis.references as references
+import osm_polygon_eunis.release_plan as release_plan
 import osm_polygon_eunis.runner as runner
+from osm_polygon_eunis._protocols import HubApi, StreamClient
 from osm_polygon_eunis.cards import CardArtifacts
 from osm_polygon_eunis.domain import EunisResult
 from osm_polygon_eunis.eea import EeaGroup, RemoteAsset
@@ -58,7 +64,7 @@ def test_process_geometry_paths_keeps_only_compact_sidecar_state(
         destination.write_bytes(downloads[path].read_bytes())
         return destination
 
-    monkeypatch.setattr(runner, "download_to_temp", fake_download)
+    monkeypatch.setattr(geometry_jobs, "download_to_temp", fake_download)
     plan = DatasetPlan(
         DatasetSpec("website", "source", "target", "polygons/*.parquet"),
         "revision",
@@ -66,10 +72,10 @@ def test_process_geometry_paths_keeps_only_compact_sidecar_state(
         ("polygons/test.parquet",),
         (),
     )
-    reusable_client = object()
+    reusable_client = cast(StreamClient, object())
 
     process_geometry_paths(
-        object(),
+        cast(HubApi, object()),
         plan,
         reference=_Reference(EunisResult("R11", "steppe", 25.0, "test")),
         sidecar_root=tmp_path / "sidecars",
@@ -108,7 +114,7 @@ def test_process_geometry_paths_reuses_retained_source_shard(
         destination.write_bytes(source.read_bytes())
         return destination
 
-    monkeypatch.setattr(runner, "download_to_temp", fake_download)
+    monkeypatch.setattr(geometry_jobs, "download_to_temp", fake_download)
     plan = DatasetPlan(
         DatasetSpec("website", "source", "target", "polygons/*.parquet"),
         "revision",
@@ -119,7 +125,7 @@ def test_process_geometry_paths_reuses_retained_source_shard(
 
     for _ in range(2):
         process_geometry_paths(
-            object(),
+            cast(HubApi, object()),
             plan,
             reference=_Reference(EunisResult("R11", "steppe", 25.0, "test")),
             sidecar_root=tmp_path / "sidecars",
@@ -162,7 +168,7 @@ def test_run_release_rejects_invalid_reference_config(
 
     with pytest.raises(ValueError, match=message):
         runner.run_release(
-            object(), reference_config=config, workdir=tmp_path / "run", batch_size=1
+            cast(HubApi, object()), reference_config=config, workdir=tmp_path / "run", batch_size=1
         )
     assert not (tmp_path / "run").exists()
 
@@ -189,10 +195,10 @@ def test_open_reference_group_reuses_client_for_raster_and_vector(
         destination.write_bytes(b"asset")
         return f"sha-{asset.path}"
 
-    monkeypatch.setattr(runner, "download_asset", fake_download)
-    monkeypatch.setattr(runner, "RasterReference", FakeReference)
-    monkeypatch.setattr(runner, "GeoPackageReference", FakeReference)
-    client = object()
+    monkeypatch.setattr(references, "download_asset", fake_download)
+    monkeypatch.setattr(references, "RasterReference", FakeReference)
+    monkeypatch.setattr(references, "GeoPackageReference", FakeReference)
+    client = cast(StreamClient, object())
     checksums: dict[str, str] = {}
     raster_group = EeaGroup(
         "raster-record",
@@ -280,7 +286,7 @@ def test_finalize_dataset_enriches_polygon_and_link_shards_and_cleans_staging(
         ("polygons/region.parquet",),
         ("polygon_document_links/region.parquet",),
     )
-    sidecar = runner._sidecar_path(tmp_path / "sidecars", plan.spec, plan.geometry_paths[0])
+    sidecar = release_plan._sidecar_path(tmp_path / "sidecars", plan.spec, plan.geometry_paths[0])
     sidecar.parent.mkdir(parents=True)
     pq.write_table(
         pa.table(
@@ -300,14 +306,14 @@ def test_finalize_dataset_enriches_polygon_and_link_shards_and_cleans_staging(
         progress.append(dict(event))
 
     expectations, commit = runner.finalize_dataset(
-        object(),
+        cast(HubApi, object()),
         plan,
         sidecar_root=tmp_path / "sidecars",
         local_root=tmp_path / "final",
         batch_size=1,
         parent_commit="base",
         progress=capture_progress,
-        http_client=object(),
+        http_client=cast(StreamClient, object()),
     )
 
     assert commit == "commit-2"
@@ -339,22 +345,25 @@ def test_planning_manifest_and_shared_blobs_are_deterministic(monkeypatch) -> No
         ),
         "NoeFlandre/osm-polygon-description-tag": (SimpleNamespace(path="data/a.parquet"),),
     }
-    monkeypatch.setattr(runner, "capture_revision", lambda api, repo: f"rev:{repo}")
-    monkeypatch.setattr(runner, "list_repo_files", lambda api, repo, revision: entries[repo])
+    monkeypatch.setattr(release_plan, "capture_revision", lambda api, repo: f"rev:{repo}")
+    monkeypatch.setattr(release_plan, "list_repo_files", lambda api, repo, revision: entries[repo])
+    monkeypatch.setattr(
+        manifest_state, "list_repo_files", lambda api, repo, revision: entries[repo]
+    )
 
-    plans = runner.plan_datasets(object())
+    plans = runner.plan_datasets(cast(HubApi, object()))
 
     assert [plan.spec.name for plan in plans] == ["website", "wikidata", "description"]
     assert plans[1].link_paths == ("polygon_document_links/a.parquet",)
     with pytest.raises(ValueError, match="no geometry"):
-        runner._geometry_paths(
+        release_plan._geometry_paths(
             DatasetSpec("empty", "source", "target", "polygons/*.parquet"), ("README.md",)
         )
 
     raster = _asset("/Prob_R11.tif")
     vector = _asset("/habitats.gpkg", code=None)
     group = EeaGroup("record", "title", "folder", "service", {}, (raster,), vector)
-    manifest = runner._reference_manifest(
+    manifest = manifest_state._reference_manifest(
         (group,),
         {"record:/Prob_R11.tif": "sha"},
         source_version="EEA-test",
@@ -366,7 +375,7 @@ def test_planning_manifest_and_shared_blobs_are_deterministic(monkeypatch) -> No
     assert isinstance(assets, list)
     assert [asset["path"] for asset in assets] == ["/Prob_R11.tif", "/habitats.gpkg"]
 
-    shared = runner._shared_blobs(object(), plans[1], {"polygons/a.parquet"})
+    shared = manifest_state._shared_blobs(cast(HubApi, object()), plans[1], {"polygons/a.parquet"})
     assert shared == {
         "polygon_document_links/a.parquet": "link",
         "wikipedia/a.parquet": "wikipedia",
@@ -404,11 +413,11 @@ def test_process_reference_groups_batches_reference_groups_for_all_plans(
         del api
         seen.append((plan.spec.name, kwargs["references"], kwargs["http_client"]))
 
-    monkeypatch.setattr(runner, "open_reference_group", fake_open)
-    monkeypatch.setattr(runner, "_process_geometry_path", fake_process)
-    client = object()
-    runner._process_reference_groups(
-        object(),
+    monkeypatch.setattr(references, "open_reference_group", fake_open)
+    monkeypatch.setattr(geometry_jobs, "_process_geometry_path", fake_process)
+    client = cast(StreamClient, object())
+    geometry_jobs._process_reference_groups(
+        cast(HubApi, object()),
         plans,
         (group, second_group),
         sidecar_root=tmp_path / "sidecars",
@@ -441,13 +450,11 @@ def test_process_reference_groups_dispatches_streaming_parallel_batches(
 
     def fake_parallel(*args, **kwargs):
         del args
-        seen.append(
-            (tuple(group.record_id for group in kwargs["groups"]), kwargs["parallelism"])
-        )
+        seen.append((tuple(group.record_id for group in kwargs["groups"]), kwargs["parallelism"]))
 
-    monkeypatch.setattr(runner, "_process_reference_groups_parallel", fake_parallel)
-    runner._process_reference_groups(
-        object(),
+    monkeypatch.setattr(geometry_jobs, "_process_reference_groups_parallel", fake_parallel)
+    geometry_jobs._process_reference_groups(
+        cast(HubApi, object()),
         (plan,),
         (group,),
         sidecar_root=tmp_path / "sidecars",
@@ -457,7 +464,7 @@ def test_process_reference_groups_dispatches_streaming_parallel_batches(
         checksums={},
         batch_size=2,
         progress=None,
-        http_client=object(),
+        http_client=cast(StreamClient, object()),
         parallelism=2,
     )
 
@@ -484,7 +491,7 @@ def test_finalize_plan_builds_manifest_and_verifies_target(monkeypatch, tmp_path
     monkeypatch.setattr(
         runner, "upload_manifest", lambda *args, **kwargs: SimpleNamespace(oid="commit-2")
     )
-    monkeypatch.setattr(runner, "verify_dataset", lambda *args, **kwargs: verification)
+    monkeypatch.setattr(manifest_state, "verify_dataset", lambda *args, **kwargs: verification)
 
     class FakeCard:
         def write_artifacts(self, directory: Path, **kwargs) -> CardArtifacts:
@@ -515,14 +522,14 @@ def test_finalize_plan_builds_manifest_and_verifies_target(monkeypatch, tmp_path
     )
 
     result = runner._finalize_plan(
-        object(),
+        cast(HubApi, object()),
         plan,
         sidecar_root=tmp_path / "sidecars",
         workdir=tmp_path,
         batch_size=2,
         reference_info={"source_version": "EEA-test"},
         progress=None,
-        http_client=object(),
+        http_client=cast(StreamClient, object()),
     )
 
     assert result.verification is verification
@@ -548,19 +555,17 @@ def test_run_release_coordinates_pooled_processing(monkeypatch, tmp_path: Path) 
     seen: list[tuple[object, int]] = []
     monkeypatch.setattr(runner, "plan_datasets", lambda api: (plan,))
     monkeypatch.setattr(runner, "_duplicate_outputs", lambda *args: None)
-    monkeypatch.setattr(runner, "_load_existing_manifest", lambda *args: None)
-    monkeypatch.setattr(runner, "resolve_config", lambda path: (group,))
+    monkeypatch.setattr(manifest_state, "_load_existing_manifest", lambda *args: None)
+    monkeypatch.setattr(runner, "resolve_config_data", lambda config: (group,))
     monkeypatch.setattr(
         runner,
         "_process_reference_groups",
-        lambda *args, **kwargs: seen.append(
-            (kwargs["http_client"], kwargs["parallelism"])
-        ),
+        lambda *args, **kwargs: seen.append((kwargs["http_client"], kwargs["parallelism"])),
     )
     monkeypatch.setattr(runner, "_finalize_plan", lambda *args, **kwargs: receipt)
 
     result = runner.run_release(
-        object(), reference_config=config, workdir=tmp_path / "run", batch_size=2
+        cast(HubApi, object()), reference_config=config, workdir=tmp_path / "run", batch_size=2
     )
 
     assert result.datasets == (receipt,)
@@ -612,14 +617,14 @@ def test_run_release_verifies_matching_manifests_without_processing(
     )
     monkeypatch.setattr(runner, "plan_datasets", lambda api: (plan,))
     monkeypatch.setattr(runner, "_duplicate_outputs", lambda *args: None)
-    monkeypatch.setattr(runner, "resolve_config", lambda path: ())
+    monkeypatch.setattr(runner, "resolve_config_data", lambda config: ())
     monkeypatch.setattr(runner, "_reference_manifest", lambda *args, **kwargs: reference)
     monkeypatch.setattr(
-        runner,
+        manifest_state,
         "_load_existing_manifest",
-        lambda *args, **kwargs: runner._ExistingManifest("target", manifest),
+        lambda *args, **kwargs: manifest_state._ExistingManifest("target", manifest),
     )
-    monkeypatch.setattr(runner, "_verify_no_op_dataset", lambda *args, **kwargs: receipt)
+    monkeypatch.setattr(manifest_state, "_verify_no_op_dataset", lambda *args, **kwargs: receipt)
     monkeypatch.setattr(
         runner,
         "_process_reference_groups",
@@ -632,7 +637,7 @@ def test_run_release_verifies_matching_manifests_without_processing(
     )
 
     result = runner.run_release(
-        object(), reference_config=config, workdir=tmp_path / "run", batch_size=2
+        cast(HubApi, object()), reference_config=config, workdir=tmp_path / "run", batch_size=2
     )
 
     assert result.datasets == (receipt,)
@@ -670,30 +675,30 @@ def test_no_op_manifest_helpers_validate_and_load_pinned_state(
         },
     }
 
-    assert runner._reference_identity(reference) == {"assets": [{"code": "R11"}]}
-    assert runner._manifest_matches_inputs(plan, manifest, {"assets": [{"code": "R11"}]})
-    assert not runner._manifest_matches_inputs(
+    assert manifest_state._reference_identity(reference) == {"assets": [{"code": "R11"}]}
+    assert manifest_state._manifest_matches_inputs(plan, manifest, {"assets": [{"code": "R11"}]})
+    assert not manifest_state._manifest_matches_inputs(
         plan,
         {**manifest, "source_revision": "different"},
         {"assets": [{"code": "R11"}]},
     )
-    assert runner._manifest_expectations(manifest) == (
+    assert manifest_state._manifest_expectations(manifest) == (
         ShardExpectation("polygons/a.parquet", 2, "schema"),
     )
-    assert runner._manifest_artifacts(manifest) == {
+    assert manifest_state._manifest_artifacts(manifest) == {
         "README.md": "readme",
         "eunis/world-map.svg": "map",
     }
-    assert runner._required_no_op_parts(manifest)[2:] == (
+    assert manifest_state._required_no_op_parts(manifest)[2:] == (
         ("README.md", "polygons/a.parquet"),
         ("eunis/world-map.svg",),
     )
     with pytest.raises(ValueError, match="incomplete"):
-        runner._required_manifest_paths({})
+        manifest_state._required_manifest_paths({})
     with pytest.raises(ValueError, match="incomplete"):
-        runner._required_manifest_paths({"changed_paths": ["ok", 1], "added_paths": []})
-    assert runner._manifest_expectations({"rows_by_path": {}, "schema_by_path": {}}) == ()
-    assert runner._manifest_artifacts({"card": {}}) is None
+        manifest_state._required_manifest_paths({"changed_paths": ["ok", 1], "added_paths": []})
+    assert manifest_state._manifest_expectations({"rows_by_path": {}, "schema_by_path": {}}) == ()
+    assert manifest_state._manifest_artifacts({"card": {}}) is None
 
     class Api:
         def repo_info(self, *_args, **_kwargs):
@@ -709,9 +714,11 @@ def test_no_op_manifest_helpers_validate_and_load_pinned_state(
         destination.write_text(json.dumps(manifest), encoding="utf-8")
         return destination
 
-    monkeypatch.setattr(runner, "download_to_temp", fake_download)
-    loaded = runner._load_existing_manifest(Api(), plan, tmp_path / "noop", object())
-    assert loaded == runner._ExistingManifest("target-revision", manifest)
+    monkeypatch.setattr(manifest_state, "download_to_temp", fake_download)
+    loaded = manifest_state._load_existing_manifest(
+        cast(HubApi, Api()), plan, tmp_path / "noop", cast(StreamClient, object())
+    )
+    assert loaded == manifest_state._ExistingManifest("target-revision", manifest)
 
 
 def test_verify_no_op_dataset_reuses_manifest_expectations(monkeypatch, tmp_path: Path) -> None:
@@ -735,16 +742,154 @@ def test_verify_no_op_dataset_reuses_manifest_expectations(monkeypatch, tmp_path
         },
     }
     verification = VerificationReceipt("target", "verified", {}, (), manifest)
-    monkeypatch.setattr(runner, "_shared_blobs", lambda *args, **kwargs: {})
-    monkeypatch.setattr(runner, "_verify_final_dataset", lambda *args, **kwargs: verification)
+    monkeypatch.setattr(manifest_state, "_shared_blobs", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        manifest_state, "_verify_final_dataset", lambda *args, **kwargs: verification
+    )
 
-    result = runner._verify_no_op_dataset(
-        object(),
+    result = manifest_state._verify_no_op_dataset(
+        cast(HubApi, object()),
         plan,
-        runner._ExistingManifest("target", manifest),
+        manifest_state._ExistingManifest("target", manifest),
         workdir=tmp_path,
-        client=object(),
+        client=cast(StreamClient, object()),
     )
 
     assert result.no_op is True
     assert result.expectations == (ShardExpectation("polygons/a.parquet", 1, "schema"),)
+
+
+class _TrackedReference:
+    def __init__(self, *args, **kwargs) -> None:
+        self.args = args
+        self.kwargs = kwargs
+        self.closed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args) -> None:
+        self.closed = True
+
+
+def test_worker_reference_batch_opens_local_groups_once_and_closes_on_exit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    opened: list[_TrackedReference] = []
+
+    def fake_reference(*args, **kwargs):
+        opened.append(_TrackedReference(*args, **kwargs))
+        return opened[-1]
+
+    monkeypatch.setattr(references, "RasterReference", fake_reference)
+    monkeypatch.setattr(references, "GeoPackageReference", fake_reference)
+    raster_group = EeaGroup(
+        "raster-record", "raster", "folder", "service", {}, (_asset("/Prob_R11.tif"),), None
+    )
+    vector_group = EeaGroup(
+        "vector-record",
+        "vector",
+        "folder",
+        "service",
+        {"Q11": "bog"},
+        (),
+        _asset("/habitats.gpkg", code=None),
+    )
+    groups = (raster_group, vector_group)
+
+    first = references._worker_reference_batch(groups, tmp_path, 3, start_index=2)
+    second = references._worker_reference_batch(groups, tmp_path, 3, start_index=2)
+
+    assert first is second
+    assert first == tuple(opened)
+    layers = opened[0].args[0]
+    assert [(layer.code, layer.name, layer.path) for layer in layers] == [
+        ("R11", "steppe", tmp_path / "02-raster-r" / "R11.tif")
+    ]
+    assert opened[0].kwargs == {"threshold": 3}
+    assert opened[1].args[0] == tmp_path / "03-vector-r" / "habitats.gpkg"
+    references._close_worker_reference_cache()
+    assert all(reference.closed for reference in opened)
+    assert references._WORKER_REFERENCES == {}
+
+
+def test_worker_reference_batch_closes_opened_groups_on_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    opened: list[_TrackedReference] = []
+
+    def fake_reference(*args, **kwargs):
+        opened.append(_TrackedReference(*args, **kwargs))
+        return opened[-1]
+
+    monkeypatch.setattr(references, "RasterReference", fake_reference)
+    raster_group = EeaGroup(
+        "raster-record", "raster", "folder", "service", {}, (_asset("/Prob_R11.tif"),), None
+    )
+    empty_group = EeaGroup("empty", "empty", "folder", "service", {}, (), None)
+
+    with pytest.raises(ValueError, match="no reference asset"):
+        references._worker_reference_batch((raster_group, empty_group), tmp_path, 0, start_index=0)
+
+    assert [reference.closed for reference in opened] == [True]
+    assert references._WORKER_REFERENCES == {}
+
+
+def test_process_geometry_chunk_runs_each_micro_batch_against_each_reference_batch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    events: list[tuple] = []
+    plan = SimpleNamespace(spec=SimpleNamespace(name="dataset"))
+    monkeypatch.setattr(geometry_jobs, "HfApi", lambda **kwargs: ("api", kwargs))
+    monkeypatch.setattr(
+        geometry_jobs, "_indexed_reference_group_batches", lambda groups: ((0, groups), (5, groups))
+    )
+    monkeypatch.setattr(geometry_jobs, "_geometry_micro_batches", lambda jobs: (jobs[:1], jobs[1:]))
+    monkeypatch.setattr(
+        geometry_jobs,
+        "_cache_geometry_jobs",
+        lambda api, plans, jobs, root, client: events.append(("cache", jobs)),
+    )
+    monkeypatch.setattr(
+        geometry_jobs,
+        "_remove_cached_geometry_jobs",
+        lambda plans, jobs, root: events.append(("remove", jobs)),
+    )
+    monkeypatch.setattr(
+        geometry_jobs,
+        "_worker_reference_batch",
+        lambda groups, root, threshold, start_index: (f"refs-{start_index}",),
+    )
+
+    def fake_process(api, plan_arg, **kwargs):
+        assert plan_arg is plan
+        assert kwargs["retain_source"] is True
+        assert kwargs["progress"] is None
+        events.append(("process", kwargs["source_path"], kwargs["references"]))
+
+    monkeypatch.setattr(geometry_jobs, "_process_geometry_path", fake_process)
+    jobs = (("dataset", "a.parquet"), ("dataset", "b.parquet"))
+    chunk = geometry_jobs._GeometryChunk(
+        groups=(),
+        reference_directory=tmp_path,
+        plans=(plan,),  # ty: ignore[invalid-argument-type]
+        jobs=jobs,
+        sidecar_root=tmp_path,
+        source_root=tmp_path,
+        threshold=0,
+        batch_size=8,
+        endpoint="https://hub.test",
+        token=None,
+    )
+
+    assert geometry_jobs._process_geometry_chunk(chunk) == jobs
+    assert events == [
+        ("cache", jobs[:1]),
+        ("process", "a.parquet", ("refs-0",)),
+        ("process", "a.parquet", ("refs-5",)),
+        ("remove", jobs[:1]),
+        ("cache", jobs[1:]),
+        ("process", "b.parquet", ("refs-0",)),
+        ("process", "b.parquet", ("refs-5",)),
+        ("remove", jobs[1:]),
+    ]

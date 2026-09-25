@@ -35,10 +35,12 @@ revisions and EEA asset identities, the command performs a verified no-op: it
 checks the remote tree, shared blob identities, Parquet rows and schemas, and
 card artifact hashes without uploading or rebuilding shards.
 
-Before handoff, run the deterministic gates in this order:
+Before handoff, run the deterministic gates in this order (these mirror
+`.github/workflows/qa.yml`; keep the two in sync):
 
 ```bash
 uv run ruff check src tests scripts
+uv run ruff format --check src tests scripts
 uv run ty check src tests scripts
 uv run pytest --cov --cov-report=json --cov-report=term-missing
 uv run python scripts/check_architecture.py

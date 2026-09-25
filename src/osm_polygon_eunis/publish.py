@@ -14,6 +14,7 @@ import pyarrow.parquet as pq
 from huggingface_hub import duplicate_repo
 from huggingface_hub.utils import RepositoryNotFoundError
 
+from ._protocols import HubApi, StreamClient
 from .fileio import sha256_file
 from .sources import capture_revision, download_to_temp
 
@@ -39,7 +40,7 @@ class VerificationReceipt:
 
 
 def duplicate_source(
-    api: Any,
+    api: HubApi,
     source_repo: str,
     target_repo: str,
     *,
@@ -64,7 +65,7 @@ def duplicate_source(
 
 
 def upload_replacement(
-    api: Any,
+    api: HubApi,
     target_repo: str,
     path: str,
     local_path: Path,
@@ -92,7 +93,7 @@ def _manifest_bytes(manifest: Mapping[str, Any]) -> bytes:
 
 
 def upload_manifest(
-    api: Any,
+    api: HubApi,
     target_repo: str,
     manifest: Mapping[str, Any],
     *,
@@ -149,10 +150,7 @@ def build_manifest(
         "added_paths": added,
         "shared_paths": sorted(set(source) - set(changed)),
         "rows_by_path": {path: rows_by_path[path] for path in sorted(rows_by_path)},
-        "schema_by_path": {
-            path: schemas[path]
-            for path in sorted(schemas)
-        },
+        "schema_by_path": {path: schemas[path] for path in sorted(schemas)},
         "reference": dict(reference_manifest),
         "card": dict(card_manifest) if card_manifest is not None else None,
     }
@@ -174,7 +172,7 @@ def _validate_manifest_paths(
         raise ValueError("added paths already exist in source paths")
 
 
-def _remote_files(api: Any, repo_id: str, revision: str) -> dict[str, Any]:
+def _remote_files(api: HubApi, repo_id: str, revision: str) -> dict[str, Any]:
     entries = api.list_repo_tree(
         repo_id,
         path_in_repo="",
@@ -190,7 +188,7 @@ def _remote_files(api: Any, repo_id: str, revision: str) -> dict[str, Any]:
 
 
 def verify_dataset(
-    api: Any,
+    api: HubApi,
     target_repo: str,
     *,
     expectations: Iterable[ShardExpectation],
@@ -199,7 +197,7 @@ def verify_dataset(
     expected_manifest: Mapping[str, Any] | None = None,
     expected_artifacts: Mapping[str, str] | None = None,
     temp_dir: Path | None = None,
-    http_client: Any | None = None,
+    http_client: StreamClient | None = None,
 ) -> VerificationReceipt:
     """Verify target tree, unchanged blob identities, Parquet schemas, and manifest."""
 
@@ -268,12 +266,12 @@ def _verify_shared_blobs(
 
 
 def _verify_expectations(
-    api: Any,
+    api: HubApi,
     target_repo: str,
     revision: str,
     expectations: Iterable[ShardExpectation],
     directory: Path,
-    http_client: Any | None,
+    http_client: StreamClient | None,
 ) -> dict[str, int]:
     rows_by_path: dict[str, int] = {}
     for expectation in expectations:
@@ -293,12 +291,12 @@ def _verify_expectations(
 
 
 def _verify_manifest(
-    api: Any,
+    api: HubApi,
     target_repo: str,
     revision: str,
     expected_manifest: Mapping[str, Any] | None,
     directory: Path,
-    http_client: Any | None,
+    http_client: StreamClient | None,
 ) -> Mapping[str, Any] | None:
     if expected_manifest is None:
         return None
@@ -317,12 +315,12 @@ def _verify_manifest(
 
 
 def _verify_artifacts(
-    api: Any,
+    api: HubApi,
     target_repo: str,
     revision: str,
     expected_artifacts: Mapping[str, str] | None,
     directory: Path,
-    http_client: Any | None,
+    http_client: StreamClient | None,
 ) -> None:
     for path, expected_hash in (expected_artifacts or {}).items():
         local = download_to_temp(
@@ -336,5 +334,3 @@ def _verify_artifacts(
         actual_hash = sha256_file(local)
         if actual_hash != expected_hash:
             raise ValueError(f"remote artifact mismatch: {path}")
-
-

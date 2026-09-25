@@ -9,15 +9,20 @@ import re
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from importlib.metadata import version
 from pathlib import Path
-from typing import Any, Protocol
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 from zipfile import BadZipFile, ZipFile
 
 import httpx
 
+from ._protocols import HttpClient as _HttpClient
+from ._protocols import RequestClient as _RequestClient
+from ._protocols import StreamClient
 from .fileio import write_chunks
 from .reference import parse_layer_code
+
+_USER_AGENT = "osm-polygon-eunis/" + ".".join(version("osm-polygon-eunis").split(".")[:2])
 
 _SHARE_TOKEN = re.compile(
     r"name=[\"']sharingToken[\"']\s+value=[\"']([^\"']+)[\"']",
@@ -27,32 +32,6 @@ _DEFAULT_CATALOG_API = "https://sdi.eea.europa.eu/catalogue/datahub/api/records"
 _DEFAULT_CLASSIFICATION_RECORD = "bfe4c237-e378-4a83-ab21-b3807f96c2e2"
 _WEBDAV_DEPTH = "1"
 _XLSX_MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
-
-
-class _HttpResponse(Protocol):
-    @property
-    def content(self) -> bytes: ...
-
-    @property
-    def text(self) -> str: ...
-
-    def json(self) -> Any: ...
-
-    def raise_for_status(self) -> Any: ...
-
-
-class _RequestClient(Protocol):
-    def request(
-        self,
-        method: str,
-        url: str,
-        *,
-        headers: Any = None,
-    ) -> _HttpResponse: ...
-
-
-class _HttpClient(_RequestClient, Protocol):
-    def get(self, url: str, *, params: Any = None) -> _HttpResponse: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -292,9 +271,7 @@ def _shared_strings(archive: ZipFile) -> tuple[str, ...]:
 
 
 def _shared_string(item: ET.Element) -> str:
-    return "".join(
-        element.text or "" for element in item.iter() if _local_name(element.tag) == "t"
-    )
+    return "".join(element.text or "" for element in item.iter() if _local_name(element.tag) == "t")
 
 
 def _column_index(reference: str) -> int:
@@ -326,9 +303,7 @@ def _shared_string_value(shared_strings: tuple[str, ...], raw: str) -> str:
 
 
 def _inline_string(cell: ET.Element) -> str:
-    return "".join(
-        element.text or "" for element in cell.iter() if _local_name(element.tag) == "t"
-    )
+    return "".join(element.text or "" for element in cell.iter() if _local_name(element.tag) == "t")
 
 
 def _xlsx_rows(archive: ZipFile, shared_strings: tuple[str, ...]) -> Iterable[tuple[str, ...]]:
@@ -740,10 +715,15 @@ def _build_vector_asset(
 def resolve_config(config_path: Path) -> tuple[EeaGroup, ...]:
     """Resolve all configured EEA records using one bounded HTTP client."""
 
-    config = json.loads(config_path.read_text(encoding="utf-8"))
+    return resolve_config_data(json.loads(config_path.read_text(encoding="utf-8")))
+
+
+def resolve_config_data(config: object) -> tuple[EeaGroup, ...]:
+    """Resolve an already-parsed reference config document."""
+
     settings = _config_settings(config)
     with httpx.Client(
-        headers={"Accept": "application/json", "User-Agent": "osm-polygon-eunis/0.1"},
+        headers={"Accept": "application/json", "User-Agent": _USER_AGENT},
         follow_redirects=True,
         timeout=60,
     ) as client:
@@ -818,7 +798,7 @@ def _resolve_groups(
     )
 
 
-def download_asset(client: httpx.Client, asset: RemoteAsset, destination: Path) -> str:
+def download_asset(client: StreamClient, asset: RemoteAsset, destination: Path) -> str:
     """Stream one EEA asset and return its SHA-256 after size validation."""
 
     destination.parent.mkdir(parents=True, exist_ok=True)

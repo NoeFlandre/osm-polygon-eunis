@@ -957,7 +957,7 @@ dev = [
     { name = "pytest-cov", specifier = ">=6,<8" },
     { name = "radon", specifier = ">=6,<7" },
     { name = "ruff", specifier = ">=0.9,<1" },
-    { name = "ty", specifier = ">=0.0.1a20" },
+    { name = "ty", specifier = ">=0.0.1a20,<0.1" },
 ]
 
 [[package]]

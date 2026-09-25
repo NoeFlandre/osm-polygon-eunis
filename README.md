@@ -47,13 +47,13 @@ than retaining source geometries.
 
 ## Local development
 
-Use a task-scoped uv cache when working on the mounted data volume:
-
 ```bash
-UV_CACHE_DIR=/private/tmp/osm-polygon-eunis-uv uv sync --group dev
-UV_CACHE_DIR=/private/tmp/osm-polygon-eunis-uv uv run pytest
-UV_CACHE_DIR=/private/tmp/osm-polygon-eunis-uv uv run ruff check .
-UV_CACHE_DIR=/private/tmp/osm-polygon-eunis-uv uv run ty check src tests scripts
+uv sync --locked --group dev
 ```
+
+The full list of QA gates (the same commands CI runs in
+`.github/workflows/qa.yml`) is maintained in `docs/operations.md`. If you work
+on a mounted data volume, you can optionally point `UV_CACHE_DIR` at a
+task-scoped local directory.
 
 The complete release procedure is documented in `docs/operations.md`.
