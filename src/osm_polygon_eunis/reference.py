@@ -591,8 +591,12 @@ class GeoPackageReference:
                 ORDER BY c.table_name
                 """
             ).fetchall()
-        except sqlite3.DatabaseError:
-            return []
+        except sqlite3.DatabaseError as error:
+            # Tile tables are optional (vector-only GeoPackage); any other database
+            # error (corrupt or truncated file) must fail closed, as _geometry_rows does.
+            if "no such table" in str(error):
+                return []
+            raise ValueError("not a readable GeoPackage") from error
 
     def _tile_layer(self, row: tuple[object, ...]) -> _TileLayer:
         values = _tile_values(row)
