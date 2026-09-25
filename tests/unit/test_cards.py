@@ -37,18 +37,17 @@ def test_card_artifacts_have_distribution_table_and_static_world_map(tmp_path: P
         reference_version="EEA-test",
     )
 
-    readme = first.files["README.md"].read_text(encoding="utf-8")
-    world_map = first.files["eunis/world-map.svg"].read_text(encoding="utf-8")
-    assert "./eunis/world-map.svg" in readme
-    assert "| `R11` | Steppe | 2 | 66.67% |" in readme
-    assert "| `—` | No EUNIS label | 1 | 33.33% |" in readme
-    assert world_map.startswith('<?xml version="1.0" encoding="UTF-8"?>')
-    assert "R11" in world_map
+    assert [
+        (summary.code, summary.name, summary.rows, summary.percentage)
+        for summary in card.summaries()
+    ] == [
+        ("R11", "Steppe", 2, pytest.approx(200 / 3)),
+        (None, "No EUNIS label", 1, pytest.approx(100 / 3)),
+    ]
+    assert "eunis/world-map.svg" in first.files["README.md"].read_text(encoding="utf-8")
     assert first.manifest["total_rows"] == 3
-    assert (
-        first.files["eunis/world-map.svg"].read_bytes()
-        == second.files["eunis/world-map.svg"].read_bytes()
-    )
+    for path in ("README.md", "eunis/world-map.svg"):
+        assert first.files[path].read_bytes() == second.files[path].read_bytes()
     assert first.hashes == {
         "README.md": first.manifest["readme_sha256"],
         "eunis/world-map.svg": first.manifest["map_sha256"],

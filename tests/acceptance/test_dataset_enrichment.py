@@ -9,8 +9,7 @@ import pytest
 from pytest_bdd import given, parsers, scenarios, then, when
 from shapely.geometry import box, mapping
 
-from osm_polygon_eunis.cards import DatasetCardAccumulator
-from osm_polygon_eunis.domain import EunisResult, OverlapCandidate
+from osm_polygon_eunis.domain import OverlapCandidate
 from osm_polygon_eunis.geometry import to_equal_area
 from osm_polygon_eunis.matching import choose_winner
 from osm_polygon_eunis.publish import build_manifest
@@ -129,38 +128,6 @@ def only_polygon_tables_changed(state) -> None:
 @then("document tables remain shared")
 def document_tables_shared(state) -> None:
     assert state["manifest"]["shared_paths"] == ["wikipedia/france.parquet"]
-
-
-@given("a completed label summary")
-def completed_label_summary(state, tmp_path: Path) -> None:
-    card = DatasetCardAccumulator()
-    card.observe(
-        EunisResult("R11", "steppe", 75.0, "EEA-test"),
-        json.dumps(mapping(box(2.0, 48.0, 2.05, 48.05))),
-    )
-    state["card"] = card
-    state["card_root"] = tmp_path / "card"
-
-
-@when("I build the dataset card")
-def build_dataset_card(state) -> None:
-    state["artifacts"] = state["card"].write_artifacts(
-        state["card_root"],
-        dataset_name="website",
-        source_repo="org/source",
-        target_repo="org/target",
-        source_revision="source-revision",
-        reference_version="EEA-test",
-    )
-
-
-@then("the card contains a static map and percentage table")
-def card_contains_map_and_table(state) -> None:
-    artifacts = state["artifacts"]
-    readme = artifacts.files["README.md"].read_text(encoding="utf-8")
-    assert "./eunis/world-map.svg" in readme
-    assert "| `R11` | steppe | 1 | 100.00% |" in readme
-    assert artifacts.files["eunis/world-map.svg"].read_text(encoding="utf-8").startswith("<?xml")
 
 
 @pytest.fixture

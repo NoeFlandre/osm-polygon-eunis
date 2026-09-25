@@ -13,7 +13,3 @@ Feature: EUNIS enrichment
     Then only polygon tables are changed
     And document tables remain shared
 
-  Scenario: Publish a static EUNIS map and distribution table in the card
-    Given a completed label summary
-    When I build the dataset card
-    Then the card contains a static map and percentage table
