@@ -167,10 +167,10 @@ def _validate_manifest_paths(
     added_paths = set(added)
     if not changed_paths.issubset(source_paths):
         raise ValueError("changed paths are not a subset of source paths")
-    if added_paths & source_paths:
-        raise ValueError("added paths already exist in source paths")
     if added_paths & changed_paths:
         raise ValueError("a path cannot be both changed and added")
+    if added_paths & source_paths:
+        raise ValueError("added paths already exist in source paths")
 
 
 def _remote_files(api: Any, repo_id: str, revision: str) -> dict[str, Any]:
