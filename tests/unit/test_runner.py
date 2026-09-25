@@ -441,9 +441,7 @@ def test_process_reference_groups_dispatches_streaming_parallel_batches(
 
     def fake_parallel(*args, **kwargs):
         del args
-        seen.append(
-            (tuple(group.record_id for group in kwargs["groups"]), kwargs["parallelism"])
-        )
+        seen.append((tuple(group.record_id for group in kwargs["groups"]), kwargs["parallelism"]))
 
     monkeypatch.setattr(runner, "_process_reference_groups_parallel", fake_parallel)
     runner._process_reference_groups(
@@ -553,9 +551,7 @@ def test_run_release_coordinates_pooled_processing(monkeypatch, tmp_path: Path) 
     monkeypatch.setattr(
         runner,
         "_process_reference_groups",
-        lambda *args, **kwargs: seen.append(
-            (kwargs["http_client"], kwargs["parallelism"])
-        ),
+        lambda *args, **kwargs: seen.append((kwargs["http_client"], kwargs["parallelism"])),
     )
     monkeypatch.setattr(runner, "_finalize_plan", lambda *args, **kwargs: receipt)
 

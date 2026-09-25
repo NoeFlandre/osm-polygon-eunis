@@ -28,7 +28,7 @@ dev = [
   "pytest-cov>=6,<8",
   "radon>=6,<7",
   "ruff>=0.9,<1",
-  "ty>=0.0.1a20",
+  "ty>=0.0.1a20,<0.1",
 ]
 
 [build-system]

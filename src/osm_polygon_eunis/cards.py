@@ -464,5 +464,3 @@ def _markdown_code(code: str | None) -> str:
 
 def _markdown_cell(value: object) -> str:
     return str(value).replace("|", "\\|").replace("\n", " ")
-
-

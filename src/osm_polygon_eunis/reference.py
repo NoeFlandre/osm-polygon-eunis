@@ -520,7 +520,6 @@ class GeoPackageReference:
         envelope_size = _envelope_size(envelope_type)
         return load_wkb(data[8 + envelope_size :])
 
-
     @classmethod
     def _discover_layers(cls, connection: sqlite3.Connection) -> tuple[_VectorLayer, ...]:
         rows = cls._geometry_rows(connection)
@@ -572,9 +571,7 @@ class GeoPackageReference:
         connection: sqlite3.Connection,
         table: str,
     ) -> tuple[str, str]:
-        columns = connection.execute(
-            f"PRAGMA table_info({_sql_identifier(table)})"
-        ).fetchall()
+        columns = connection.execute(f"PRAGMA table_info({_sql_identifier(table)})").fetchall()
         if not columns:
             raise ValueError(f"GeoPackage geometry table is missing: {table}")
         primary_key = cast(str, next((column[1] for column in columns if column[5]), "rowid"))
@@ -671,7 +668,6 @@ class GeoPackageReference:
         dimensions = (matrix_width, matrix_height, tile_width, tile_height, zoom_level)
         _validate_tile_types(table, numeric, dimensions)
         _validate_tile_dimensions(table, pixel_x_size, pixel_y_size, matrix_width, matrix_height)
-
 
     def _positive_tile_geometry(
         self,
@@ -787,9 +783,7 @@ class GeoPackageReference:
         code = _sql_identifier(layer.code_column or "")
         rtree = _sql_identifier(layer.rtree_table)
         key = (
-            "t.rowid"
-            if layer.primary_key == "rowid"
-            else f"t.{_sql_identifier(layer.primary_key)}"
+            "t.rowid" if layer.primary_key == "rowid" else f"t.{_sql_identifier(layer.primary_key)}"
         )
         query = (
             f"SELECT t.{code}, t.{geometry} FROM {table} AS t "
@@ -864,9 +858,7 @@ def resolve_eea_layers(config_path: Path, workspace: Path) -> tuple[RasterLayer,
         )
     layer_specs = _resolved_layer_specs(config)
     source_version = str(config["source_version"])
-    return tuple(
-        _resolved_layer(spec, workspace, source_version) for spec in layer_specs
-    )
+    return tuple(_resolved_layer(spec, workspace, source_version) for spec in layer_specs)
 
 
 def _resolved_layer_specs(config: dict[object, object]) -> list[object]:

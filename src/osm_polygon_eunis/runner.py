@@ -54,9 +54,7 @@ _SOURCE_MICRO_BATCH_SIZE = 128
 _GEOMETRY_TASKS_PER_WORKER = 4
 
 _WORKER_REFERENCE_STACKS: dict[tuple[str, int, int, tuple[str, ...]], ExitStack] = {}
-_WORKER_REFERENCES: dict[
-    tuple[str, int, int, tuple[str, ...]], tuple[OverlapReference, ...]
-] = {}
+_WORKER_REFERENCES: dict[tuple[str, int, int, tuple[str, ...]], tuple[OverlapReference, ...]] = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -1005,8 +1003,7 @@ def _manifest_expectations(manifest: Mapping[str, object]) -> tuple[ShardExpecta
     rows, schemas = fields
     try:
         return tuple(
-            _manifest_expectation(path, rows[path], schemas[path])
-            for path in sorted(rows, key=str)
+            _manifest_expectation(path, rows[path], schemas[path]) for path in sorted(rows, key=str)
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -1426,9 +1423,7 @@ def _process_reference_batch_parallel(
 
 def _geometry_jobs(plans: tuple[DatasetPlan, ...]) -> tuple[tuple[str, str], ...]:
     return tuple(
-        (plan.spec.name, source_path)
-        for plan in plans
-        for source_path in plan.geometry_paths
+        (plan.spec.name, source_path) for plan in plans for source_path in plan.geometry_paths
     )
 
 
@@ -1501,10 +1496,7 @@ def _geometry_chunks(
     worker_count = min(max(parallelism, 1), len(jobs))
     task_count = min(len(jobs), worker_count * _GEOMETRY_TASKS_PER_WORKER)
     chunk_size = max(1, (len(jobs) + task_count - 1) // task_count)
-    return tuple(
-        jobs[start : start + chunk_size]
-        for start in range(0, len(jobs), chunk_size)
-    )
+    return tuple(jobs[start : start + chunk_size] for start in range(0, len(jobs), chunk_size))
 
 
 def _process_geometry_chunk(chunk: _GeometryChunk) -> tuple[tuple[str, str], ...]:
@@ -1617,10 +1609,13 @@ def _open_reference_batch(
     client: Any,
 ) -> Iterator[tuple[OverlapReference, ...]]:
     first_record = groups[0].record_id[:8]
-    with TemporaryDirectory(
-        dir=workdir,
-        prefix=f"reference-{first_record}-",
-    ) as directory, ExitStack() as stack:
+    with (
+        TemporaryDirectory(
+            dir=workdir,
+            prefix=f"reference-{first_record}-",
+        ) as directory,
+        ExitStack() as stack,
+    ):
         references = tuple(
             stack.enter_context(
                 open_reference_group(

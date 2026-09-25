@@ -148,8 +148,7 @@ def list_repo_files(api: _InventoryApi, repo_id: str, revision: str) -> tuple[An
             (
                 entry
                 for entry in entries
-                if not hasattr(entry, "tree_id")
-                and isinstance(getattr(entry, "path", None), str)
+                if not hasattr(entry, "tree_id") and isinstance(getattr(entry, "path", None), str)
             ),
             key=lambda entry: entry.path,
         )

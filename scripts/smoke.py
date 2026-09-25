@@ -51,9 +51,7 @@ def main() -> int:
             pa.table({"polygon_id": ["smoke"], "geometry": [json.dumps(mapping(polygon))]}),
             source,
         )
-        reference = RasterReference(
-            (RasterLayer("R11", "Pannonian steppe", raster, "EEA-smoke"),)
-        )
+        reference = RasterReference((RasterLayer("R11", "Pannonian steppe", raster, "EEA-smoke"),))
         enrich_parquet_shard(source, output, reference=reference, batch_size=1)
         result = pq.read_table(output)
         assert result["eunis_code"].to_pylist() == ["R11"]

@@ -292,9 +292,7 @@ def _shared_strings(archive: ZipFile) -> tuple[str, ...]:
 
 
 def _shared_string(item: ET.Element) -> str:
-    return "".join(
-        element.text or "" for element in item.iter() if _local_name(element.tag) == "t"
-    )
+    return "".join(element.text or "" for element in item.iter() if _local_name(element.tag) == "t")
 
 
 def _column_index(reference: str) -> int:
@@ -326,9 +324,7 @@ def _shared_string_value(shared_strings: tuple[str, ...], raw: str) -> str:
 
 
 def _inline_string(cell: ET.Element) -> str:
-    return "".join(
-        element.text or "" for element in cell.iter() if _local_name(element.tag) == "t"
-    )
+    return "".join(element.text or "" for element in cell.iter() if _local_name(element.tag) == "t")
 
 
 def _xlsx_rows(archive: ZipFile, shared_strings: tuple[str, ...]) -> Iterable[tuple[str, ...]]:

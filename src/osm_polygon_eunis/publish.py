@@ -149,10 +149,7 @@ def build_manifest(
         "added_paths": added,
         "shared_paths": sorted(set(source) - set(changed)),
         "rows_by_path": {path: rows_by_path[path] for path in sorted(rows_by_path)},
-        "schema_by_path": {
-            path: schemas[path]
-            for path in sorted(schemas)
-        },
+        "schema_by_path": {path: schemas[path] for path in sorted(schemas)},
         "reference": dict(reference_manifest),
         "card": dict(card_manifest) if card_manifest is not None else None,
     }
@@ -336,5 +333,3 @@ def _verify_artifacts(
         actual_hash = sha256_file(local)
         if actual_hash != expected_hash:
             raise ValueError(f"remote artifact mismatch: {path}")
-
-
