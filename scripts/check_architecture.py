@@ -15,6 +15,7 @@ MODULES = {
 }
 # Lowest layer first; a module may import only modules listed before it.
 LAYERS = (
+    "_protocols",
     "domain",
     "fileio",
     "geometry",

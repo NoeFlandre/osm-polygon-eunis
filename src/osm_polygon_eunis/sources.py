@@ -6,12 +6,15 @@ import fnmatch
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, Self
+from typing import Any
 
 import httpx
-from huggingface_hub import HfApi, hf_hub_url
+from huggingface_hub import hf_hub_url
 from huggingface_hub.utils import build_hf_headers
 
+from ._protocols import HubApi
+from ._protocols import InventoryApi as _InventoryApi
+from ._protocols import StreamClient as _StreamClient
 from .fileio import write_chunks
 
 
@@ -47,51 +50,6 @@ _SPECS: Mapping[str, DatasetSpec] = {
         "polygon_document_links/*.parquet",
     ),
 }
-
-
-class _InventoryApi(Protocol):
-    def repo_info(
-        self,
-        repo_id: str,
-        *,
-        revision: str | None = None,
-        repo_type: str | None = None,
-    ): ...
-
-    def list_repo_tree(
-        self,
-        repo_id: str,
-        path_in_repo: str | None = None,
-        *,
-        recursive: bool = False,
-        revision: str | None = None,
-        repo_type: str | None = None,
-    ) -> Iterable[Any]: ...
-
-
-class _StreamResponse(Protocol):
-    @property
-    def headers(self) -> Mapping[str, str]: ...
-
-    def __enter__(self) -> Self: ...
-
-    def __exit__(self, *args: object) -> bool | None: ...
-
-    def raise_for_status(self) -> Any: ...
-
-    def iter_bytes(self, *, chunk_size: int) -> Iterable[bytes]: ...
-
-
-class _StreamClient(Protocol):
-    def stream(
-        self,
-        method: str,
-        url: str,
-        *,
-        headers: Mapping[str, str],
-        follow_redirects: bool,
-        timeout: None,
-    ) -> _StreamResponse: ...
 
 
 def dataset_spec(name: str) -> DatasetSpec:
@@ -190,7 +148,7 @@ def flatten_repo_path(path: str) -> str:
 
 
 def download_to_temp(
-    api: HfApi,
+    api: HubApi,
     repo_id: str,
     path: str,
     revision: str,

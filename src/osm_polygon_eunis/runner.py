@@ -17,6 +17,7 @@ from urllib.parse import unquote
 import httpx
 from huggingface_hub import HfApi
 
+from ._protocols import HubApi, StreamClient
 from .cards import CardArtifacts, DatasetCardAccumulator
 from .domain import EunisResult
 from .eea import EeaGroup, RemoteAsset, download_asset, resolve_config_data
@@ -177,7 +178,7 @@ def open_reference_group(
     *,
     threshold: int,
     checksums: dict[str, str] | None = None,
-    client: Any | None = None,
+    client: StreamClient | None = None,
 ) -> Iterator[OverlapReference]:
     """Download one EEA group and expose a closed, exact-overlap reference."""
 
@@ -196,7 +197,7 @@ def open_reference_group(
 
 
 @contextmanager
-def _http_client(client: Any | None) -> Iterator[Any]:
+def _http_client(client: StreamClient | None) -> Iterator[StreamClient]:
     if client is not None:
         yield client
         return
@@ -206,7 +207,7 @@ def _http_client(client: Any | None) -> Iterator[Any]:
 
 @contextmanager
 def _reference_group_with_client(
-    client: Any,
+    client: StreamClient,
     group: EeaGroup,
     directory: Path,
     threshold: int,
@@ -223,7 +224,7 @@ def _reference_group_with_client(
 
 
 def _stage_reference_group(
-    client: Any,
+    client: StreamClient,
     group: EeaGroup,
     directory: Path,
     checksums: dict[str, str],
@@ -304,7 +305,7 @@ def _stage_reference_groups(
     workdir: Path,
     threshold: int,
     checksums: dict[str, str],
-    client: Any,
+    client: StreamClient,
 ) -> Iterator[Path]:
     first_record = groups[0].record_id[:8]
     with TemporaryDirectory(
@@ -329,7 +330,7 @@ def _stage_reference_batch(
     workdir: Path,
     threshold: int,
     checksums: dict[str, str],
-    client: Any,
+    client: StreamClient,
 ) -> Iterator[Path]:
     """Stage one reference batch for the legacy single-batch worker path."""
 
@@ -409,7 +410,7 @@ atexit.register(_close_worker_reference_cache)
 
 @contextmanager
 def _raster_group_reference(
-    client: Any,
+    client: StreamClient,
     group: EeaGroup,
     directory: Path,
     threshold: int,
@@ -435,7 +436,7 @@ def _raster_group_reference(
 
 @contextmanager
 def _vector_group_reference(
-    client: Any,
+    client: StreamClient,
     group: EeaGroup,
     directory: Path,
     threshold: int,
@@ -457,7 +458,7 @@ def _vector_group_reference(
 
 
 def process_geometry_paths(
-    api: Any,
+    api: HubApi,
     plan: DatasetPlan,
     *,
     reference: OverlapReference,
@@ -465,7 +466,7 @@ def process_geometry_paths(
     source_root: Path,
     batch_size: int,
     progress: Progress | None = None,
-    http_client: Any | None = None,
+    http_client: StreamClient | None = None,
     retain_source: bool = False,
 ) -> None:
     """Merge one reference group into every geometry shard's compact sidecar."""
@@ -488,7 +489,7 @@ def process_geometry_paths(
 
 
 def _process_geometry_path(
-    api: Any,
+    api: HubApi,
     plan: DatasetPlan,
     *,
     source_path: str,
@@ -497,7 +498,7 @@ def _process_geometry_path(
     source_root: Path,
     batch_size: int,
     progress: Progress | None,
-    http_client: Any,
+    http_client: StreamClient,
     retain_source: bool,
 ) -> None:
     local_source = _download_geometry_source(
@@ -533,7 +534,7 @@ def _commit_id(result: Any) -> str | None:
     return None
 
 
-def _advance_commit(api: Any, target_repo: str, result: Any) -> str:
+def _advance_commit(api: HubApi, target_repo: str, result: Any) -> str:
     return _commit_id(result) or capture_revision(api, target_repo)
 
 
@@ -542,13 +543,13 @@ def _cached_geometry_path(root: Path, plan: DatasetPlan, source_path: str) -> Pa
 
 
 def _download_geometry_source(
-    api: Any,
+    api: HubApi,
     plan: DatasetPlan,
     source_path: str,
     source_root: Path,
     *,
     retain_source: bool,
-    client: Any,
+    client: StreamClient,
 ) -> Path:
     directory = source_root / plan.spec.name if retain_source else source_root
     cached = _cached_geometry_path(source_root, plan, source_path)
@@ -565,7 +566,7 @@ def _download_geometry_source(
 
 
 def finalize_dataset(
-    api: Any,
+    api: HubApi,
     plan: DatasetPlan,
     *,
     sidecar_root: Path,
@@ -573,7 +574,7 @@ def finalize_dataset(
     batch_size: int,
     parent_commit: str,
     progress: Progress | None = None,
-    http_client: Any | None = None,
+    http_client: StreamClient | None = None,
     card: DatasetCardAccumulator | None = None,
     source_cache_root: Path | None = None,
 ) -> tuple[tuple[ShardExpectation, ...], str]:
@@ -595,7 +596,7 @@ def finalize_dataset(
 
 
 def _finalize_dataset_with_client(
-    api: Any,
+    api: HubApi,
     plan: DatasetPlan,
     *,
     sidecar_root: Path,
@@ -603,7 +604,7 @@ def _finalize_dataset_with_client(
     batch_size: int,
     parent_commit: str,
     progress: Progress | None,
-    http_client: Any,
+    http_client: StreamClient,
     card: DatasetCardAccumulator | None,
     source_cache_root: Path | None,
 ) -> tuple[tuple[ShardExpectation, ...], str]:
@@ -633,7 +634,7 @@ def _finalize_dataset_with_client(
 
 
 def _finalize_shard(
-    api: Any,
+    api: HubApi,
     plan: DatasetPlan,
     geometry_path: str,
     link_path: str | None,
@@ -642,7 +643,7 @@ def _finalize_shard(
     local_root: Path,
     batch_size: int,
     parent_commit: str,
-    http_client: Any,
+    http_client: StreamClient,
     card: DatasetCardAccumulator,
     source_cache_root: Path | None,
 ) -> tuple[tuple[ShardExpectation, ...], str]:
@@ -699,13 +700,13 @@ def _finalize_shard(
 
 
 def _final_source(
-    api: Any,
+    api: HubApi,
     plan: DatasetPlan,
     geometry_path: str,
     *,
     source_cache_root: Path | None,
     local_root: Path,
-    http_client: Any,
+    http_client: StreamClient,
 ) -> tuple[Path, bool]:
     if source_cache_root is not None:
         cached = _cached_geometry_path(source_cache_root, plan, geometry_path)
@@ -725,7 +726,7 @@ def _final_source(
 
 
 def _upload_shard_outputs(
-    api: Any,
+    api: HubApi,
     plan: DatasetPlan,
     geometry_path: str,
     local_output: Path,
@@ -751,14 +752,14 @@ def _upload_shard_outputs(
 
 
 def _build_link_output(
-    api: Any,
+    api: HubApi,
     plan: DatasetPlan,
     link_path: str | None,
     local_source: Path,
     sidecar: Path,
     local_root: Path,
     batch_size: int,
-    http_client: Any,
+    http_client: StreamClient,
 ) -> _LinkOutput | None:
     if link_path is None:
         return None
@@ -788,7 +789,7 @@ def _build_link_output(
 
 
 def _upload_file(
-    api: Any,
+    api: HubApi,
     target_repo: str,
     path: str,
     local_path: Path,
@@ -855,13 +856,13 @@ def _enrich_link(
     )
 
 
-def plan_datasets(api: Any) -> tuple[DatasetPlan, ...]:
+def plan_datasets(api: HubApi) -> tuple[DatasetPlan, ...]:
     """Capture source commits and validate all declared dataset layouts."""
 
     return tuple(_plan_dataset(api, name) for name in ("website", "wikidata", "description"))
 
 
-def _plan_dataset(api: Any, name: str) -> DatasetPlan:
+def _plan_dataset(api: HubApi, name: str) -> DatasetPlan:
     spec = dataset_spec(name)
     revision = capture_revision(api, spec.source_repo)
     source_files = tuple(entry.path for entry in list_repo_files(api, spec.source_repo, revision))
@@ -976,10 +977,10 @@ def _mapping_field(payload: Mapping[str, object], field: str) -> Mapping[str, ob
 
 
 def _load_existing_manifest(
-    api: Any,
+    api: HubApi,
     plan: DatasetPlan,
     directory: Path,
-    client: Any,
+    client: StreamClient,
 ) -> _ExistingManifest | None:
     """Load a tiny target manifest without using the persistent Hub cache."""
 
@@ -1083,12 +1084,12 @@ def _required_no_op_parts(
 
 
 def _verify_no_op_dataset(
-    api: Any,
+    api: HubApi,
     plan: DatasetPlan,
     existing: _ExistingManifest,
     *,
     workdir: Path,
-    client: Any,
+    client: StreamClient,
 ) -> DatasetReceipt:
     manifest = existing.manifest
     expectations, artifacts, changed_paths, added_paths = _required_no_op_parts(manifest)
@@ -1108,10 +1109,10 @@ def _verify_no_op_dataset(
 
 
 def _load_existing_manifests(
-    api: Any,
+    api: HubApi,
     plans: tuple[DatasetPlan, ...],
     directory: Path,
-    client: Any,
+    client: StreamClient,
 ) -> tuple[_ExistingManifest | None, ...]:
     return tuple(_load_existing_manifest(api, plan, directory, client) for plan in plans)
 
@@ -1136,12 +1137,12 @@ def _compatible_manifests(
 
 
 def _no_op_receipts(
-    api: Any,
+    api: HubApi,
     plans: tuple[DatasetPlan, ...],
     existing: tuple[_ExistingManifest | None, ...],
     *,
     workdir: Path,
-    client: Any,
+    client: StreamClient,
 ) -> tuple[DatasetReceipt, ...]:
     return tuple(
         _verify_no_op_dataset(
@@ -1156,12 +1157,12 @@ def _no_op_receipts(
 
 
 def _try_no_op_release(
-    api: Any,
+    api: HubApi,
     plans: tuple[DatasetPlan, ...],
     reference: Mapping[str, object],
     *,
     workdir: Path,
-    client: Any,
+    client: StreamClient,
     progress: Progress | None,
 ) -> ReleaseReceipt | None:
     existing = _load_existing_manifests(api, plans, workdir / "noop", client)
@@ -1176,7 +1177,7 @@ def _try_no_op_release(
 
 
 def run_release(
-    api: Any,
+    api: HubApi,
     *,
     reference_config: Path,
     workdir: Path,
@@ -1251,7 +1252,7 @@ def run_release(
     return ReleaseReceipt(receipts, reference_info)
 
 
-def _duplicate_outputs(api: Any, plans: tuple[DatasetPlan, ...], token: str | None) -> None:
+def _duplicate_outputs(api: HubApi, plans: tuple[DatasetPlan, ...], token: str | None) -> None:
     for plan in plans:
         duplicate_source(
             api,
@@ -1262,7 +1263,7 @@ def _duplicate_outputs(api: Any, plans: tuple[DatasetPlan, ...], token: str | No
 
 
 def _process_reference_groups(
-    api: Any,
+    api: HubApi,
     plans: tuple[DatasetPlan, ...],
     groups: tuple[EeaGroup, ...],
     *,
@@ -1273,7 +1274,7 @@ def _process_reference_groups(
     checksums: dict[str, str],
     batch_size: int,
     progress: Progress | None,
-    http_client: Any,
+    http_client: StreamClient,
     parallelism: int = 1,
 ) -> None:
     """Process bounded reference batches with resumable compact sidecars."""
@@ -1311,7 +1312,7 @@ def _process_reference_groups(
 
 
 def _process_reference_groups_parallel(
-    api: Any,
+    api: HubApi,
     plans: tuple[DatasetPlan, ...],
     *,
     groups: tuple[EeaGroup, ...],
@@ -1322,7 +1323,7 @@ def _process_reference_groups_parallel(
     checksums: dict[str, str],
     batch_size: int,
     progress: Progress | None,
-    http_client: Any,
+    http_client: StreamClient,
     parallelism: int,
 ) -> None:
     """Stream bounded source micro-batches through every reference batch."""
@@ -1353,7 +1354,7 @@ def _process_reference_groups_parallel(
 
 
 def _process_reference_batch_serial(
-    api: Any,
+    api: HubApi,
     plans: tuple[DatasetPlan, ...],
     *,
     groups: tuple[EeaGroup, ...],
@@ -1364,7 +1365,7 @@ def _process_reference_batch_serial(
     checksums: dict[str, str],
     batch_size: int,
     progress: Progress | None,
-    http_client: Any,
+    http_client: StreamClient,
 ) -> None:
     with _open_reference_batch(
         groups,
@@ -1390,7 +1391,7 @@ def _process_reference_batch_serial(
 
 
 def _process_reference_batch_parallel(
-    api: Any,
+    api: HubApi,
     plans: tuple[DatasetPlan, ...],
     *,
     groups: tuple[EeaGroup, ...],
@@ -1401,7 +1402,7 @@ def _process_reference_batch_parallel(
     checksums: dict[str, str],
     batch_size: int,
     progress: Progress | None,
-    http_client: Any,
+    http_client: StreamClient,
     parallelism: int,
 ) -> None:
     jobs = _geometry_jobs(plans)
@@ -1436,7 +1437,7 @@ def _geometry_jobs(plans: tuple[DatasetPlan, ...]) -> tuple[tuple[str, str], ...
 
 
 def _geometry_work_units(
-    api: Any,
+    api: HubApi,
     plans: tuple[DatasetPlan, ...],
     groups: tuple[EeaGroup, ...],
     jobs: tuple[tuple[str, str], ...],
@@ -1541,11 +1542,11 @@ def _process_geometry_chunk(chunk: _GeometryChunk) -> tuple[tuple[str, str], ...
 
 
 def _cache_geometry_jobs(
-    api: Any,
+    api: HubApi,
     plans: Mapping[str, DatasetPlan],
     jobs: tuple[tuple[str, str], ...],
     source_root: Path,
-    client: Any,
+    client: StreamClient,
 ) -> None:
     for dataset, source_path in jobs:
         _download_geometry_source(
@@ -1614,7 +1615,7 @@ def _open_reference_batch(
     workdir: Path,
     threshold: int,
     checksums: dict[str, str],
-    client: Any,
+    client: StreamClient,
 ) -> Iterator[tuple[OverlapReference, ...]]:
     first_record = groups[0].record_id[:8]
     with (
@@ -1640,7 +1641,7 @@ def _open_reference_batch(
 
 
 def _finalize_plan(
-    api: Any,
+    api: HubApi,
     plan: DatasetPlan,
     *,
     sidecar_root: Path,
@@ -1648,7 +1649,7 @@ def _finalize_plan(
     batch_size: int,
     reference_info: Mapping[str, object],
     progress: Progress | None,
-    http_client: Any,
+    http_client: StreamClient,
     source_cache_root: Path | None = None,
 ) -> DatasetReceipt:
     target_revision = capture_revision(api, plan.spec.output_repo)
@@ -1718,7 +1719,7 @@ def _cleanup_card_artifacts(artifacts: CardArtifacts) -> None:
 
 
 def _upload_card_artifacts(
-    api: Any,
+    api: HubApi,
     target_repo: str,
     artifacts: CardArtifacts,
     parent_commit: str,
@@ -1769,7 +1770,7 @@ def _build_dataset_manifest(
 
 
 def _verify_final_dataset(
-    api: Any,
+    api: HubApi,
     plan: DatasetPlan,
     *,
     expectations: tuple[ShardExpectation, ...],
@@ -1778,7 +1779,7 @@ def _verify_final_dataset(
     expected_manifest: Mapping[str, Any],
     expected_artifacts: Mapping[str, str],
     temp_dir: Path,
-    http_client: Any,
+    http_client: StreamClient,
 ) -> VerificationReceipt:
     return verify_dataset(
         api,
@@ -1794,7 +1795,7 @@ def _verify_final_dataset(
 
 
 def _shared_blobs(
-    api: Any,
+    api: HubApi,
     plan: DatasetPlan,
     changed_paths: set[str],
 ) -> dict[str, str]:

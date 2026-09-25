@@ -2,12 +2,14 @@ import json
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
 import osm_polygon_eunis.runner as runner
+from osm_polygon_eunis._protocols import HubApi, StreamClient
 from osm_polygon_eunis.cards import CardArtifacts
 from osm_polygon_eunis.domain import EunisResult
 from osm_polygon_eunis.eea import EeaGroup, RemoteAsset
@@ -66,10 +68,10 @@ def test_process_geometry_paths_keeps_only_compact_sidecar_state(
         ("polygons/test.parquet",),
         (),
     )
-    reusable_client = object()
+    reusable_client = cast(StreamClient, object())
 
     process_geometry_paths(
-        object(),
+        cast(HubApi, object()),
         plan,
         reference=_Reference(EunisResult("R11", "steppe", 25.0, "test")),
         sidecar_root=tmp_path / "sidecars",
@@ -119,7 +121,7 @@ def test_process_geometry_paths_reuses_retained_source_shard(
 
     for _ in range(2):
         process_geometry_paths(
-            object(),
+            cast(HubApi, object()),
             plan,
             reference=_Reference(EunisResult("R11", "steppe", 25.0, "test")),
             sidecar_root=tmp_path / "sidecars",
@@ -162,7 +164,7 @@ def test_run_release_rejects_invalid_reference_config(
 
     with pytest.raises(ValueError, match=message):
         runner.run_release(
-            object(), reference_config=config, workdir=tmp_path / "run", batch_size=1
+            cast(HubApi, object()), reference_config=config, workdir=tmp_path / "run", batch_size=1
         )
     assert not (tmp_path / "run").exists()
 
@@ -192,7 +194,7 @@ def test_open_reference_group_reuses_client_for_raster_and_vector(
     monkeypatch.setattr(runner, "download_asset", fake_download)
     monkeypatch.setattr(runner, "RasterReference", FakeReference)
     monkeypatch.setattr(runner, "GeoPackageReference", FakeReference)
-    client = object()
+    client = cast(StreamClient, object())
     checksums: dict[str, str] = {}
     raster_group = EeaGroup(
         "raster-record",
@@ -300,14 +302,14 @@ def test_finalize_dataset_enriches_polygon_and_link_shards_and_cleans_staging(
         progress.append(dict(event))
 
     expectations, commit = runner.finalize_dataset(
-        object(),
+        cast(HubApi, object()),
         plan,
         sidecar_root=tmp_path / "sidecars",
         local_root=tmp_path / "final",
         batch_size=1,
         parent_commit="base",
         progress=capture_progress,
-        http_client=object(),
+        http_client=cast(StreamClient, object()),
     )
 
     assert commit == "commit-2"
@@ -342,7 +344,7 @@ def test_planning_manifest_and_shared_blobs_are_deterministic(monkeypatch) -> No
     monkeypatch.setattr(runner, "capture_revision", lambda api, repo: f"rev:{repo}")
     monkeypatch.setattr(runner, "list_repo_files", lambda api, repo, revision: entries[repo])
 
-    plans = runner.plan_datasets(object())
+    plans = runner.plan_datasets(cast(HubApi, object()))
 
     assert [plan.spec.name for plan in plans] == ["website", "wikidata", "description"]
     assert plans[1].link_paths == ("polygon_document_links/a.parquet",)
@@ -366,7 +368,7 @@ def test_planning_manifest_and_shared_blobs_are_deterministic(monkeypatch) -> No
     assert isinstance(assets, list)
     assert [asset["path"] for asset in assets] == ["/Prob_R11.tif", "/habitats.gpkg"]
 
-    shared = runner._shared_blobs(object(), plans[1], {"polygons/a.parquet"})
+    shared = runner._shared_blobs(cast(HubApi, object()), plans[1], {"polygons/a.parquet"})
     assert shared == {
         "polygon_document_links/a.parquet": "link",
         "wikipedia/a.parquet": "wikipedia",
@@ -406,9 +408,9 @@ def test_process_reference_groups_batches_reference_groups_for_all_plans(
 
     monkeypatch.setattr(runner, "open_reference_group", fake_open)
     monkeypatch.setattr(runner, "_process_geometry_path", fake_process)
-    client = object()
+    client = cast(StreamClient, object())
     runner._process_reference_groups(
-        object(),
+        cast(HubApi, object()),
         plans,
         (group, second_group),
         sidecar_root=tmp_path / "sidecars",
@@ -445,7 +447,7 @@ def test_process_reference_groups_dispatches_streaming_parallel_batches(
 
     monkeypatch.setattr(runner, "_process_reference_groups_parallel", fake_parallel)
     runner._process_reference_groups(
-        object(),
+        cast(HubApi, object()),
         (plan,),
         (group,),
         sidecar_root=tmp_path / "sidecars",
@@ -455,7 +457,7 @@ def test_process_reference_groups_dispatches_streaming_parallel_batches(
         checksums={},
         batch_size=2,
         progress=None,
-        http_client=object(),
+        http_client=cast(StreamClient, object()),
         parallelism=2,
     )
 
@@ -513,14 +515,14 @@ def test_finalize_plan_builds_manifest_and_verifies_target(monkeypatch, tmp_path
     )
 
     result = runner._finalize_plan(
-        object(),
+        cast(HubApi, object()),
         plan,
         sidecar_root=tmp_path / "sidecars",
         workdir=tmp_path,
         batch_size=2,
         reference_info={"source_version": "EEA-test"},
         progress=None,
-        http_client=object(),
+        http_client=cast(StreamClient, object()),
     )
 
     assert result.verification is verification
@@ -556,7 +558,7 @@ def test_run_release_coordinates_pooled_processing(monkeypatch, tmp_path: Path) 
     monkeypatch.setattr(runner, "_finalize_plan", lambda *args, **kwargs: receipt)
 
     result = runner.run_release(
-        object(), reference_config=config, workdir=tmp_path / "run", batch_size=2
+        cast(HubApi, object()), reference_config=config, workdir=tmp_path / "run", batch_size=2
     )
 
     assert result.datasets == (receipt,)
@@ -628,7 +630,7 @@ def test_run_release_verifies_matching_manifests_without_processing(
     )
 
     result = runner.run_release(
-        object(), reference_config=config, workdir=tmp_path / "run", batch_size=2
+        cast(HubApi, object()), reference_config=config, workdir=tmp_path / "run", batch_size=2
     )
 
     assert result.datasets == (receipt,)
@@ -706,7 +708,9 @@ def test_no_op_manifest_helpers_validate_and_load_pinned_state(
         return destination
 
     monkeypatch.setattr(runner, "download_to_temp", fake_download)
-    loaded = runner._load_existing_manifest(Api(), plan, tmp_path / "noop", object())
+    loaded = runner._load_existing_manifest(
+        cast(HubApi, Api()), plan, tmp_path / "noop", cast(StreamClient, object())
+    )
     assert loaded == runner._ExistingManifest("target-revision", manifest)
 
 
@@ -735,11 +739,11 @@ def test_verify_no_op_dataset_reuses_manifest_expectations(monkeypatch, tmp_path
     monkeypatch.setattr(runner, "_verify_final_dataset", lambda *args, **kwargs: verification)
 
     result = runner._verify_no_op_dataset(
-        object(),
+        cast(HubApi, object()),
         plan,
         runner._ExistingManifest("target", manifest),
         workdir=tmp_path,
-        client=object(),
+        client=cast(StreamClient, object()),
     )
 
     assert result.no_op is True

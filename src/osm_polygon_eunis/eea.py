@@ -11,12 +11,14 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from importlib.metadata import version
 from pathlib import Path
-from typing import Any, Protocol
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 from zipfile import BadZipFile, ZipFile
 
 import httpx
 
+from ._protocols import HttpClient as _HttpClient
+from ._protocols import RequestClient as _RequestClient
+from ._protocols import StreamClient
 from .fileio import write_chunks
 from .reference import parse_layer_code
 
@@ -30,32 +32,6 @@ _DEFAULT_CATALOG_API = "https://sdi.eea.europa.eu/catalogue/datahub/api/records"
 _DEFAULT_CLASSIFICATION_RECORD = "bfe4c237-e378-4a83-ab21-b3807f96c2e2"
 _WEBDAV_DEPTH = "1"
 _XLSX_MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
-
-
-class _HttpResponse(Protocol):
-    @property
-    def content(self) -> bytes: ...
-
-    @property
-    def text(self) -> str: ...
-
-    def json(self) -> Any: ...
-
-    def raise_for_status(self) -> Any: ...
-
-
-class _RequestClient(Protocol):
-    def request(
-        self,
-        method: str,
-        url: str,
-        *,
-        headers: Any = None,
-    ) -> _HttpResponse: ...
-
-
-class _HttpClient(_RequestClient, Protocol):
-    def get(self, url: str, *, params: Any = None) -> _HttpResponse: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -822,7 +798,7 @@ def _resolve_groups(
     )
 
 
-def download_asset(client: httpx.Client, asset: RemoteAsset, destination: Path) -> str:
+def download_asset(client: StreamClient, asset: RemoteAsset, destination: Path) -> str:
     """Stream one EEA asset and return its SHA-256 after size validation."""
 
     destination.parent.mkdir(parents=True, exist_ok=True)
