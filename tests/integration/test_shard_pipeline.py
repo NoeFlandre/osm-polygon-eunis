@@ -11,7 +11,8 @@ from pyproj import Transformer
 from shapely.geometry import box, mapping
 from shapely.ops import transform
 
-import osm_polygon_eunis.runner as runner
+import osm_polygon_eunis.geometry_jobs as geometry_jobs
+import osm_polygon_eunis.references as references
 from osm_polygon_eunis._protocols import HubApi, StreamClient
 from osm_polygon_eunis.eea import EeaGroup, RemoteAsset
 from osm_polygon_eunis.reference import RasterLayer, RasterReference
@@ -96,7 +97,7 @@ def test_parallel_reference_batch_processes_cached_geometry_shards(
         destination.write_bytes(raster_path.read_bytes())
         return "sha"
 
-    monkeypatch.setattr(runner, "download_asset", fake_download)
+    monkeypatch.setattr(references, "download_asset", fake_download)
     (tmp_path / "run").mkdir()
     plan = DatasetPlan(
         DatasetSpec("website", "source", "target", "polygons/*.parquet"),
@@ -107,7 +108,7 @@ def test_parallel_reference_batch_processes_cached_geometry_shards(
     )
     progress: list[Mapping[str, object]] = []
 
-    runner._process_reference_groups(
+    geometry_jobs._process_reference_groups(
         cast(HubApi, SimpleNamespace(endpoint="https://huggingface.co", token=None)),
         (plan,),
         (group,),

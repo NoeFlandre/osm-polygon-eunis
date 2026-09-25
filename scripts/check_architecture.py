@@ -26,6 +26,10 @@ LAYERS = (
     "cards",
     "sources",
     "publish",
+    "references",
+    "release_plan",
+    "geometry_jobs",
+    "manifest_state",
     "runner",
     "cli",
 )
