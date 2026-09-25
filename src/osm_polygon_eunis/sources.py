@@ -12,6 +12,8 @@ import httpx
 from huggingface_hub import HfApi, hf_hub_url
 from huggingface_hub.utils import build_hf_headers
 
+from .fileio import write_chunks
+
 
 @dataclass(frozen=True, slots=True)
 class DatasetSpec:
@@ -182,7 +184,9 @@ def pair_region_paths(
     return tuple((polygons[name], links[name]) for name in sorted(polygons))
 
 
-def _download_name(path: str) -> str:
+def flatten_repo_path(path: str) -> str:
+    """Turn a repository path into a flat local filename."""
+
     return path.replace("/", "__")
 
 
@@ -198,7 +202,7 @@ def download_to_temp(
     """Stream one Hub file to a run-local path and verify Content-Length."""
 
     directory.mkdir(parents=True, exist_ok=True)
-    destination = directory / _download_name(path)
+    destination = directory / flatten_repo_path(path)
     url = hf_hub_url(
         repo_id,
         path,
@@ -244,11 +248,8 @@ def _download_with_client(
 
 def _write_response(response: Any, destination: Path) -> tuple[int, str | None]:
     response.raise_for_status()
-    written = 0
     with destination.open("wb") as output:
-        for chunk in response.iter_bytes(chunk_size=8 * 1024 * 1024):
-            output.write(chunk)
-            written += len(chunk)
+        written = write_chunks(response.iter_bytes(chunk_size=8 * 1024 * 1024), output)
     return written, response.headers.get("content-length")
 
 

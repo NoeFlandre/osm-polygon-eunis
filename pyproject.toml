@@ -68,5 +68,5 @@ python-version = "3.12"
 
 [tool.mutmut]
 source_paths = ["src/osm_polygon_eunis/matching.py"]
-also_copy = ["src/osm_polygon_eunis/domain.py", "src/osm_polygon_eunis/__init__.py"]
+also_copy = ["src/osm_polygon_eunis/domain.py", "src/osm_polygon_eunis/geometry.py", "src/osm_polygon_eunis/__init__.py"]
 pytest_add_cli_args_test_selection = ["tests/unit/test_matching.py"]

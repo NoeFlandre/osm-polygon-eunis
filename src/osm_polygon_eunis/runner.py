@@ -35,6 +35,7 @@ from .sources import (
     capture_revision,
     dataset_spec,
     download_to_temp,
+    flatten_repo_path,
     list_repo_files,
     matches_layout,
     pair_region_paths,
@@ -531,7 +532,7 @@ def _advance_commit(api: Any, target_repo: str, result: Any) -> str:
 
 
 def _cached_geometry_path(root: Path, plan: DatasetPlan, source_path: str) -> Path:
-    return root / plan.spec.name / source_path.replace("/", "__")
+    return root / plan.spec.name / flatten_repo_path(source_path)
 
 
 def _download_geometry_source(
