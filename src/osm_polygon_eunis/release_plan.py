@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -61,10 +61,24 @@ def _cached_geometry_path(root: Path, plan: DatasetPlan, source_path: str) -> Pa
     return root / plan.spec.name / flatten_repo_path(source_path)
 
 
-def plan_datasets(api: HubApi) -> tuple[DatasetPlan, ...]:
-    """Capture source commits and validate all declared dataset layouts."""
+DATASET_NAMES: tuple[str, ...] = ("website", "wikidata", "description")
 
-    return tuple(_plan_dataset(api, name) for name in ("website", "wikidata", "description"))
+
+def selected_dataset_names(names: Sequence[str] | None = None) -> tuple[str, ...]:
+    """Return the requested dataset names in release order, rejecting unknown names."""
+
+    if not names:
+        return DATASET_NAMES
+    unknown = sorted(set(names) - set(DATASET_NAMES))
+    if unknown:
+        raise ValueError(f"unknown dataset(s): {', '.join(unknown)}")
+    return tuple(name for name in DATASET_NAMES if name in names)
+
+
+def plan_datasets(api: HubApi, names: Sequence[str] | None = None) -> tuple[DatasetPlan, ...]:
+    """Capture source commits and validate the declared (or selected) dataset layouts."""
+
+    return tuple(_plan_dataset(api, name) for name in selected_dataset_names(names))
 
 
 def _plan_dataset(api: HubApi, name: str) -> DatasetPlan:

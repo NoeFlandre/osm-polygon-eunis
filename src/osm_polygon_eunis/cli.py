@@ -11,11 +11,15 @@ from pathlib import Path
 from huggingface_hub import HfApi
 
 from .runner import (
+    DATASET_NAMES,
+    DEFAULT_WORKERS,
     DryRunReport,
+    ReleaseReceipt,
     plan_datasets,
     plan_release,
     run_release,
     validate_reference_config,
+    verify_release,
 )
 
 
@@ -29,25 +33,109 @@ def _positive_int(value: str) -> int:
     return number
 
 
+_EPILOG = """\
+examples:
+  osm-polygon-eunis plan
+  osm-polygon-eunis release --dry-run --workdir .eunis-run
+  osm-polygon-eunis release --batch-size 256 --workdir .eunis-run
+  osm-polygon-eunis release --dataset wikidata --workers 4
+  osm-polygon-eunis verify --dataset website
+
+environment:
+  HF_TOKEN  Hugging Face token; release needs write access to the targets,
+            plan/verify/--dry-run only read (a token helps with rate limits).
+
+See docs/operations.md for the full release procedure.
+"""
+
+
+def _add_endpoint(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--endpoint",
+        default=None,
+        help="Hugging Face Hub endpoint URL (default: the public Hub)",
+    )
+
+
+def _add_dataset(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--dataset",
+        action="append",
+        choices=DATASET_NAMES,
+        default=None,
+        metavar="NAME",
+        help=f"limit to one dataset; repeatable (choices: {', '.join(DATASET_NAMES)}; "
+        "default: all)",
+    )
+
+
+def _add_workdir(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--workdir",
+        type=Path,
+        default=Path(".eunis-run"),
+        help="local staging directory for shards, sidecars and cards (default: .eunis-run)",
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="osm-polygon-eunis")
+    parser = argparse.ArgumentParser(
+        prog="osm-polygon-eunis",
+        description="Enrich OSM polygon Hugging Face datasets with exact-overlap EUNIS labels, "
+        "publish them and verify the published result.",
+        epilog=_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
-    plan = subparsers.add_parser("plan", help="inspect pinned public source layouts")
-    plan.add_argument("--endpoint", default=None)
-    release = subparsers.add_parser("release", help="run and publish the three datasets")
+    plan = subparsers.add_parser(
+        "plan",
+        help="inspect pinned public source layouts",
+        description="Print the pinned source revision and shard layout of each dataset.",
+    )
+    _add_dataset(plan)
+    _add_endpoint(plan)
+    release = subparsers.add_parser(
+        "release",
+        help="run and publish the datasets",
+        description="Label, publish and independently verify the selected datasets. "
+        "Requires HF_TOKEN with write access unless --dry-run is given.",
+    )
     release.add_argument(
         "--reference-config",
         type=Path,
         default=Path("config/eea-2021-reference.json"),
+        help="EEA reference config JSON (default: config/eea-2021-reference.json)",
     )
-    release.add_argument("--workdir", type=Path, default=Path(".eunis-run"))
-    release.add_argument("--batch-size", type=_positive_int, default=256)
-    release.add_argument("--endpoint", default=None)
+    _add_workdir(release)
+    release.add_argument(
+        "--batch-size",
+        type=_positive_int,
+        default=256,
+        help="Parquet rows per streamed batch (default: 256)",
+    )
+    release.add_argument(
+        "--workers",
+        type=_positive_int,
+        default=DEFAULT_WORKERS,
+        help=f"geometry worker processes (default: {DEFAULT_WORKERS})",
+    )
+    _add_dataset(release)
+    _add_endpoint(release)
     release.add_argument(
         "--dry-run",
         action="store_true",
         help="resolve plans, references and no-op status and print them without Hub writes",
     )
+    verify = subparsers.add_parser(
+        "verify",
+        help="re-verify published targets (read-only)",
+        description="Check each published target against its EUNIS manifest: remote tree, "
+        "shared blobs, Parquet rows and schemas, and card artifacts. Makes no writes and "
+        "exits nonzero on a mismatch.",
+    )
+    _add_workdir(verify)
+    _add_dataset(verify)
+    _add_endpoint(verify)
     return parser
 
 
@@ -95,7 +183,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     if args.command == "plan":
-        plans = plan_datasets(_api(args.endpoint))
+        plans = plan_datasets(_api(args.endpoint), args.dataset)
         print(
             json.dumps(
                 [
@@ -114,12 +202,17 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 0
+    if args.command == "verify":
+        verified = verify_release(_api(args.endpoint), workdir=args.workdir, datasets=args.dataset)
+        _print_receipt(verified)
+        return 0
     _validate_release(parser, args)
     if args.dry_run:
         report = plan_release(
             _api(args.endpoint),
             reference_config=args.reference_config,
             workdir=args.workdir,
+            datasets=args.dataset,
         )
         print(json.dumps(_dry_run_payload(report), sort_keys=True, indent=2))
         return 0
@@ -130,7 +223,14 @@ def main(argv: list[str] | None = None) -> int:
         batch_size=args.batch_size,
         token=os.environ.get("HF_TOKEN"),
         progress=_print_progress,
+        datasets=args.dataset,
+        workers=args.workers,
     )
+    _print_receipt(receipt)
+    return 0
+
+
+def _print_receipt(receipt: ReleaseReceipt) -> None:
     print(
         json.dumps(
             {
@@ -149,4 +249,3 @@ def main(argv: list[str] | None = None) -> int:
             indent=2,
         )
     )
-    return 0

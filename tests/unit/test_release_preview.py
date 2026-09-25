@@ -1,4 +1,4 @@
-"""Dry-run previews and fail-fast release validation (issue #25)."""
+"""Read-only release previews, verification and fail-fast validation."""
 
 from __future__ import annotations
 
@@ -76,7 +76,7 @@ def _plans() -> tuple[DatasetPlan, ...]:
 
 def test_plan_release_makes_no_hub_writes(monkeypatch, tmp_path: Path) -> None:
     api = _ReadOnlyApi({"target-a"})
-    monkeypatch.setattr(runner, "plan_datasets", lambda _api: _plans())
+    monkeypatch.setattr(runner, "plan_datasets", lambda _api, _names=None: _plans())
     monkeypatch.setattr(runner, "resolve_config_data", lambda _config: ())
     monkeypatch.setattr(
         runner, "_duplicate_outputs", lambda *args: pytest.fail("dry run must not duplicate")
@@ -94,7 +94,7 @@ def test_plan_release_makes_no_hub_writes(monkeypatch, tmp_path: Path) -> None:
 
 def test_plan_release_reports_no_op_without_uploads(monkeypatch, tmp_path: Path) -> None:
     api = _ReadOnlyApi({"target-a", "target-b"})
-    monkeypatch.setattr(runner, "plan_datasets", lambda _api: _plans())
+    monkeypatch.setattr(runner, "plan_datasets", lambda _api, _names=None: _plans())
     monkeypatch.setattr(runner, "resolve_config_data", lambda _config: ())
     monkeypatch.setattr(runner, "_load_existing_manifests", lambda *args: (None, None))
     monkeypatch.setattr(runner, "_compatible_manifests", lambda *args: True)
@@ -185,3 +185,57 @@ def test_release_dry_run_prints_preview_without_token(monkeypatch, capsys, tmp_p
     assert payload["reference_assets"] == 3
     assert payload["datasets"][0]["would_duplicate"] is True
     assert payload["datasets"][0]["shards_to_upload"] == ["polygons/a.parquet"]
+
+
+def test_verify_release_fails_when_target_has_no_manifest(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(runner, "plan_datasets", lambda _api, _names=None: _plans()[:1])
+    api = _ReadOnlyApi(set())
+
+    with pytest.raises(ValueError, match="no EUNIS manifest"):
+        runner.verify_release(cast(HubApi, api), workdir=tmp_path)
+
+
+def test_verify_release_pins_manifest_inputs_and_reports(monkeypatch, tmp_path: Path) -> None:
+    from osm_polygon_eunis.publish import VerificationReceipt
+
+    plan = _plans()[0]
+    manifest = {"source_revision": "published-rev", "source_paths": ["polygons/a.parquet"]}
+    existing = manifest_state._ExistingManifest("target-rev", manifest)
+    seen: list[DatasetPlan] = []
+
+    def fake_verify(_api, pinned, _existing, **_kwargs):
+        seen.append(pinned)
+        verification = VerificationReceipt("target-a", "target-rev", {}, (), manifest)
+        return runner.DatasetReceipt(pinned, (), verification, no_op=True)
+
+    monkeypatch.setattr(runner, "plan_datasets", lambda _api, names=None: (plan,))
+    monkeypatch.setattr(runner, "_load_existing_manifests", lambda *args: (existing,))
+    monkeypatch.setattr(runner, "_verify_no_op_dataset", fake_verify)
+
+    receipt = runner.verify_release(
+        cast(HubApi, _ReadOnlyApi({"target-a"})), workdir=tmp_path, datasets=["website"]
+    )
+
+    assert seen[0].source_revision == "published-rev"
+    assert receipt.datasets[0].no_op is False
+    assert receipt.datasets[0].verification.target_revision == "target-rev"
+
+
+def test_verify_release_rejects_manifest_without_source_pins(monkeypatch, tmp_path: Path) -> None:
+    existing = manifest_state._ExistingManifest("rev", {"source_revision": 3})
+    monkeypatch.setattr(runner, "plan_datasets", lambda _api, names=None: _plans()[:1])
+    monkeypatch.setattr(runner, "_load_existing_manifests", lambda *args: (existing,))
+
+    with pytest.raises(ValueError, match="lacks source revision"):
+        runner.verify_release(cast(HubApi, _ReadOnlyApi(set())), workdir=tmp_path)
+
+
+def test_run_release_rejects_non_positive_workers(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="workers"):
+        runner.run_release(
+            cast(HubApi, object()),
+            reference_config=_config(tmp_path),
+            workdir=tmp_path,
+            batch_size=1,
+            workers=0,
+        )

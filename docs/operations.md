@@ -48,6 +48,31 @@ revisions and EEA asset identities, the command performs a verified no-op: it
 checks the remote tree, shared blob identities, Parquet rows and schemas, and
 card artifact hashes without uploading or rebuilding shards.
 
+## Command reference
+
+`osm-polygon-eunis --help` and `osm-polygon-eunis <command> --help` show the same
+information with examples.
+
+| Command | Option | Default | Meaning |
+|---|---|---|---|
+| `plan` | `--dataset NAME` | all | limit to `website`, `wikidata` or `description`; repeatable |
+| `plan` | `--endpoint URL` | public Hub | Hub endpoint |
+| `release` | `--reference-config PATH` | `config/eea-2021-reference.json` | EEA reference config |
+| `release` | `--workdir PATH` | `.eunis-run` | local staging directory |
+| `release` | `--batch-size N` | 256 | Parquet rows per streamed batch (must be > 0) |
+| `release` | `--workers N` | 8 | geometry worker processes (must be > 0) |
+| `release` | `--dataset NAME` | all | re-run or resume only the named datasets; repeatable |
+| `release` | `--dry-run` | off | preview without Hub writes |
+| `release` | `--endpoint URL` | public Hub | Hub endpoint |
+| `verify` | `--dataset NAME` | all | limit verification; repeatable |
+| `verify` | `--workdir PATH` | `.eunis-run` | temporary download directory |
+| `verify` | `--endpoint URL` | public Hub | Hub endpoint |
+
+`verify` is read-only: it loads each target's `eunis/manifest.json` and checks
+the remote tree, shared blob identities, Parquet rows and schemas, and card
+artifact hashes against it, pinned to the source revision the manifest records.
+It exits nonzero if a target has no manifest or does not match it.
+
 Before handoff, run the deterministic gates in this order (these mirror
 `.github/workflows/qa.yml`; keep the two in sync):
 
