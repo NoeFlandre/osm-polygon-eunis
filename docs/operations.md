@@ -62,6 +62,7 @@ information with examples.
 | `release` | `--workdir PATH` | `.eunis-run` | local staging directory |
 | `release` | `--batch-size N` | 256 | Parquet rows per streamed batch (must be > 0) |
 | `release` | `--workers N` | 8 | geometry worker processes (must be > 0) |
+| `release` | `--max-intersection-errors N` | no limit | fail a dataset before its manifest is published when more than N overlap candidates were dropped by GEOS intersection errors (`card.intersection_errors`) |
 | `release` | `--dataset NAME` | all | re-run or resume only the named datasets; repeatable |
 | `release` | `--dry-run` | off | preview without Hub writes |
 | `release` | `--endpoint URL` | public Hub | Hub endpoint |

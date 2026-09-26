@@ -40,6 +40,18 @@ def _positive_int(value: str) -> int:
     return number
 
 
+def _non_negative_int(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            f"expected a non-negative integer, got {value!r}"
+        ) from error
+    if number < 0:
+        raise argparse.ArgumentTypeError(f"expected a non-negative integer, got {value!r}")
+    return number
+
+
 _EPILOG = """\
 examples:
   osm-polygon-eunis plan
@@ -160,6 +172,14 @@ def _parser() -> argparse.ArgumentParser:
         type=_positive_int,
         default=DEFAULT_WORKERS,
         help=f"geometry worker processes (default: {DEFAULT_WORKERS})",
+    )
+    release.add_argument(
+        "--max-intersection-errors",
+        type=_non_negative_int,
+        default=None,
+        metavar="N",
+        help="fail a dataset before publishing its manifest when more than N overlap "
+        "candidates were dropped by GEOS intersection errors (default: no limit)",
     )
     _add_dataset(release)
     _add_endpoint(release)
@@ -321,6 +341,7 @@ def _run_release(args: argparse.Namespace, progress: Progress | None) -> int:
         progress=progress,
         datasets=args.dataset,
         workers=args.workers,
+        max_intersection_errors=args.max_intersection_errors,
     )
     _print_receipt(receipt)
     return EXIT_OK

@@ -1,6 +1,6 @@
 """Pure deterministic selection of the largest actual geometry overlap."""
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import TypeGuard
 
 from shapely import area as shapely_area
@@ -12,6 +12,10 @@ from .domain import EunisResult, OverlapCandidate
 from .geometry import is_usable
 
 
+def _ignore_error() -> None:
+    """Default intersection-error hook: drop the candidate without counting it."""
+
+
 def _empty_result() -> EunisResult:
     return EunisResult(None, None, None, None)
 
@@ -21,13 +25,18 @@ def choose_winner(
     candidates: Iterable[OverlapCandidate],
     *,
     source_version: str | None,
+    on_error: Callable[[], None] = _ignore_error,
 ) -> EunisResult:
-    """Select the candidate with the largest actual intersection area."""
+    """Select the candidate with the largest actual intersection area.
+
+    ``on_error`` is called once per candidate dropped because the exact GEOS
+    intersection raised; the selected result is the same either way.
+    """
 
     if not _usable_polygon(polygon):
         return _empty_result()
 
-    overlaps = _positive_overlaps(polygon, candidates)
+    overlaps = _positive_overlaps(polygon, candidates, on_error)
     if not overlaps:
         return _empty_result()
     area, winner = min(overlaps, key=lambda item: (-item[0], item[1].code))
@@ -41,10 +50,11 @@ def _usable_polygon(polygon: BaseGeometry | None) -> TypeGuard[BaseGeometry]:
 def _positive_overlaps(
     polygon: BaseGeometry,
     candidates: Iterable[OverlapCandidate],
+    on_error: Callable[[], None],
 ) -> list[tuple[float, OverlapCandidate]]:
     overlaps: list[tuple[float, OverlapCandidate]] = []
     for candidate in candidates:
-        area = _intersection_area(polygon, candidate)
+        area = _intersection_area(polygon, candidate, on_error)
         if area is not None:
             overlaps.append((area, candidate))
     return overlaps
@@ -53,12 +63,14 @@ def _positive_overlaps(
 def _intersection_area(
     polygon: BaseGeometry,
     candidate: OverlapCandidate,
+    on_error: Callable[[], None],
 ) -> float | None:
     if not is_usable(candidate.geometry):
         return None
     try:
         area = _exact_intersection_area(polygon, candidate)
     except (ValueError, RuntimeError):
+        on_error()
         return None
     return area if area > 0.0 else None
 

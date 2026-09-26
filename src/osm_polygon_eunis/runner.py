@@ -65,6 +65,7 @@ __all__ = [
     "DatasetReceipt",
     "DryRunDataset",
     "DryRunReport",
+    "IntersectionErrorLimitError",
     "Progress",
     "ReleaseReceipt",
     "VerificationError",
@@ -330,6 +331,7 @@ def _enrich_geometry_shard(
         local_output,
         batch_size=batch_size,
         observe=card.observe,
+        count_errors=card.record_intersection_errors,
     )
     return (
         sidecar,
@@ -501,11 +503,16 @@ def run_release(
     progress: Progress | None = None,
     datasets: Sequence[str] | None = None,
     workers: int = _SOURCE_WORKERS,
+    max_intersection_errors: int | None = None,
 ) -> ReleaseReceipt:
-    """Run, publish, and independently verify the selected (default: all) datasets."""
+    """Run, publish, and independently verify the selected (default: all) datasets.
 
-    if workers <= 0:
-        raise ValueError("workers must be positive")
+    ``max_intersection_errors`` fails a dataset before its manifest is published
+    when more overlap candidates than this were dropped by GEOS intersection
+    errors; ``None`` (the default) disables the check.
+    """
+
+    _validate_release_options(workers, max_intersection_errors)
     settings = _settings(reference_config)
     workdir.mkdir(parents=True, exist_ok=True)
     plans = plan_datasets(api, datasets)
@@ -551,10 +558,18 @@ def run_release(
                 progress=progress,
                 http_client=reusable_client,
                 source_cache_root=source_root,
+                max_intersection_errors=max_intersection_errors,
             )
             for plan in plans
         )
     return ReleaseReceipt(receipts, reference_info)
+
+
+def _validate_release_options(workers: int, max_intersection_errors: int | None) -> None:
+    if workers <= 0:
+        raise ValueError("workers must be positive")
+    if max_intersection_errors is not None and max_intersection_errors < 0:
+        raise ValueError("max_intersection_errors must be non-negative")
 
 
 def plan_release(
@@ -672,6 +687,7 @@ def _finalize_plan(
     progress: Progress | None,
     http_client: StreamClient,
     source_cache_root: Path | None = None,
+    max_intersection_errors: int | None = None,
 ) -> DatasetReceipt:
     target_revision = capture_revision(api, plan.spec.output_repo)
     card = DatasetCardAccumulator()
@@ -687,6 +703,7 @@ def _finalize_plan(
         card=card,
         source_cache_root=source_cache_root,
     )
+    _enforce_intersection_error_limit(card, plan, max_intersection_errors)
     card_artifacts = _write_card_artifacts(card, workdir, plan, reference_info)
     current_commit = _upload_card_artifacts(
         api,
@@ -716,6 +733,23 @@ def _finalize_plan(
     )
     _cleanup_card_artifacts(card_artifacts)
     return DatasetReceipt(plan, expectations, verification)
+
+
+class IntersectionErrorLimitError(RuntimeError):
+    """A dataset dropped more overlap candidates to GEOS errors than allowed."""
+
+
+def _enforce_intersection_error_limit(
+    card: DatasetCardAccumulator,
+    plan: DatasetPlan,
+    limit: int | None,
+) -> None:
+    if limit is None or card.intersection_errors <= limit:
+        return
+    raise IntersectionErrorLimitError(
+        f"{plan.spec.name}: {card.intersection_errors} intersection errors exceed "
+        f"the limit of {limit}; the dataset manifest was not published"
+    )
 
 
 def _write_card_artifacts(

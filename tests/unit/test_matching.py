@@ -207,3 +207,49 @@ def test_candidate_permutation_does_not_change_result(polygon, geometries) -> No
     assert choose_winner(polygon, candidates, source_version="test") == choose_winner(
         polygon, tuple(reversed(candidates)), source_version="test"
     )
+
+
+def test_intersection_error_is_reported_and_leaves_result_unchanged(monkeypatch) -> None:
+    from osm_polygon_eunis import matching
+
+    polygon = box(0, 0, 10, 10)
+    good = OverlapCandidate("A1", "good", box(0, 0, 4, 10))
+    bad = OverlapCandidate("B1", "bad", box(0, 0, 10, 10))
+    exact = matching._exact_intersection_area
+
+    def flaky(poly, candidate):
+        if candidate.code == "B1":
+            raise RuntimeError("GEOS TopologyException")
+        return exact(poly, candidate)
+
+    monkeypatch.setattr(matching, "_exact_intersection_area", flaky)
+    errors: list[None] = []
+    counted = choose_winner(
+        polygon, [bad, good, bad], source_version="test", on_error=lambda: errors.append(None)
+    )
+    silent = choose_winner(polygon, [bad, good, bad], source_version="test")
+
+    assert len(errors) == 2
+    assert counted == silent == EunisResult("A1", "good", 40.0, "test")
+
+
+def test_value_error_intersection_is_counted_and_no_error_is_not(monkeypatch) -> None:
+    from osm_polygon_eunis import matching
+
+    polygon = box(0, 0, 10, 10)
+    candidate = OverlapCandidate("A1", "a", box(0, 0, 5, 10))
+    errors: list[None] = []
+    assert choose_winner(
+        polygon, [candidate], source_version="t", on_error=lambda: errors.append(None)
+    ) == EunisResult("A1", "a", 50.0, "t")
+    assert errors == []
+
+    def broken(*_args):
+        raise ValueError("bad geometry")
+
+    monkeypatch.setattr(matching, "_exact_intersection_area", broken)
+    result = choose_winner(
+        polygon, [candidate], source_version="t", on_error=lambda: errors.append(None)
+    )
+    assert result == EunisResult(None, None, None, None)
+    assert errors == [None]

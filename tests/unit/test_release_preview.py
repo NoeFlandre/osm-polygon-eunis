@@ -239,3 +239,28 @@ def test_run_release_rejects_non_positive_workers(tmp_path: Path) -> None:
             batch_size=1,
             workers=0,
         )
+
+
+def test_run_release_rejects_negative_intersection_error_limit(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="max_intersection_errors"):
+        runner.run_release(
+            cast(HubApi, object()),
+            reference_config=_config(tmp_path),
+            workdir=tmp_path,
+            batch_size=1,
+            max_intersection_errors=-1,
+        )
+
+
+def test_intersection_error_limit_fails_only_when_exceeded() -> None:
+    from types import SimpleNamespace
+
+    from osm_polygon_eunis.cards import DatasetCardAccumulator
+
+    card = DatasetCardAccumulator()
+    card.record_intersection_errors(3)
+    plan = cast(runner.DatasetPlan, SimpleNamespace(spec=SimpleNamespace(name="website")))
+    runner._enforce_intersection_error_limit(card, plan, None)
+    runner._enforce_intersection_error_limit(card, plan, 3)
+    with pytest.raises(runner.IntersectionErrorLimitError, match=r"website: 3 .* limit of 2"):
+        runner._enforce_intersection_error_limit(card, plan, 2)
