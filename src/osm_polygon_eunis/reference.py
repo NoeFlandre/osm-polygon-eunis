@@ -26,7 +26,7 @@ from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 from shapely.wkb import loads as load_wkb
 
-from .domain import EunisResult, OverlapCandidate
+from .domain import EunisResult, OverlapCandidate, SchemaError
 from .geometry import is_usable
 from .matching import choose_winner
 
@@ -334,7 +334,7 @@ def _validate_vector_header(
     if srs_id != EPSG_LAEA_EUROPE:
         raise ValueError(f"GeoPackage layer {table} is not EPSG:3035")
     if not isinstance(table, str) or not isinstance(geometry_column, str):
-        raise ValueError("GeoPackage geometry metadata is invalid")
+        raise SchemaError("GeoPackage geometry metadata is invalid")
 
 
 def _require_rtree(
@@ -358,7 +358,7 @@ def _vector_code(value: object, labels: dict[str, str]) -> str:
 
 def _vector_blob(value: object) -> bytes | memoryview:
     if not isinstance(value, (bytes, memoryview)):
-        raise ValueError("GeoPackage geometry is not binary")
+        raise SchemaError("GeoPackage geometry is not binary")
     return value
 
 
@@ -743,7 +743,7 @@ class GeoPackageReference:
         typed_rows: list[tuple[int, int, bytes | memoryview]] = []
         for tile_column, tile_row, blob in rows:
             if not isinstance(blob, (bytes, memoryview)):
-                raise ValueError(f"GeoPackage tile {layer.table} has no binary tile data")
+                raise SchemaError(f"GeoPackage tile {layer.table} has no binary tile data")
             typed_rows.append((int(tile_column), int(tile_row), blob))
         return typed_rows
 

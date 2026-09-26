@@ -64,6 +64,12 @@ select = [
   # Anti-pattern guardrails (#30).
   "C90", "PTH", "DTZ", "BLE", "ERA", "PIE", "RET", "N", "TID", "PGH",
   "PERF", "S", "ARG", "T20", "PL",
+  # Exception hygiene and annotations (#31). EM/D are intentionally not enabled.
+  "TRY", "ANN",
+]
+ignore = [
+  "TRY003",  # long messages in raise are the house style
+  "ANN401",  # Any is deliberate at third-party protocol boundaries
 ]
 
 [tool.ruff.lint.mccabe]
@@ -74,7 +80,7 @@ max-complexity = 10
 max-args = 8
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "S106", "ARG005", "PLR2004", "PLC0415"]
+"tests/**" = ["S101", "S106", "ARG005", "PLR2004", "PLC0415", "ANN"]
 # Internal type-narrowing invariants, not input validation.
 "src/osm_polygon_eunis/matching.py" = ["S101"]
 "src/osm_polygon_eunis/reference.py" = ["S101"]
@@ -93,6 +99,15 @@ quote-style = "double"
 
 [tool.ty.environment]
 python-version = "3.12"
+
+[tool.ty.terminal]
+# Any ty warning fails CI (#31).
+error-on-warning = true
+
+[tool.ty.rules]
+possibly-unresolved-reference = "error"
+possibly-missing-attribute = "error"
+possibly-missing-import = "error"
 
 [tool.mutmut]
 source_paths = ["src/osm_polygon_eunis/matching.py"]

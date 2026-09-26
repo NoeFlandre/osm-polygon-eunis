@@ -62,7 +62,7 @@ class InventoryApi(Protocol):
         *,
         revision: str | None = None,
         repo_type: str | None = None,
-    ): ...
+    ) -> Any: ...
 
     def list_repo_tree(
         self,

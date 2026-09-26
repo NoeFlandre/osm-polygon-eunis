@@ -10,7 +10,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from shapely.geometry.base import BaseGeometry
 
-from .domain import EUNIS_FIELDS, EunisResult
+from .domain import EUNIS_FIELDS, EunisResult, SchemaError
 from .geometry import parse_geometry, to_equal_area
 from .matching import prefer_result
 
@@ -384,7 +384,7 @@ def _add_labels(
 ) -> None:
     for polygon_id, result in zip(ids, results, strict=True):
         if not isinstance(polygon_id, str):
-            raise ValueError("polygon id column contains a non-string value")
+            raise SchemaError("polygon id column contains a non-string value")
         if polygon_id in labels:
             raise ValueError(f"duplicate polygon id {polygon_id!r}")
         labels[polygon_id] = result

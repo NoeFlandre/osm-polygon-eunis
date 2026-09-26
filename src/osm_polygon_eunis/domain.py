@@ -13,6 +13,14 @@ EUNIS_FIELDS: Final[tuple[str, ...]] = (
 )
 
 
+class SchemaError(ValueError, TypeError):
+    """A parsed payload (JSON, GeoPackage row, Parquet column) has the wrong shape.
+
+    Subclasses both ``ValueError`` (existing callers) and ``TypeError`` (the
+    conventional type for a wrong-type value).
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class OverlapCandidate:
     """A reference geometry that can contribute actual overlap area."""

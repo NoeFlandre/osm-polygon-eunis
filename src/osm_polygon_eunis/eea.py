@@ -20,6 +20,7 @@ from defusedxml.ElementTree import fromstring as _safe_fromstring
 from ._protocols import HttpClient as _HttpClient
 from ._protocols import RequestClient as _RequestClient
 from ._protocols import StreamClient
+from .domain import SchemaError
 from .fileio import write_chunks
 from .reference import parse_layer_code
 
@@ -142,7 +143,7 @@ def parse_arcgis_labels(
 
     features = payload.get("features")
     if not isinstance(features, list):
-        raise ValueError("EEA ImageServer response has no features list")
+        raise SchemaError("EEA ImageServer response has no features list")
     labels: dict[str, str] = {}
     for feature in features:
         label = _arcgis_feature_label(feature, fallback_labels)
@@ -171,10 +172,10 @@ def _arcgis_feature_label(
 
 def _arcgis_attributes(feature: object) -> Mapping[str, object]:
     if not isinstance(feature, Mapping):
-        raise ValueError("EEA ImageServer feature is not an object")
+        raise SchemaError("EEA ImageServer feature is not an object")
     attributes = feature.get("attributes")
     if not isinstance(attributes, Mapping):
-        raise ValueError("EEA ImageServer feature has no attributes")
+        raise SchemaError("EEA ImageServer feature has no attributes")
     return attributes
 
 
@@ -589,7 +590,7 @@ def _fetch_arcgis_page(client: _HttpClient, service_url: str, offset: int) -> Ma
     response.raise_for_status()
     page = response.json()
     if not isinstance(page, Mapping):
-        raise ValueError("EEA ImageServer response is not an object")
+        raise SchemaError("EEA ImageServer response is not an object")
     return page
 
 
@@ -751,14 +752,14 @@ def _config_settings(config: object) -> _ConfigSettings:
     )
     supplemental_labels = config.get("supplemental_labels", {})
     if not isinstance(supplemental_labels, Mapping):
-        raise ValueError("EEA config has invalid supplemental_labels")
+        raise SchemaError("EEA config has invalid supplemental_labels")
     labels = _supplemental_labels(supplemental_labels)
     return _ConfigSettings(source_version, record_ids, classification_record, labels)
 
 
 def _config_mapping(config: object) -> Mapping[object, object]:
     if not isinstance(config, Mapping):
-        raise ValueError("EEA config must be a JSON object")
+        raise SchemaError("EEA config must be a JSON object")
     return config
 
 

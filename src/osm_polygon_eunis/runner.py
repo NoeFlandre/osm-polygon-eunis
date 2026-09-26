@@ -12,7 +12,7 @@ from typing import Any, cast
 
 from ._protocols import HubApi, StreamClient
 from .cards import CardArtifacts, DatasetCardAccumulator
-from .domain import EunisResult
+from .domain import EunisResult, SchemaError
 from .eea import EeaGroup, resolve_config_data
 from .geometry_jobs import _process_reference_groups, process_geometry_paths
 from .manifest_state import (
@@ -143,7 +143,7 @@ def validate_reference_config(config_path: Path) -> None:
 def _settings(config_path: Path) -> _ReferenceSettings:
     config = json.loads(config_path.read_text(encoding="utf-8"))
     if not isinstance(config, Mapping):
-        raise ValueError("reference config must be an object")
+        raise SchemaError("reference config must be an object")
     return _validated_settings(cast(Mapping[str, object], config))
 
 

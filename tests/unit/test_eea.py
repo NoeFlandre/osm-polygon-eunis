@@ -687,3 +687,10 @@ def test_webdav_listing_rejects_xml_entity_declarations() -> None:
     )
     with pytest.raises(defusedxml.DefusedXmlException):
         eea.parse_webdav_entries(payload)
+
+
+def test_wrong_payload_shape_is_both_value_and_type_error() -> None:
+    with pytest.raises(TypeError, match="no features list"):
+        eea.parse_arcgis_labels({"features": None})
+    with pytest.raises(ValueError, match="no features list"):
+        eea.parse_arcgis_labels({})
