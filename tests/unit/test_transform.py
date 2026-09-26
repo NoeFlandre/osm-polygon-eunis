@@ -187,3 +187,102 @@ def test_build_label_map_joins_polygon_ids_to_a_sidecar_in_batches(tmp_path: Pat
         "a": EunisResult("R11", "steppe", 50.0, "test"),
         "b": EunisResult(None, None, None, None),
     }
+
+
+class _ErroringReference:
+    """Fake reference that reports ``per_call[i]`` new intersection errors on call i."""
+
+    def __init__(self, code: str, per_call: list[int]) -> None:
+        self.code = code
+        self.intersection_errors = 0
+        self._per_call = iter(per_call)
+
+    def overlap(self, polygon) -> EunisResult:
+        del polygon
+        self.intersection_errors += next(self._per_call)
+        return EunisResult(self.code, self.code, 10.0, "EEA-test")
+
+
+def test_sidecar_carries_intersection_errors_across_passes(tmp_path: Path) -> None:
+    from osm_polygon_eunis.transform import INTERSECTION_ERRORS_FIELD
+
+    source = tmp_path / "source.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "polygon_id": ["a", "b", "c"],
+                "geometry": [_polygon_json(0), _polygon_json(2), _polygon_json(4)],
+            }
+        ),
+        source,
+    )
+    legacy = tmp_path / "legacy.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "eunis_code": ["R11", None, None],
+                "eunis_name": ["R11", None, None],
+                "eunis_overlap_percentage": [90.0, None, None],
+                "eunis_source_version": ["EEA-test", None, None],
+            }
+        ),
+        legacy,
+    )
+    first = tmp_path / "first.parquet"
+    second = tmp_path / "second.parquet"
+    update_label_sidecar(
+        source,
+        first,
+        references=(_ErroringReference("R12", [0, 2, 0]), _ErroringReference("R13", [1, 0, 0])),
+        current=legacy,
+        batch_size=2,
+    )
+    assert pq.read_table(first)[INTERSECTION_ERRORS_FIELD].to_pylist() == [1, 2, 0]
+    update_label_sidecar(
+        source,
+        second,
+        reference=_ErroringReference("R14", [3, 0, 1]),
+        current=first,
+        batch_size=2,
+    )
+    assert pq.read_table(second)[INTERSECTION_ERRORS_FIELD].to_pylist() == [4, 2, 1]
+    assert pq.read_table(second)["eunis_code"].to_pylist() == ["R11", "R12", "R12"]
+
+    counts: list[int] = []
+    output = tmp_path / "output.parquet"
+    append_label_sidecar(source, second, output, batch_size=2, count_errors=counts.append)
+    assert counts == [6, 1]
+    assert pq.read_table(output).column_names == ["polygon_id", "geometry", *EUNIS_FIELDS]
+    labels = build_label_map(source, second, batch_size=2)
+    assert labels["a"].code == "R11"
+
+    legacy_counts: list[int] = []
+    legacy_output = tmp_path / "legacy-output.parquet"
+    append_label_sidecar(
+        source, legacy, legacy_output, batch_size=2, count_errors=legacy_counts.append
+    )
+    assert legacy_counts == [0, 0]
+    assert pq.read_table(legacy_output).column_names == pq.read_table(output).column_names
+
+
+def test_sidecar_without_counter_on_reference_counts_zero_and_bad_schema_fails(
+    tmp_path: Path,
+) -> None:
+    import pytest
+
+    from osm_polygon_eunis.transform import INTERSECTION_ERRORS_FIELD
+
+    source = tmp_path / "source.parquet"
+    pq.write_table(pa.table({"geometry": [_polygon_json(0)]}), source)
+    sidecar = tmp_path / "labels.parquet"
+    update_label_sidecar(
+        source,
+        sidecar,
+        reference=_FakeReference([EunisResult("R11", "a", 5.0, "v")]),
+        batch_size=1,
+    )
+    assert pq.read_table(sidecar)[INTERSECTION_ERRORS_FIELD].to_pylist() == [0]
+    wrong = tmp_path / "wrong.parquet"
+    pq.write_table(pq.read_table(sidecar).append_column("extra", pa.array([1])), wrong)
+    with pytest.raises(ValueError, match="unexpected schema"):
+        append_label_sidecar(source, wrong, tmp_path / "out.parquet", batch_size=1)

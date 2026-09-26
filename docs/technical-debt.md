@@ -7,15 +7,18 @@
   change.
 - Full publication depends on valid GitHub and Hugging Face write credentials;
   public read access is not sufficient evidence of publication authority.
-- Undecodable geometries are now counted: each dataset manifest's `card`
-  section records `invalid_geometries` (rows whose geometry value is present
-  but cannot be decoded or repaired), separate from rows without geometry.
-  One error path is still uncounted (tracked in #28):
-  `matching._intersection_area` drops a candidate when the exact GEOS
-  intersection raises. Counting it needs a per-row counter carried through the
-  label sidecar across reference passes and worker processes (the sidecar
-  schema and the `OverlapReference.overlap` protocol both change), so it is
-  left for a dedicated change. No release-failing threshold is enforced yet.
+- Silent geometry fallbacks are now counted (#28). Each dataset manifest's
+  `card` section records `invalid_geometries` (rows whose geometry value is
+  present but cannot be decoded or repaired, separate from rows without
+  geometry) and `intersection_errors` (overlap candidates that
+  `matching._intersection_area` dropped because the exact GEOS intersection
+  raised). The error count is kept per row in the label sidecar column
+  `eunis_intersection_errors`, summed across reference passes and worker
+  processes, and never written to published shards, so labels stay
+  byte-identical. Sidecars written before the column existed read as zero.
+  `release --max-intersection-errors N` fails a dataset before its manifest is
+  published when the count exceeds N; the default is no limit, so a release
+  that passed before still passes. Invalid geometries have no threshold yet.
   GeoPackage tile discovery already fails closed on a corrupt or truncated
   database; only a missing (optional) tile table yields no layers.
 - Mutation testing (`[tool.mutmut]` in `pyproject.toml`) only mutates

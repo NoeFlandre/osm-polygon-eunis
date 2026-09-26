@@ -93,6 +93,8 @@ def test_every_option_has_help_and_top_level_help_shows_examples(capsys) -> None
     "argv",
     [
         ["release", "--workers", "0"],
+        ["release", "--max-intersection-errors", "-1"],
+        ["release", "--max-intersection-errors", "x"],
         ["release", "--dataset", "unknown"],
         ["verify", "--dataset", "unknown"],
         ["bogus"],
@@ -123,6 +125,9 @@ def test_release_passes_dataset_selection_and_workers(monkeypatch, tmp_path: Pat
     assert cli.main([*argv, "--dataset", "website", "--workers", "3"]) == 0
     assert seen["datasets"] == ["wikidata", "website"]
     assert seen["workers"] == 3
+    assert seen["max_intersection_errors"] is None
+    assert cli.main([*argv, "--max-intersection-errors", "0"]) == 0
+    assert seen["max_intersection_errors"] == 0
 
 
 def test_plan_datasets_touches_only_selected_dataset() -> None:

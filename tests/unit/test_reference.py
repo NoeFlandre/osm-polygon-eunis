@@ -413,3 +413,34 @@ def test_geopackage_tile_discovery_fails_closed_on_broken_tile_schema() -> None:
     connection.execute("CREATE TABLE gpkg_tile_matrix (table_name TEXT)")
     with pytest.raises(ValueError, match="not a readable GeoPackage"):
         GeoPackageReference._tile_rows(connection)
+
+
+def test_references_count_intersection_errors(tmp_path: Path, monkeypatch) -> None:
+    from osm_polygon_eunis import matching
+
+    def broken(*_args):
+        raise RuntimeError("GEOS TopologyException")
+
+    database = tmp_path / "habitats.gpkg"
+    _write_geopackage(database, (("Q11", box(0, 0, 10, 10)),))
+    vector = GeoPackageReference(database, {"Q11": "Raised bog"}, source_version="EEA-test")
+    raster = RasterReference(
+        (
+            RasterLayer(
+                "R11",
+                "steppe",
+                _write_raster(tmp_path / "Prob_R11_100m.tif", [[1, 0], [0, 0]]),
+                "EEA-test",
+            ),
+        ),
+    )
+    assert vector.intersection_errors == raster.intersection_errors == 0
+    assert vector.overlap(box(1, 1, 9, 9)).code == "Q11"
+    assert vector.intersection_errors == 0
+
+    monkeypatch.setattr(matching, "_exact_intersection_area", broken)
+    assert vector.overlap(box(1, 1, 9, 9)).code is None
+    assert vector.overlap(box(1, 1, 9, 9)).code is None
+    assert raster.overlap(box(1, 11, 19, 19)).code is None
+    assert vector.intersection_errors == 2
+    assert raster.intersection_errors == 1

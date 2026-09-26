@@ -153,6 +153,7 @@ class DatasetCardAccumulator:
         self._bins: dict[tuple[str | None, int, int], int] = {}
         self._total_rows = 0
         self._invalid_geometries = 0
+        self._intersection_errors = 0
 
     @property
     def total_rows(self) -> int:
@@ -163,6 +164,19 @@ class DatasetCardAccumulator:
         """Rows whose geometry value is present but cannot be decoded or repaired."""
 
         return self._invalid_geometries
+
+    @property
+    def intersection_errors(self) -> int:
+        """Overlap candidates dropped because the exact GEOS intersection raised."""
+
+        return self._intersection_errors
+
+    def record_intersection_errors(self, count: int) -> None:
+        """Add intersection errors carried in a label sidecar."""
+
+        if count < 0:
+            raise ValueError("intersection error count must be non-negative")
+        self._intersection_errors += count
 
     def observe(self, result: EunisResult, raw_geometry: object) -> None:
         """Record one output label and at most one bounded map cell."""
@@ -250,6 +264,7 @@ class DatasetCardAccumulator:
             "map_sha256": hashes[_MAP_PATH],
             "total_rows": self._total_rows,
             "invalid_geometries": self._invalid_geometries,
+            "intersection_errors": self._intersection_errors,
             "label_distribution": [
                 {
                     "code": summary.code,

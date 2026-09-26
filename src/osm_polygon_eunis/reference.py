@@ -71,6 +71,7 @@ class RasterReference:
         self._layers = layers
         self._threshold = threshold
         self._source_version = next(iter(versions), None)
+        self.intersection_errors = 0
         self._stack: ExitStack | None = None
         self._datasets: tuple[tuple[RasterLayer, rasterio.DatasetReader], ...] = ()
         self._tile_cache: OrderedDict[tuple[str, int, int], BaseGeometry | None] = OrderedDict()
@@ -98,6 +99,9 @@ class RasterReference:
             self._stack = None
             self._datasets = ()
             self._tile_cache.clear()
+
+    def _count_intersection_error(self) -> None:
+        self.intersection_errors += 1
 
     def overlap(self, polygon: BaseGeometry | None) -> EunisResult:
         """Return the label with the largest actual intersection area."""
@@ -143,7 +147,12 @@ class RasterReference:
                         components_are_disjoint=_has_disjoint_components(cell_geometry),
                     )
                 )
-        return choose_winner(polygon, candidates, source_version=self._source_version)
+        return choose_winner(
+            polygon,
+            candidates,
+            source_version=self._source_version,
+            on_error=self._count_intersection_error,
+        )
 
     @staticmethod
     def _validate_crs(dataset: rasterio.DatasetReader, path: Path) -> None:
@@ -384,6 +393,7 @@ class GeoPackageReference:
         self._path = path
         self._labels = labels
         self._source_version = source_version
+        self.intersection_errors = 0
         self._threshold = threshold
         self._connection: sqlite3.Connection | None = None
         self._layers: tuple[_VectorLayer, ...] = ()
@@ -411,6 +421,9 @@ class GeoPackageReference:
             self._tile_layers = ()
             self._tile_cache.clear()
 
+    def _count_intersection_error(self) -> None:
+        self.intersection_errors += 1
+
     def overlap(self, polygon: BaseGeometry | None) -> EunisResult:
         """Return the largest exact polygon intersection from indexed features."""
 
@@ -425,7 +438,12 @@ class GeoPackageReference:
         assert self._connection is not None
         candidates = self._vector_candidates(self._connection, polygon)
         candidates.extend(self._tile_candidates(self._connection, polygon))
-        return choose_winner(polygon, candidates, source_version=self._source_version)
+        return choose_winner(
+            polygon,
+            candidates,
+            source_version=self._source_version,
+            on_error=self._count_intersection_error,
+        )
 
     def _vector_candidates(
         self,

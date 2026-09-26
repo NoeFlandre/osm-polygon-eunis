@@ -21,6 +21,24 @@ class OverlapReference(Protocol):
     def overlap(self, polygon: BaseGeometry | None) -> EunisResult: ...
 
 
+# Sidecar-only column: per-row count of candidates dropped because the exact GEOS
+# intersection raised, summed across reference passes. It is never appended to
+# published shards. Sidecars written before it existed read as zero.
+INTERSECTION_ERRORS_FIELD = "eunis_intersection_errors"
+
+
+def _reference_errors(reference: OverlapReference) -> int:
+    return int(getattr(reference, "intersection_errors", 0))
+
+
+def _counted_overlap(
+    reference: OverlapReference, geometry: BaseGeometry | None
+) -> tuple[EunisResult, int]:
+    before = _reference_errors(reference)
+    result = reference.overlap(geometry)
+    return result, _reference_errors(reference) - before
+
+
 def _validate_batch_size(batch_size: int) -> None:
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
@@ -68,17 +86,19 @@ def _sidecar_schema() -> pa.Schema:
             pa.field("eunis_name", pa.string(), nullable=True),
             pa.field("eunis_overlap_percentage", pa.float64(), nullable=True),
             pa.field("eunis_source_version", pa.string(), nullable=True),
+            pa.field(INTERSECTION_ERRORS_FIELD, pa.int64(), nullable=False),
         ]
     )
 
 
-def _results_table(results: list[EunisResult]) -> pa.Table:
+def _results_table(results: list[EunisResult], errors: list[int]) -> pa.Table:
     return pa.table(
         {
             "eunis_code": [result.code for result in results],
             "eunis_name": [result.name for result in results],
             "eunis_overlap_percentage": [result.overlap_percentage for result in results],
             "eunis_source_version": [result.source_version for result in results],
+            INTERSECTION_ERRORS_FIELD: errors,
         },
         schema=_sidecar_schema(),
     )
@@ -87,6 +107,12 @@ def _results_table(results: list[EunisResult]) -> pa.Table:
 def _table_results(table: pa.Table) -> list[EunisResult]:
     columns = [table[name].to_pylist() for name in EUNIS_FIELDS]
     return [EunisResult(*values) for values in zip(*columns, strict=True)]
+
+
+def _table_errors(table: pa.Table) -> list[int]:
+    if INTERSECTION_ERRORS_FIELD not in table.column_names:
+        return [0] * table.num_rows
+    return [int(value) for value in table[INTERSECTION_ERRORS_FIELD].to_pylist()]
 
 
 def _writer(destination: Path, schema: pa.Schema) -> pq.ParquetWriter:
@@ -176,13 +202,14 @@ def update_label_sidecar(
     with pq.ParquetWriter(destination, _sidecar_schema(), compression="zstd") as writer:
         for batch in source_file.iter_batches(batch_size=batch_size):
             source_table = pa.Table.from_batches([batch], schema=source_schema)
-            previous = _previous_results(current_batches, batch.num_rows, empty)
-            updated = _updated_results(
+            previous, previous_errors = _previous_results(current_batches, batch.num_rows, empty)
+            updated, errors = _updated_results(
                 source_table[geometry_column].to_pylist(),
                 previous,
+                previous_errors,
                 selected_references,
             )
-            writer.write_table(_results_table(updated))
+            writer.write_table(_results_table(updated, errors))
             rows += batch.num_rows
     _ensure_no_extra_batches(current_batches, "current sidecar has more rows than source")
     return rows
@@ -230,31 +257,38 @@ def _previous_results(
     batches: Iterator[pa.RecordBatch] | None,
     row_count: int,
     empty: EunisResult,
-) -> list[EunisResult]:
+) -> tuple[list[EunisResult], list[int]]:
     if batches is None:
-        return [empty] * row_count
+        return [empty] * row_count, [0] * row_count
     try:
         previous_batch = next(batches)
     except StopIteration as error:
         raise ValueError("current sidecar has fewer rows than source") from error
     if previous_batch.num_rows != row_count:
         raise ValueError("current sidecar batch boundaries do not match source")
-    return _table_results(pa.Table.from_batches([previous_batch]))
+    previous_table = pa.Table.from_batches([previous_batch])
+    return _table_results(previous_table), _table_errors(previous_table)
 
 
 def _updated_results(
     geometries: list[object],
     previous: list[EunisResult],
+    previous_errors: list[int],
     references: tuple[OverlapReference, ...],
-) -> list[EunisResult]:
+) -> tuple[list[EunisResult], list[int]]:
     results: list[EunisResult] = []
-    for value, existing in zip(geometries, previous, strict=True):
+    errors: list[int] = []
+    for value, existing, existing_errors in zip(geometries, previous, previous_errors, strict=True):
         geometry = to_equal_area(parse_geometry(value))
         result = existing
+        row_errors = existing_errors
         for reference in references:
-            result = prefer_result(result, reference.overlap(geometry))
+            candidate, new_errors = _counted_overlap(reference, geometry)
+            result = prefer_result(result, candidate)
+            row_errors += new_errors
         results.append(result)
-    return results
+        errors.append(row_errors)
+    return results, errors
 
 
 def _ensure_no_extra_batches(
@@ -271,7 +305,8 @@ def _ensure_no_extra_batches(
 
 
 def _validate_sidecar_schema(sidecar_file: pq.ParquetFile) -> None:
-    if sidecar_file.schema_arrow.names != list(EUNIS_FIELDS):
+    names = sidecar_file.schema_arrow.names
+    if names not in (list(EUNIS_FIELDS), [*EUNIS_FIELDS, INTERSECTION_ERRORS_FIELD]):
         raise ValueError("sidecar has an unexpected schema")
 
 
@@ -296,9 +331,14 @@ def append_label_sidecar(
     *,
     batch_size: int,
     observe: Callable[[EunisResult, object], None] | None = None,
+    count_errors: Callable[[int], None] | None = None,
     geometry_column: str = "geometry",
 ) -> int:
-    """Append a completed label sidecar to a source shard in bounded batches."""
+    """Append a completed label sidecar to a source shard in bounded batches.
+
+    ``count_errors`` receives each batch's summed intersection-error count; the
+    counter column itself is never written to the published shard.
+    """
 
     _validate_batch_size(batch_size)
     source_file = pq.ParquetFile(source)
@@ -320,6 +360,8 @@ def append_label_sidecar(
             table = pa.Table.from_batches([batch], schema=source_schema)
             sidecar_table = pa.Table.from_batches([sidecar_batch])
             _observe_batch(table, sidecar_table, geometry_column, observe)
+            if count_errors is not None:
+                count_errors(sum(_table_errors(sidecar_table)))
             for name in EUNIS_FIELDS:
                 table = table.append_column(name, sidecar_table[name])
             writer.write_table(table)

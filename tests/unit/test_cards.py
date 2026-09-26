@@ -142,3 +142,26 @@ def test_card_map_subtitle_and_readme_follow_cell_size(tmp_path: Path) -> None:
 
     assert "· 0.5° bins ·" in artifacts.files["eunis/world-map.svg"].read_text(encoding="utf-8")
     assert "0.5-degree geographic bins" in artifacts.files["README.md"].read_text(encoding="utf-8")
+
+
+def test_card_manifest_records_intersection_errors(tmp_path: Path) -> None:
+    card = DatasetCardAccumulator()
+    card.observe(EunisResult(None, None, None, None), _geometry(0.0, 0.0))
+    assert card.intersection_errors == 0
+    card.record_intersection_errors(0)
+    card.record_intersection_errors(2)
+    card.record_intersection_errors(3)
+    with pytest.raises(ValueError, match="non-negative"):
+        card.record_intersection_errors(-1)
+
+    assert card.intersection_errors == 5
+    artifacts = card.write_artifacts(
+        tmp_path,
+        dataset_name="website",
+        source_repo="org/source",
+        target_repo="org/target",
+        source_revision="source-revision",
+        reference_version="EEA-test",
+    )
+    assert artifacts.manifest["intersection_errors"] == 5
+    assert artifacts.manifest["invalid_geometries"] == 0
