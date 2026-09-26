@@ -393,3 +393,23 @@ def test_geopackage_tile_cache_and_metadata_guards(tmp_path: Path) -> None:
             reference_module.GeoPackageReference._candidate_tile_rows(
                 connection, layer, box(1, 1, 19, 19)
             )
+
+
+def test_geopackage_tile_discovery_fails_closed_on_corrupt_database(tmp_path: Path) -> None:
+    corrupt = tmp_path / "corrupt.gpkg"
+    corrupt.write_bytes(b"SQLite format 3\x00" + b"\xff" * 4096)
+    connection = sqlite3.connect(corrupt)
+    try:
+        with pytest.raises(ValueError, match="not a readable GeoPackage"):
+            GeoPackageReference._tile_rows(connection)
+    finally:
+        connection.close()
+
+
+def test_geopackage_tile_discovery_fails_closed_on_broken_tile_schema() -> None:
+    connection = sqlite3.connect(":memory:")
+    connection.execute("CREATE TABLE gpkg_contents (table_name TEXT)")
+    connection.execute("CREATE TABLE gpkg_tile_matrix_set (table_name TEXT)")
+    connection.execute("CREATE TABLE gpkg_tile_matrix (table_name TEXT)")
+    with pytest.raises(ValueError, match="not a readable GeoPackage"):
+        GeoPackageReference._tile_rows(connection)

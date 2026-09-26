@@ -8,10 +8,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
+from huggingface_hub.errors import RepositoryNotFoundError
+
 from ._protocols import HubApi, StreamClient
 from .eea import EeaGroup
 from .publish import (
     ShardExpectation,
+    VerificationError,
     VerificationReceipt,
     verify_dataset,
 )
@@ -129,7 +132,10 @@ def _load_existing_manifest(
 ) -> _ExistingManifest | None:
     """Load a tiny target manifest without using the persistent Hub cache."""
 
-    target_revision = capture_revision(api, plan.spec.output_repo)
+    try:
+        target_revision = capture_revision(api, plan.spec.output_repo)
+    except RepositoryNotFoundError:
+        return None
     paths = {entry.path for entry in list_repo_files(api, plan.spec.output_repo, target_revision)}
     if "eunis/manifest.json" not in paths:
         return None
@@ -210,10 +216,10 @@ def _required_manifest_paths(
 def _required_string_list(manifest: Mapping[str, object], field: str) -> tuple[str, ...]:
     value = manifest.get(field)
     if not isinstance(value, list):
-        raise ValueError("matching EUNIS manifest is incomplete for no-op verification")
+        raise VerificationError("matching EUNIS manifest is incomplete for no-op verification")
     paths = tuple(value)
     if not all(isinstance(path, str) for path in paths):
-        raise ValueError("matching EUNIS manifest is incomplete for no-op verification")
+        raise VerificationError("matching EUNIS manifest is incomplete for no-op verification")
     return cast(tuple[str, ...], paths)
 
 
@@ -223,7 +229,7 @@ def _required_no_op_parts(
     expectations = _manifest_expectations(manifest)
     artifacts = _manifest_artifacts(manifest)
     if expectations is None or artifacts is None:
-        raise ValueError("matching EUNIS manifest is incomplete for no-op verification")
+        raise VerificationError("matching EUNIS manifest is incomplete for no-op verification")
     changed_paths, added_paths = _required_manifest_paths(manifest)
     return expectations, artifacts, changed_paths, added_paths
 

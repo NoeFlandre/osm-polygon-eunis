@@ -553,7 +553,7 @@ def test_run_release_coordinates_pooled_processing(monkeypatch, tmp_path: Path) 
     group = EeaGroup("record", "title", "folder", "service", {}, (), _asset("/x.gpkg", code=None))
     receipt = DatasetReceipt(plan, (), VerificationReceipt("target", "verified", {}, (), None))
     seen: list[tuple[object, int]] = []
-    monkeypatch.setattr(runner, "plan_datasets", lambda api: (plan,))
+    monkeypatch.setattr(runner, "plan_datasets", lambda api, names=None: (plan,))
     monkeypatch.setattr(runner, "_duplicate_outputs", lambda *args: None)
     monkeypatch.setattr(manifest_state, "_load_existing_manifest", lambda *args: None)
     monkeypatch.setattr(runner, "resolve_config_data", lambda config: (group,))
@@ -615,8 +615,12 @@ def test_run_release_verifies_matching_manifests_without_processing(
         VerificationReceipt("target", "verified", {}, (), manifest),
         no_op=True,
     )
-    monkeypatch.setattr(runner, "plan_datasets", lambda api: (plan,))
-    monkeypatch.setattr(runner, "_duplicate_outputs", lambda *args: None)
+    monkeypatch.setattr(runner, "plan_datasets", lambda api, names=None: (plan,))
+    monkeypatch.setattr(
+        runner,
+        "_duplicate_outputs",
+        lambda *args: pytest.fail("a verified no-op must not duplicate target repos"),
+    )
     monkeypatch.setattr(runner, "resolve_config_data", lambda config: ())
     monkeypatch.setattr(runner, "_reference_manifest", lambda *args, **kwargs: reference)
     monkeypatch.setattr(

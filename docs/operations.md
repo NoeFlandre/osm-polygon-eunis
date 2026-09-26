@@ -3,7 +3,8 @@
 Use a temporary directory on the HDD with enough room for one source shard,
 one replacement shard, and the resolved EEA reference assets. Set `UV_CACHE_DIR`
 outside the dataset root. Production commands emit JSON-line progress records
-and verify row counts and schemas after every upload.
+on stderr (silence them with `-q`, add a start record with `-v`) and print only
+the final JSON result on stdout. They verify row counts and schemas after every upload.
 
 Local checks use a task-scoped cache on the temporary volume:
 
@@ -30,10 +31,60 @@ UV_CACHE_DIR=/private/tmp/osm-polygon-eunis-uv \
 uv run osm-polygon-eunis release --batch-size 256 --workdir .eunis-run
 ```
 
+Preview a release without any Hub writes (no token required):
+
+```bash
+uv run osm-polygon-eunis release --dry-run --workdir .eunis-run
+```
+
+The dry run resolves the plans, the reference config and the no-op status, then
+prints, per dataset, the target repo, whether it would be duplicated, and the
+shards that would be uploaded. Before any network call, `release` checks that
+`HF_TOKEN` is set (except with `--dry-run`), that `--batch-size` is positive,
+and that the reference config exists and parses; a failure prints one line and
+exits with status 2.
+
 If all three targets already contain a matching manifest for the pinned source
 revisions and EEA asset identities, the command performs a verified no-op: it
 checks the remote tree, shared blob identities, Parquet rows and schemas, and
 card artifact hashes without uploading or rebuilding shards.
+
+## Command reference
+
+`osm-polygon-eunis --help` and `osm-polygon-eunis <command> --help` show the same
+information with examples.
+
+| Command | Option | Default | Meaning |
+|---|---|---|---|
+| `plan` | `--dataset NAME` | all | limit to `website`, `wikidata` or `description`; repeatable |
+| `plan` | `--endpoint URL` | public Hub | Hub endpoint |
+| `release` | `--reference-config PATH` | `config/eea-2021-reference.json` | EEA reference config |
+| `release` | `--workdir PATH` | `.eunis-run` | local staging directory |
+| `release` | `--batch-size N` | 256 | Parquet rows per streamed batch (must be > 0) |
+| `release` | `--workers N` | 8 | geometry worker processes (must be > 0) |
+| `release` | `--dataset NAME` | all | re-run or resume only the named datasets; repeatable |
+| `release` | `--dry-run` | off | preview without Hub writes |
+| `release` | `--endpoint URL` | public Hub | Hub endpoint |
+| `verify` | `--dataset NAME` | all | limit verification; repeatable |
+| `verify` | `--workdir PATH` | `.eunis-run` | temporary download directory |
+| `verify` | `--endpoint URL` | public Hub | Hub endpoint |
+
+`verify` is read-only: it loads each target's `eunis/manifest.json` and checks
+the remote tree, shared blob identities, Parquet rows and schemas, and card
+artifact hashes against it, pinned to the source revision the manifest records.
+It exits nonzero if a target has no manifest or does not match it.
+
+Global flags, accepted before or after the command: `--version`, `-q/--quiet`,
+`-v/--verbose` and `--debug` (show the full traceback instead of a one-line
+`error: ...` message on stderr).
+
+| Exit status | Meaning |
+|---|---|
+| 0 | success (including a verified no-op) |
+| 1 | unexpected error |
+| 2 | usage or config error (bad option, missing `HF_TOKEN`, invalid reference config) |
+| 3 | Hub/network or authentication error |
+| 4 | verification failed (published target does not match its expectation or manifest) |
 
 Before handoff, run the deterministic gates in this order (these mirror
 `.github/workflows/qa.yml`; keep the two in sync):
@@ -53,7 +104,8 @@ The release order is:
 
 1. Capture the current source revisions and plan inventory.
 2. Resolve and checksum the official EEA reference assets.
-3. Duplicate each source dataset server-side.
+3. Detect a verified no-op; only otherwise duplicate each source dataset
+   server-side.
 4. Stream bounded source micro-batches through each EUNIS reference batch,
    deleting each source shard after its last pass; for Wikidata, process the
    matching link shard and collect bounded label counts and map bins at the same

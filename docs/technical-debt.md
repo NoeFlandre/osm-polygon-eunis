@@ -7,3 +7,20 @@
   change.
 - Full publication depends on valid GitHub and Hugging Face write credentials;
   public read access is not sufficient evidence of publication authority.
+- Two error paths still return a "no data" value without being counted
+  (tracked in #28): `matching._intersection_area` drops a candidate when the
+  exact GEOS intersection raises, and `geometry.parse_geometry` turns an
+  undecodable geometry into `None`, which the output cannot tell apart from a
+  row without geometry. The planned fix adds `intersection_errors` and
+  `invalid_geometries` counters to each shard manifest with a release-failing
+  threshold. GeoPackage tile discovery already fails closed on a corrupt or
+  truncated database; only a missing (optional) tile table yields no layers.
+- Mutation testing (`[tool.mutmut]` in `pyproject.toml`) only mutates
+  `matching.py`, the pure winner-selection core. The fail-closed paths in
+  `reference.py`, `transform.py` and `publish.py` are covered by unit and
+  acceptance tests but not by mutation testing; grow `source_paths` one module
+  at a time (next: `transform.py`) and keep the gate green at each step.
+- `ty` is a pre-release (`<0.1`); its checks can tighten between patch releases,
+  so upgrades land through the lock file (Dependabot) and are reviewed like code.
+- CI runs the lowest supported Python (3.12, pinned by `.python-version`).
+  Dependabot bumps GitHub Actions and the uv lock weekly.

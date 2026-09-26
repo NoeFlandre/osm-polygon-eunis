@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 import shutil
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -16,20 +16,27 @@ from .domain import EunisResult
 from .eea import EeaGroup, resolve_config_data
 from .geometry_jobs import _process_reference_groups, process_geometry_paths
 from .manifest_state import (
+    _compatible_manifests,
+    _ExistingManifest,
+    _load_existing_manifests,
     _reference_manifest,
     _shared_blobs,
     _try_no_op_release,
     _verify_final_dataset,
+    _verify_no_op_dataset,
 )
 from .publish import (
     ShardExpectation,
+    VerificationError,
     build_manifest,
     duplicate_source,
+    target_exists,
     upload_manifest,
     upload_replacement,
 )
 from .references import _http_client, open_reference_group
 from .release_plan import (
+    DATASET_NAMES,
     DatasetPlan,
     DatasetReceipt,
     Progress,
@@ -37,6 +44,7 @@ from .release_plan import (
     _cached_geometry_path,
     _sidecar_path,
     plan_datasets,
+    selected_dataset_names,
 )
 from .sources import (
     capture_revision,
@@ -48,18 +56,29 @@ from .transform import (
 )
 
 __all__ = [
+    "DATASET_NAMES",
+    "DEFAULT_WORKERS",
+    "ConfigError",
     "DatasetPlan",
     "DatasetReceipt",
+    "DryRunDataset",
+    "DryRunReport",
     "Progress",
     "ReleaseReceipt",
+    "VerificationError",
     "finalize_dataset",
     "open_reference_group",
     "plan_datasets",
+    "plan_release",
     "process_geometry_paths",
     "run_release",
+    "selected_dataset_names",
+    "validate_reference_config",
+    "verify_release",
 ]
 
 _SOURCE_WORKERS = 8
+DEFAULT_WORKERS = _SOURCE_WORKERS
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +97,45 @@ class _ReferenceSettings:
     crs: str
     threshold: int
     config: Mapping[str, object]
+
+
+class ConfigError(ValueError):
+    """The reference config or a command input is missing or invalid."""
+
+
+@dataclass(frozen=True, slots=True)
+class DryRunDataset:
+    """What a release would do for one dataset, computed without Hub writes."""
+
+    plan: DatasetPlan
+    target_exists: bool
+    shards_to_upload: tuple[str, ...]
+
+    @property
+    def would_duplicate(self) -> bool:
+        return not self.target_exists
+
+
+@dataclass(frozen=True, slots=True)
+class DryRunReport:
+    """Read-only preview of a release."""
+
+    datasets: tuple[DryRunDataset, ...]
+    no_op: bool
+    reference_assets: int
+
+
+def validate_reference_config(config_path: Path) -> None:
+    """Fail fast when the reference config is missing, unreadable or invalid."""
+
+    if not config_path.is_file():
+        raise ConfigError(f"reference config not found: {config_path}")
+    try:
+        _settings(config_path)
+    except json.JSONDecodeError as error:
+        raise ConfigError(f"reference config is not valid JSON: {config_path}: {error}") from error
+    except (OSError, ValueError) as error:
+        raise ConfigError(f"{config_path}: {error}") from error
 
 
 def _settings(config_path: Path) -> _ReferenceSettings:
@@ -443,17 +501,21 @@ def run_release(
     batch_size: int,
     token: str | None = None,
     progress: Progress | None = None,
+    datasets: Sequence[str] | None = None,
+    workers: int = _SOURCE_WORKERS,
 ) -> ReleaseReceipt:
-    """Run, publish, and independently verify all three datasets."""
+    """Run, publish, and independently verify the selected (default: all) datasets."""
 
+    if workers <= 0:
+        raise ValueError("workers must be positive")
     settings = _settings(reference_config)
     workdir.mkdir(parents=True, exist_ok=True)
-    plans = plan_datasets(api)
-    _duplicate_outputs(api, plans, token)
+    plans = plan_datasets(api, datasets)
     groups = resolve_config_data(settings.config)
     sidecar_root = workdir / "sidecars"
     checksums: dict[str, str] = {}
     with _source_cache(workdir) as source_root, _http_client(None) as reusable_client:
+        # Detect a verified no-op before any Hub write so a rerun stays read-only.
         no_op_receipt = _try_no_op_release(
             api,
             plans,
@@ -464,6 +526,7 @@ def run_release(
         )
         if no_op_receipt is not None:
             return no_op_receipt
+        _duplicate_outputs(api, plans, token)
         _process_reference_groups(
             api,
             plans,
@@ -476,7 +539,7 @@ def run_release(
             batch_size=batch_size,
             progress=progress,
             http_client=reusable_client,
-            parallelism=_SOURCE_WORKERS,
+            parallelism=workers,
         )
         reference_info = _reference_info(groups, checksums, settings)
         receipts = tuple(
@@ -494,6 +557,85 @@ def run_release(
             for plan in plans
         )
     return ReleaseReceipt(receipts, reference_info)
+
+
+def plan_release(
+    api: HubApi,
+    *,
+    reference_config: Path,
+    workdir: Path,
+    datasets: Sequence[str] | None = None,
+) -> DryRunReport:
+    """Resolve plans, references and no-op status without writing to the Hub."""
+
+    settings = _settings(reference_config)
+    workdir.mkdir(parents=True, exist_ok=True)
+    plans = plan_datasets(api, datasets)
+    groups = resolve_config_data(settings.config)
+    reference = _reference_info(groups, {}, settings)
+    with _http_client(None) as client:
+        existing = _load_existing_manifests(api, plans, workdir / "dry-run", client)
+    no_op = _compatible_manifests(plans, existing, reference)
+    assets = reference.get("assets")
+    return DryRunReport(
+        tuple(_dry_run_dataset(api, plan, no_op=no_op) for plan in plans),
+        no_op,
+        len(assets) if isinstance(assets, list) else 0,
+    )
+
+
+def verify_release(
+    api: HubApi,
+    *,
+    workdir: Path,
+    datasets: Sequence[str] | None = None,
+) -> ReleaseReceipt:
+    """Re-verify published targets against their own manifests without any Hub write.
+
+    Raises ``VerificationError`` when a target has no EUNIS manifest or does not match it.
+    """
+
+    workdir.mkdir(parents=True, exist_ok=True)
+    plans = plan_datasets(api, datasets)
+    with _http_client(None) as client:
+        existing = _load_existing_manifests(api, plans, workdir / "verify-load", client)
+        receipts = tuple(
+            _verify_published(api, plan, item, workdir=workdir, client=client)
+            for plan, item in zip(plans, existing, strict=True)
+        )
+    manifest = (receipts[0].verification.manifest if receipts else None) or {}
+    reference = manifest.get("reference")
+    return ReleaseReceipt(receipts, reference if isinstance(reference, Mapping) else {})
+
+
+def _verify_published(
+    api: HubApi,
+    plan: DatasetPlan,
+    existing: _ExistingManifest | None,
+    *,
+    workdir: Path,
+    client: StreamClient,
+) -> DatasetReceipt:
+    if existing is None:
+        raise VerificationError(f"{plan.spec.output_repo} has no EUNIS manifest to verify")
+    pinned = _manifest_plan(plan, existing.manifest)
+    receipt = _verify_no_op_dataset(api, pinned, existing, workdir=workdir, client=client)
+    return replace(receipt, no_op=False)
+
+
+def _manifest_plan(plan: DatasetPlan, manifest: Mapping[str, object]) -> DatasetPlan:
+    """Pin a plan to the source revision and paths the published manifest recorded."""
+
+    revision = manifest.get("source_revision")
+    paths = manifest.get("source_paths")
+    if not isinstance(revision, str) or not isinstance(paths, list):
+        raise VerificationError(f"{plan.spec.output_repo} manifest lacks source revision or paths")
+    return replace(plan, source_revision=revision, source_files=tuple(str(p) for p in paths))
+
+
+def _dry_run_dataset(api: HubApi, plan: DatasetPlan, *, no_op: bool) -> DryRunDataset:
+    shards = () if no_op else (*plan.geometry_paths, *plan.link_paths)
+    return DryRunDataset(plan, target_exists(api, plan.spec.output_repo), tuple(shards))
 
 
 def _reference_info(
