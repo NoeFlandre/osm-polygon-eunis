@@ -11,9 +11,7 @@ import httpx
 import pytest
 from huggingface_hub.utils import RepositoryNotFoundError
 
-import osm_polygon_eunis.cli as cli
-import osm_polygon_eunis.manifest_state as manifest_state
-import osm_polygon_eunis.runner as runner
+from osm_polygon_eunis import cli, manifest_state, runner
 from osm_polygon_eunis._protocols import HubApi, StreamClient
 from osm_polygon_eunis.runner import DatasetPlan
 from osm_polygon_eunis.sources import DatasetSpec

@@ -7,7 +7,7 @@ from typing import cast
 import httpx
 import pytest
 
-import osm_polygon_eunis.cli as cli
+from osm_polygon_eunis import cli
 from osm_polygon_eunis._protocols import HubApi
 from osm_polygon_eunis.publish import ShardExpectation, VerificationReceipt
 from osm_polygon_eunis.runner import (

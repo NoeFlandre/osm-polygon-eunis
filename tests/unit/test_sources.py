@@ -134,7 +134,8 @@ def test_download_to_temp_rejects_wrong_length(tmp_path: Path, monkeypatch) -> N
         def headers(self):
             return {"content-length": "7"}
 
-        def iter_bytes(self, chunk_size: int):
+        # Signature mirrors the StreamResponse protocol.
+        def iter_bytes(self, chunk_size: int):  # noqa: ARG002
             yield b"abc"
 
     monkeypatch.setattr(httpx, "stream", lambda *_args, **_kwargs: FakeResponse())

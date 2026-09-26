@@ -5,6 +5,7 @@ description = "Enrich OSM polygon Hugging Face datasets with exact-overlap EUNIS
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+  "defusedxml>=0.7,<1",
   "httpx>=0.27,<1",
   "huggingface-hub>=1.32,<2",
   "numpy>=2,<3",
@@ -58,7 +59,34 @@ target-version = "py312"
 src = ["src", "tests", "scripts"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP", "SIM", "C4", "RUF"]
+select = [
+  "E", "F", "I", "B", "UP", "SIM", "C4", "RUF",
+  # Anti-pattern guardrails (#30).
+  "C90", "PTH", "DTZ", "BLE", "ERA", "PIE", "RET", "N", "TID", "PGH",
+  "PERF", "S", "ARG", "T20", "PL",
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.pylint]
+# Ratchet: start at 8, lower toward 6 as parameter lists become dataclasses.
+max-args = 8
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S106", "ARG005", "PLR2004", "PLC0415"]
+# Internal type-narrowing invariants, not input validation.
+"src/osm_polygon_eunis/matching.py" = ["S101"]
+"src/osm_polygon_eunis/reference.py" = ["S101"]
+"src/osm_polygon_eunis/references.py" = ["S101"]
+# PLR0913 ratchet (#30): these modules still take long parameter lists; remove
+# an entry once its functions move to parameter dataclasses.
+"src/osm_polygon_eunis/geometry_jobs.py" = ["PLR0913"]
+"src/osm_polygon_eunis/manifest_state.py" = ["PLR0913"]
+"src/osm_polygon_eunis/publish.py" = ["PLR0913"]
+"src/osm_polygon_eunis/runner.py" = ["PLR0913"]
+"scripts/**" = ["T201"]
+"src/osm_polygon_eunis/cli.py" = ["T201"]
 
 [tool.ruff.format]
 quote-style = "double"

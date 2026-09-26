@@ -51,7 +51,7 @@ class StreamClient(Protocol):
         *,
         headers: Mapping[str, str] = ...,
         follow_redirects: bool = ...,
-        timeout: None = ...,
+        timeout: Any = ...,
     ) -> AbstractContextManager[StreamResponse]: ...
 
 

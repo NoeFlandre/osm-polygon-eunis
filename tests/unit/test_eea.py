@@ -9,7 +9,7 @@ from typing import cast
 import httpx
 import pytest
 
-import osm_polygon_eunis.eea as eea
+from osm_polygon_eunis import eea
 from osm_polygon_eunis.eea import (
     RemoteAsset,
     WebDavEntry,
@@ -676,3 +676,14 @@ def test_config_resolution_and_asset_download(monkeypatch, tmp_path: Path) -> No
             ),
             tmp_path / "bad.bin",
         )
+
+
+def test_webdav_listing_rejects_xml_entity_declarations() -> None:
+    import defusedxml
+
+    payload = (
+        b'<?xml version="1.0"?><!DOCTYPE d [<!ENTITY a "aaaa">]>'
+        b'<d:multistatus xmlns:d="DAV:">&a;</d:multistatus>'
+    )
+    with pytest.raises(defusedxml.DefusedXmlException):
+        eea.parse_webdav_entries(payload)

@@ -12,6 +12,7 @@ from huggingface_hub import HfApi
 
 from ._protocols import HubApi, StreamClient
 from .eea import EeaGroup
+from .fileio import DOWNLOAD_TIMEOUT
 from .references import (
     _http_client,
     _indexed_reference_group_batches,
@@ -221,7 +222,6 @@ def _process_reference_groups_parallel(
     with _stage_reference_groups(
         groups,
         workdir=workdir,
-        threshold=threshold,
         checksums=checksums,
         client=http_client,
     ) as reference_directory:
@@ -298,7 +298,6 @@ def _process_reference_batch_parallel(
     with _stage_reference_batch(
         groups,
         workdir=workdir,
-        threshold=threshold,
         checksums=checksums,
         client=http_client,
     ) as reference_directory:
@@ -399,7 +398,7 @@ def _process_geometry_chunk(chunk: _GeometryChunk) -> tuple[tuple[str, str], ...
     plans = {plan.spec.name: plan for plan in chunk.plans}
     api = HfApi(endpoint=chunk.endpoint, token=chunk.token)
     reference_batches = _indexed_reference_group_batches(chunk.groups)
-    with httpx.Client(follow_redirects=True, timeout=None) as client:
+    with httpx.Client(follow_redirects=True, timeout=DOWNLOAD_TIMEOUT) as client:
         for jobs in _geometry_micro_batches(chunk.jobs):
             _cache_geometry_jobs(api, plans, jobs, chunk.source_root, client)
             try:

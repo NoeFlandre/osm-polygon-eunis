@@ -6,7 +6,7 @@ import hashlib
 import io
 import json
 import re
-import xml.etree.ElementTree as ET
+import xml.etree.ElementTree as ET  # types only; parsing goes through defusedxml
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from importlib.metadata import version
@@ -15,6 +15,7 @@ from urllib.parse import quote, unquote, urlsplit, urlunsplit
 from zipfile import BadZipFile, ZipFile
 
 import httpx
+from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 from ._protocols import HttpClient as _HttpClient
 from ._protocols import RequestClient as _RequestClient
@@ -86,7 +87,7 @@ def _child_text(element: ET.Element, name: str) -> str | None:
 def parse_webdav_entries(payload: bytes) -> tuple[WebDavEntry, ...]:
     """Parse a public Nextcloud WebDAV directory listing."""
 
-    root = ET.fromstring(payload)
+    root = _safe_fromstring(payload)
     return tuple(
         _webdav_entry(response)
         for response in root.iter()
@@ -264,7 +265,7 @@ def _classification_values(
 
 def _shared_strings(archive: ZipFile) -> tuple[str, ...]:
     try:
-        root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+        root = _safe_fromstring(archive.read("xl/sharedStrings.xml"))
     except KeyError:
         return ()
     return tuple(_shared_string(item) for item in root.iter() if _local_name(item.tag) == "si")
@@ -313,7 +314,7 @@ def _xlsx_rows(archive: ZipFile, shared_strings: tuple[str, ...]) -> Iterable[tu
         if path.startswith("xl/worksheets/sheet") and path.endswith(".xml")
     )
     for path in sheet_paths:
-        root = ET.fromstring(archive.read(path))
+        root = _safe_fromstring(archive.read(path))
         yield from _sheet_rows(root, shared_strings)
 
 

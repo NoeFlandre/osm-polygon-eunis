@@ -15,7 +15,7 @@ from huggingface_hub.utils import build_hf_headers
 from ._protocols import HubApi
 from ._protocols import InventoryApi as _InventoryApi
 from ._protocols import StreamClient as _StreamClient
-from .fileio import write_chunks
+from .fileio import DOWNLOAD_TIMEOUT, write_chunks
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,7 +174,7 @@ def download_to_temp(
             url,
             headers=headers,
             follow_redirects=True,
-            timeout=None,
+            timeout=DOWNLOAD_TIMEOUT,
         ) as response:
             written, expected = _write_response(response, destination)
     else:

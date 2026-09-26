@@ -30,6 +30,7 @@ from .publish import (
     VerificationError,
     build_manifest,
     duplicate_source,
+    parquet_signature,
     target_exists,
     upload_manifest,
     upload_replacement,
@@ -53,6 +54,7 @@ from .sources import (
 from .transform import (
     append_label_sidecar,
     build_label_map,
+    enrich_link_shard,
 )
 
 __all__ = [
@@ -471,8 +473,6 @@ def _cleanup_shard(
 
 
 def _schema_signature(path: Path) -> str:
-    from .publish import parquet_signature
-
     return parquet_signature(path)[1]
 
 
@@ -483,8 +483,6 @@ def _enrich_link(
     *,
     batch_size: int,
 ) -> int:
-    from .transform import enrich_link_shard
-
     return enrich_link_shard(
         source,
         destination,

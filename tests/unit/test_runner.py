@@ -8,11 +8,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-import osm_polygon_eunis.geometry_jobs as geometry_jobs
-import osm_polygon_eunis.manifest_state as manifest_state
-import osm_polygon_eunis.references as references
-import osm_polygon_eunis.release_plan as release_plan
-import osm_polygon_eunis.runner as runner
+from osm_polygon_eunis import geometry_jobs, manifest_state, references, release_plan, runner
 from osm_polygon_eunis._protocols import HubApi, StreamClient
 from osm_polygon_eunis.cards import CardArtifacts
 from osm_polygon_eunis.domain import EunisResult
@@ -865,7 +861,7 @@ def test_process_geometry_chunk_runs_each_micro_batch_against_each_reference_bat
         lambda groups, root, threshold, start_index: (f"refs-{start_index}",),
     )
 
-    def fake_process(api, plan_arg, **kwargs):
+    def fake_process(_api, plan_arg, **kwargs):
         assert plan_arg is plan
         assert kwargs["retain_source"] is True
         assert kwargs["progress"] is None

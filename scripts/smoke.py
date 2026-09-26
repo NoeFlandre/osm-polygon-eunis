@@ -57,9 +57,12 @@ def main() -> int:
         reference = RasterReference((RasterLayer("R11", "Pannonian steppe", raster, "EEA-smoke"),))
         enrich_parquet_shard(source, output, reference=reference, batch_size=1)
         result = pq.read_table(output)
-        assert result["eunis_code"].to_pylist() == ["R11"]
+        codes = result["eunis_code"].to_pylist()
+        if codes != ["R11"]:
+            raise SystemExit(f"smoke: unexpected codes {codes!r}")
         (percentage,) = result["eunis_overlap_percentage"].to_pylist()
-        assert math.isclose(percentage, 4.822971, abs_tol=1e-4), percentage
+        if not math.isclose(percentage, 4.822971, abs_tol=1e-4):
+            raise SystemExit(f"smoke: unexpected overlap {percentage!r}")
     print("smoke: passed")
     return 0
 

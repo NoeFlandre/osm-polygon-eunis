@@ -34,6 +34,10 @@ _LAYER_CODE = re.compile(r"^Prob_(?P<code>[A-Z][A-Z0-9.]+)_\d+m\.tif$")
 _RASTER_TILE_SIZE = 64
 _RASTER_TILE_CACHE_SIZE = 1024
 _GEOPACKAGE_TILE_CACHE_SIZE = 256
+EPSG_LAEA_EUROPE = 3035
+_GPKG_HEADER_SIZE = 8
+_ALPHA_BAND = 4
+_TILE_METADATA_FIELDS = 13
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,13 +275,13 @@ def _raster_tile_window(
 def _is_epsg_3035(crs: object) -> bool:
     if crs is None:
         return False
-    if getattr(crs, "to_epsg", lambda: None)() == 3035:
+    if getattr(crs, "to_epsg", lambda: None)() == EPSG_LAEA_EUROPE:
         return True
     return _is_equivalent_crs(crs)
 
 
 def _is_equivalent_crs(crs: object) -> bool:
-    if CRS.from_user_input(crs).equals(CRS.from_epsg(3035)):
+    if CRS.from_user_input(crs).equals(CRS.from_epsg(EPSG_LAEA_EUROPE)):
         return True
     to_wkt = getattr(crs, "to_wkt", None)
     wkt = to_wkt() if callable(to_wkt) else str(crs)
@@ -327,7 +331,7 @@ def _validate_vector_header(
     geometry_column: object,
     srs_id: object,
 ) -> None:
-    if srs_id != 3035:
+    if srs_id != EPSG_LAEA_EUROPE:
         raise ValueError(f"GeoPackage layer {table} is not EPSG:3035")
     if not isinstance(table, str) or not isinstance(geometry_column, str):
         raise ValueError("GeoPackage geometry metadata is invalid")
@@ -475,16 +479,16 @@ class GeoPackageReference:
         """Decode a GeoPackage binary geometry and require ETRS89 LAEA Europe."""
 
         data = bytes(blob)
-        if len(data) < 8 or data[:2] != b"GP":
+        if len(data) < _GPKG_HEADER_SIZE or data[:2] != b"GP":
             raise ValueError("invalid GeoPackage geometry header")
         flags = data[3]
         byte_order = "<" if flags & 1 else ">"
         srs_id = struct.unpack_from(f"{byte_order}i", data, 4)[0]
-        if srs_id != 3035:
+        if srs_id != EPSG_LAEA_EUROPE:
             raise ValueError(f"GeoPackage geometry is not EPSG:3035: {srs_id}")
         envelope_type = (flags >> 1) & 0b111
         envelope_size = _envelope_size(envelope_type)
-        return load_wkb(data[8 + envelope_size :])
+        return load_wkb(data[_GPKG_HEADER_SIZE + envelope_size :])
 
     @classmethod
     def _discover_layers(cls, connection: sqlite3.Connection) -> tuple[_VectorLayer, ...]:
@@ -691,8 +695,8 @@ class GeoPackageReference:
                 data = dataset.read(1, masked=True)
                 values = np.asarray(data)
                 valid = (~np.ma.getmaskarray(data)) & (values > self._threshold)
-                if dataset.count >= 4:
-                    valid &= dataset.read(4) > 0
+                if dataset.count >= _ALPHA_BAND:
+                    valid &= dataset.read(_ALPHA_BAND) > 0
                 if not valid.any():
                     return None
                 origin_x = layer.min_x + tile_column * layer.tile_width * layer.pixel_x_size
@@ -730,7 +734,8 @@ class GeoPackageReference:
             return []
         table = _sql_identifier(layer.table)
         rows = connection.execute(
-            f"SELECT tile_column, tile_row, tile_data FROM {table} "
+            # Identifier escaped by _sql_identifier; all values are bound parameters.
+            f"SELECT tile_column, tile_row, tile_data FROM {table} "  # noqa: S608
             "WHERE zoom_level = ? AND tile_column BETWEEN ? AND ? "
             "AND tile_row BETWEEN ? AND ?",
             (layer.zoom_level, min_column, max_column, min_row, max_row),
@@ -756,7 +761,8 @@ class GeoPackageReference:
             "t.rowid" if layer.primary_key == "rowid" else f"t.{_sql_identifier(layer.primary_key)}"
         )
         query = (
-            f"SELECT t.{code}, t.{geometry} FROM {table} AS t "
+            # Identifiers escaped by _sql_identifier; all values are bound parameters.
+            f"SELECT t.{code}, t.{geometry} FROM {table} AS t "  # noqa: S608
             f"JOIN {rtree} AS r ON r.id = {key} "
             "WHERE r.maxx > ? AND r.minx < ? AND r.maxy > ? AND r.miny < ?"
         )
@@ -773,7 +779,7 @@ def _has_disjoint_components(geometry: BaseGeometry) -> bool:
 
 
 def _tile_values(row: tuple[object, ...]) -> _TileMetadata:
-    if len(row) != 13:
+    if len(row) != _TILE_METADATA_FIELDS:
         raise ValueError("GeoPackage tile metadata has an unexpected shape")
     return cast(_TileMetadata, row)
 
@@ -783,7 +789,7 @@ def _validate_tile_header(
     content_srs_id: int,
     labels: dict[str, str],
 ) -> None:
-    if content_srs_id != 3035:
+    if content_srs_id != EPSG_LAEA_EUROPE:
         raise ValueError(f"GeoPackage tile layer {table} is not EPSG:3035")
     if table not in labels:
         raise ValueError(f"GeoPackage tile layer has unknown EUNIS code {table!r}")

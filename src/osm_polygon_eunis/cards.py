@@ -13,6 +13,7 @@ from .fileio import sha256_file
 from .geometry import parse_geometry
 
 _CELL_SIZE = 2.0
+_MAX_CELL_SIZE = 180.0
 _LON_MIN, _LON_MAX = -180.0, 180.0
 _LAT_MIN, _LAT_MAX = -90.0, 90.0
 _LON_RANGE = _LON_MAX - _LON_MIN
@@ -144,7 +145,7 @@ class DatasetCardAccumulator:
     """Collect label counts and bounded map bins while shards stream past."""
 
     def __init__(self, *, cell_size: float = _CELL_SIZE) -> None:
-        if cell_size <= 0.0 or cell_size > 180.0:
+        if cell_size <= 0.0 or cell_size > _MAX_CELL_SIZE:
             raise ValueError("cell_size must be in (0, 180]")
         self.cell_size = cell_size
         self._counts: dict[str | None, int] = {}

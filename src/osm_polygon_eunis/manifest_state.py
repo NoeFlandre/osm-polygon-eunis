@@ -13,6 +13,7 @@ from huggingface_hub.errors import RepositoryNotFoundError
 from ._protocols import HubApi, StreamClient
 from .eea import EeaGroup
 from .publish import (
+    MANIFEST_VERSION,
     ShardExpectation,
     VerificationError,
     VerificationReceipt,
@@ -56,19 +57,19 @@ def _reference_manifest(
         group_assets = [*group.raster_assets]
         if group.vector_asset is not None:
             group_assets.append(group.vector_asset)
-        for asset in group_assets:
-            assets.append(
-                {
-                    "record_id": asset.record_id,
-                    "path": asset.path,
-                    "url": asset.url,
-                    "size": asset.size,
-                    "etag": asset.etag,
-                    "code": asset.code,
-                    "name": asset.name,
-                    "sha256": checksums.get(_asset_key(group, asset)),
-                }
-            )
+        assets.extend(
+            {
+                "record_id": asset.record_id,
+                "path": asset.path,
+                "url": asset.url,
+                "size": asset.size,
+                "etag": asset.etag,
+                "code": asset.code,
+                "name": asset.name,
+                "sha256": checksums.get(_asset_key(group, asset)),
+            }
+            for asset in group_assets
+        )
     return {
         "source_version": source_version,
         "crs": crs,
@@ -108,7 +109,7 @@ def _manifest_matches_inputs(
 
     return all(
         (
-            manifest.get("manifest_version") == 3,
+            manifest.get("manifest_version") == MANIFEST_VERSION,
             manifest.get("source_repo") == plan.spec.source_repo,
             manifest.get("target_repo") == plan.spec.output_repo,
             manifest.get("source_revision") == plan.source_revision,
