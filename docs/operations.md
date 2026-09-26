@@ -100,6 +100,14 @@ uv run python scripts/smoke.py
 uv run mutmut run
 ```
 
+CI also runs, in parallel jobs of the same workflow: `uv build` plus an
+isolated smoke install of the wheel, `uv run mkdocs build --strict`, and
+`pip-audit --strict` over `uv export --locked --all-groups`. The aggregate
+`qa-ok` job succeeds only when every other QA job succeeded; make it the single
+required status check in branch protection. CodeQL (Python) runs in its own
+workflow, `.github/workflows/codeql.yml`. QA runs once per PR push (`push` is
+limited to `main`), and every third-party action is pinned by commit SHA.
+
 The release order is:
 
 1. Capture the current source revisions and plan inventory.

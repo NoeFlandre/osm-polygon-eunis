@@ -16,3 +16,4 @@ staging/
 .eunis-run/
 mutants/
 .DS_Store
+site/
