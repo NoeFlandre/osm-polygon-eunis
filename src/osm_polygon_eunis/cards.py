@@ -152,10 +152,17 @@ class DatasetCardAccumulator:
         self._names: dict[str | None, str] = {}
         self._bins: dict[tuple[str | None, int, int], int] = {}
         self._total_rows = 0
+        self._invalid_geometries = 0
 
     @property
     def total_rows(self) -> int:
         return self._total_rows
+
+    @property
+    def invalid_geometries(self) -> int:
+        """Rows whose geometry value is present but cannot be decoded or repaired."""
+
+        return self._invalid_geometries
 
     def observe(self, result: EunisResult, raw_geometry: object) -> None:
         """Record one output label and at most one bounded map cell."""
@@ -174,6 +181,8 @@ class DatasetCardAccumulator:
     def _record_map_bin(self, code: str | None, raw_geometry: object) -> None:
         geometry = parse_geometry(raw_geometry)
         if geometry is None:
+            if raw_geometry is not None:
+                self._invalid_geometries += 1
             return
         point = geometry.representative_point()
         longitude = float(point.x)
@@ -240,6 +249,7 @@ class DatasetCardAccumulator:
             "readme_sha256": hashes["README.md"],
             "map_sha256": hashes[_MAP_PATH],
             "total_rows": self._total_rows,
+            "invalid_geometries": self._invalid_geometries,
             "label_distribution": [
                 {
                     "code": summary.code,
