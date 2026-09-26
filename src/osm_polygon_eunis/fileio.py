@@ -7,6 +7,13 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import IO, Any
 
+import httpx
+
+# Bounded network timeouts for large streamed downloads. ``read`` applies per
+# chunk, not to the whole transfer, so multi-GB files still complete while a
+# stalled connection fails instead of hanging the job forever.
+DOWNLOAD_TIMEOUT = httpx.Timeout(connect=30.0, read=300.0, write=300.0, pool=30.0)
+
 
 def sha256_file(path: Path) -> str:
     """Return the hex SHA-256 of a file read in 1 MiB chunks."""

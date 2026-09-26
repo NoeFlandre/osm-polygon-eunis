@@ -89,8 +89,10 @@ def main() -> int:
     for module, path in MODULES.items():
         dependencies = _imports(path) & MODULES.keys()
         graph[module] = dependencies
-        for dependency in sorted(dependencies & FORBIDDEN.get(module, set())):
-            errors.append(f"{module} imports forbidden higher-level module {dependency}")
+        errors.extend(
+            f"{module} imports forbidden higher-level module {dependency}"
+            for dependency in sorted(dependencies & FORBIDDEN.get(module, set()))
+        )
     errors.extend(_cycles(graph))
     if errors:
         print("\n".join(sorted(set(errors))), file=sys.stderr)

@@ -18,6 +18,8 @@ from ._protocols import HubApi, StreamClient
 from .fileio import sha256_file
 from .sources import capture_revision, download_to_temp
 
+MANIFEST_VERSION = 3
+
 
 class VerificationError(ValueError):
     """A published target does not match what the release expected."""
@@ -153,7 +155,7 @@ def build_manifest(
     schemas = schema_by_path or {}
     _validate_manifest_paths(source, changed, added)
     return {
-        "manifest_version": 3,
+        "manifest_version": MANIFEST_VERSION,
         "source_repo": source_repo,
         "target_repo": target_repo,
         "source_revision": source_revision,

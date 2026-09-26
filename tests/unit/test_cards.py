@@ -76,6 +76,29 @@ def test_card_counts_rows_even_when_geometry_is_invalid_or_outside_world() -> No
     assert [summary.rows for summary in card.summaries()] == [1, 1]
 
 
+def test_card_counts_undecodable_geometries_separately_from_missing_ones(
+    tmp_path: Path,
+) -> None:
+    card = DatasetCardAccumulator()
+    result = EunisResult(None, None, None, None)
+    card.observe(result, "not-json")
+    card.observe(result, b"\x00not-wkb")
+    card.observe(result, None)
+    card.observe(result, _geometry(0.0, 0.0))
+
+    assert card.invalid_geometries == 2
+    artifacts = card.write_artifacts(
+        tmp_path,
+        dataset_name="website",
+        source_repo="org/source",
+        target_repo="org/target",
+        source_revision="source-revision",
+        reference_version="EEA-test",
+    )
+    assert artifacts.manifest["invalid_geometries"] == 2
+    assert artifacts.manifest["total_rows"] == 4
+
+
 def _golden_card() -> DatasetCardAccumulator:
     card = DatasetCardAccumulator()
     for index in range(25):

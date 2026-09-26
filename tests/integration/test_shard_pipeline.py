@@ -11,8 +11,7 @@ from pyproj import Transformer
 from shapely.geometry import box, mapping
 from shapely.ops import transform
 
-import osm_polygon_eunis.geometry_jobs as geometry_jobs
-import osm_polygon_eunis.references as references
+from osm_polygon_eunis import geometry_jobs, references
 from osm_polygon_eunis._protocols import HubApi, StreamClient
 from osm_polygon_eunis.eea import EeaGroup, RemoteAsset
 from osm_polygon_eunis.reference import RasterLayer, RasterReference

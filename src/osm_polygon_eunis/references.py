@@ -13,6 +13,7 @@ import httpx
 
 from ._protocols import StreamClient
 from .eea import EeaGroup, RemoteAsset, download_asset
+from .fileio import DOWNLOAD_TIMEOUT
 from .reference import GeoPackageReference, RasterLayer, RasterReference
 from .transform import (
     OverlapReference,
@@ -67,7 +68,7 @@ def _http_client(client: StreamClient | None) -> Iterator[StreamClient]:
     if client is not None:
         yield client
         return
-    with httpx.Client(follow_redirects=True, timeout=None) as owned_client:
+    with httpx.Client(follow_redirects=True, timeout=DOWNLOAD_TIMEOUT) as owned_client:
         yield owned_client
 
 
@@ -169,7 +170,6 @@ def _stage_reference_groups(
     groups: tuple[EeaGroup, ...],
     *,
     workdir: Path,
-    threshold: int,
     checksums: dict[str, str],
     client: StreamClient,
 ) -> Iterator[Path]:
@@ -194,7 +194,6 @@ def _stage_reference_batch(
     groups: tuple[EeaGroup, ...],
     *,
     workdir: Path,
-    threshold: int,
     checksums: dict[str, str],
     client: StreamClient,
 ) -> Iterator[Path]:
@@ -203,7 +202,6 @@ def _stage_reference_batch(
     with _stage_reference_groups(
         groups,
         workdir=workdir,
-        threshold=threshold,
         checksums=checksums,
         client=client,
     ) as root:

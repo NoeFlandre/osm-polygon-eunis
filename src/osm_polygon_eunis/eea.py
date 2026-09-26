@@ -6,7 +6,7 @@ import hashlib
 import io
 import json
 import re
-import xml.etree.ElementTree as ET
+import xml.etree.ElementTree as ET  # types only; parsing goes through defusedxml
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from importlib.metadata import version
@@ -15,10 +15,12 @@ from urllib.parse import quote, unquote, urlsplit, urlunsplit
 from zipfile import BadZipFile, ZipFile
 
 import httpx
+from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 from ._protocols import HttpClient as _HttpClient
 from ._protocols import RequestClient as _RequestClient
 from ._protocols import StreamClient
+from .domain import SchemaError
 from .fileio import write_chunks
 from .reference import parse_layer_code
 
@@ -86,7 +88,7 @@ def _child_text(element: ET.Element, name: str) -> str | None:
 def parse_webdav_entries(payload: bytes) -> tuple[WebDavEntry, ...]:
     """Parse a public Nextcloud WebDAV directory listing."""
 
-    root = ET.fromstring(payload)
+    root = _safe_fromstring(payload)
     return tuple(
         _webdav_entry(response)
         for response in root.iter()
@@ -141,7 +143,7 @@ def parse_arcgis_labels(
 
     features = payload.get("features")
     if not isinstance(features, list):
-        raise ValueError("EEA ImageServer response has no features list")
+        raise SchemaError("EEA ImageServer response has no features list")
     labels: dict[str, str] = {}
     for feature in features:
         label = _arcgis_feature_label(feature, fallback_labels)
@@ -170,10 +172,10 @@ def _arcgis_feature_label(
 
 def _arcgis_attributes(feature: object) -> Mapping[str, object]:
     if not isinstance(feature, Mapping):
-        raise ValueError("EEA ImageServer feature is not an object")
+        raise SchemaError("EEA ImageServer feature is not an object")
     attributes = feature.get("attributes")
     if not isinstance(attributes, Mapping):
-        raise ValueError("EEA ImageServer feature has no attributes")
+        raise SchemaError("EEA ImageServer feature has no attributes")
     return attributes
 
 
@@ -264,7 +266,7 @@ def _classification_values(
 
 def _shared_strings(archive: ZipFile) -> tuple[str, ...]:
     try:
-        root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+        root = _safe_fromstring(archive.read("xl/sharedStrings.xml"))
     except KeyError:
         return ()
     return tuple(_shared_string(item) for item in root.iter() if _local_name(item.tag) == "si")
@@ -313,7 +315,7 @@ def _xlsx_rows(archive: ZipFile, shared_strings: tuple[str, ...]) -> Iterable[tu
         if path.startswith("xl/worksheets/sheet") and path.endswith(".xml")
     )
     for path in sheet_paths:
-        root = ET.fromstring(archive.read(path))
+        root = _safe_fromstring(archive.read(path))
         yield from _sheet_rows(root, shared_strings)
 
 
@@ -588,7 +590,7 @@ def _fetch_arcgis_page(client: _HttpClient, service_url: str, offset: int) -> Ma
     response.raise_for_status()
     page = response.json()
     if not isinstance(page, Mapping):
-        raise ValueError("EEA ImageServer response is not an object")
+        raise SchemaError("EEA ImageServer response is not an object")
     return page
 
 
@@ -750,14 +752,14 @@ def _config_settings(config: object) -> _ConfigSettings:
     )
     supplemental_labels = config.get("supplemental_labels", {})
     if not isinstance(supplemental_labels, Mapping):
-        raise ValueError("EEA config has invalid supplemental_labels")
+        raise SchemaError("EEA config has invalid supplemental_labels")
     labels = _supplemental_labels(supplemental_labels)
     return _ConfigSettings(source_version, record_ids, classification_record, labels)
 
 
 def _config_mapping(config: object) -> Mapping[object, object]:
     if not isinstance(config, Mapping):
-        raise ValueError("EEA config must be a JSON object")
+        raise SchemaError("EEA config must be a JSON object")
     return config
 
 

@@ -13,6 +13,7 @@ from .fileio import sha256_file
 from .geometry import parse_geometry
 
 _CELL_SIZE = 2.0
+_MAX_CELL_SIZE = 180.0
 _LON_MIN, _LON_MAX = -180.0, 180.0
 _LAT_MIN, _LAT_MAX = -90.0, 90.0
 _LON_RANGE = _LON_MAX - _LON_MIN
@@ -144,17 +145,24 @@ class DatasetCardAccumulator:
     """Collect label counts and bounded map bins while shards stream past."""
 
     def __init__(self, *, cell_size: float = _CELL_SIZE) -> None:
-        if cell_size <= 0.0 or cell_size > 180.0:
+        if cell_size <= 0.0 or cell_size > _MAX_CELL_SIZE:
             raise ValueError("cell_size must be in (0, 180]")
         self.cell_size = cell_size
         self._counts: dict[str | None, int] = {}
         self._names: dict[str | None, str] = {}
         self._bins: dict[tuple[str | None, int, int], int] = {}
         self._total_rows = 0
+        self._invalid_geometries = 0
 
     @property
     def total_rows(self) -> int:
         return self._total_rows
+
+    @property
+    def invalid_geometries(self) -> int:
+        """Rows whose geometry value is present but cannot be decoded or repaired."""
+
+        return self._invalid_geometries
 
     def observe(self, result: EunisResult, raw_geometry: object) -> None:
         """Record one output label and at most one bounded map cell."""
@@ -173,6 +181,8 @@ class DatasetCardAccumulator:
     def _record_map_bin(self, code: str | None, raw_geometry: object) -> None:
         geometry = parse_geometry(raw_geometry)
         if geometry is None:
+            if raw_geometry is not None:
+                self._invalid_geometries += 1
             return
         point = geometry.representative_point()
         longitude = float(point.x)
@@ -239,6 +249,7 @@ class DatasetCardAccumulator:
             "readme_sha256": hashes["README.md"],
             "map_sha256": hashes[_MAP_PATH],
             "total_rows": self._total_rows,
+            "invalid_geometries": self._invalid_geometries,
             "label_distribution": [
                 {
                     "code": summary.code,
