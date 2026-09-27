@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -15,6 +16,11 @@ _TIMING_METRICS = (
     "mask_geometry_ms",
     "sidecar_update_seconds",
     "geopackage_overlap_seconds",
+)
+_CACHE_MISS_METRICS = (
+    "raster_random_cache_miss_rate",
+    "raster_spatial_cache_miss_rate",
+    "sidecar_cache_miss_rate",
 )
 
 
@@ -36,6 +42,23 @@ def compare_results(
         return ["candidate benchmark results must contain an invariants object"]
     errors.extend(_candidate_invariant_errors(candidate_invariants))
     errors.extend(_timing_errors(baseline_metrics, candidate_metrics, max_slowdown))
+    errors.extend(_report_cache_miss_rates(candidate_metrics))
+    return errors
+
+
+def _report_cache_miss_rates(metrics: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    for name in _CACHE_MISS_METRICS:
+        value = metrics.get(name)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or not 0.0 <= value <= 1.0
+        ):
+            errors.append(f"candidate has no valid measurement for {name}")
+            continue
+        print(f"{name}: candidate={value:.1%}")
     return errors
 
 

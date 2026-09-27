@@ -42,7 +42,8 @@ _EUNIS_LABELS = {"R11": "Steppe", "R12": "Dry grasslands"}
 @dataclass(frozen=True, slots=True)
 class SyntheticCase:
     layers: tuple[RasterLayer, ...]
-    polygons: tuple[BaseGeometry, ...]
+    polygons_wgs84: tuple[BaseGeometry, ...]
+    polygons_projected: tuple[BaseGeometry, ...]
     positions: tuple[tuple[float, float], ...]
     source_parquet: Path
     geopackage: Path
@@ -152,7 +153,14 @@ def synthetic_case(tmp_path_factory: pytest.TempPathFactory) -> SyntheticCase:
     pq.write_table(pa.table({"geometry": [polygon.wkb for polygon in polygons]}), source_parquet)
     geopackage = root / "synthetic-reference.gpkg"
     _write_geopackage(geopackage, polygons_projected)
-    return SyntheticCase(tuple(layers), polygons, positions, source_parquet, geopackage)
+    return SyntheticCase(
+        tuple(layers),
+        polygons,
+        polygons_projected,
+        positions,
+        source_parquet,
+        geopackage,
+    )
 
 
 @pytest.fixture(scope="module")
@@ -219,7 +227,7 @@ def _measure_raster_order(
     started = time.perf_counter()
     with reference:
         for index in order:
-            results[index] = _signature(reference.overlap(case.polygons[index]))
+            results[index] = _signature(reference.overlap(case.polygons_projected[index]))
     seconds = time.perf_counter() - started
     miss_rate = getattr(reference, "tile_cache_miss_rate", None)
     return seconds, tuple(result for result in results if result is not None), miss_rate
@@ -249,13 +257,14 @@ def test_raster_overlap_random_and_spatial_order_benchmark(
     benchmark_result: dict[str, object],
 ) -> None:
     case = synthetic_case
-    count = len(case.polygons)
+    count = len(case.polygons_projected)
     random_order = tuple(range(count))
     spatial_order = tuple(sorted(random_order, key=lambda index: case.positions[index]))
     random_seconds, random_results, random_miss_rate = _measure_raster_order(case, random_order)
     spatial_seconds, spatial_results, spatial_miss_rate = _measure_raster_order(case, spatial_order)
 
     assert random_results == spatial_results
+    assert any(result[0] is not None for result in random_results)
     metrics = benchmark_result["metrics"]
     assert isinstance(metrics, dict)
     metrics["raster_random_seconds"] = random_seconds
@@ -313,7 +322,7 @@ def test_update_label_sidecar_benchmark(
             batch_size=256,
         )
     seconds = time.perf_counter() - started
-    assert rows == len(synthetic_case.polygons)
+    assert rows == len(synthetic_case.polygons_wgs84)
     metrics = benchmark_result["metrics"]
     invariants = benchmark_result["invariants"]
     assert isinstance(metrics, dict) and isinstance(invariants, dict)
@@ -335,10 +344,11 @@ def test_geopackage_overlap_benchmark(
     started = time.perf_counter()
     with reference:
         results = tuple(
-            _signature(reference.overlap(polygon)) for polygon in synthetic_case.polygons
+            _signature(reference.overlap(polygon)) for polygon in synthetic_case.polygons_projected
         )
     seconds = time.perf_counter() - started
-    assert len(results) == len(synthetic_case.polygons)
+    assert len(results) == len(synthetic_case.polygons_projected)
+    assert any(result[0] is not None for result in results)
     metrics = benchmark_result["metrics"]
     invariants = benchmark_result["invariants"]
     assert isinstance(metrics, dict) and isinstance(invariants, dict)

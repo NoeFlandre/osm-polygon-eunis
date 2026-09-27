@@ -16,6 +16,9 @@ def _results(value: float) -> dict[str, Any]:
             "mask_geometry_ms": value,
             "sidecar_update_seconds": value,
             "geopackage_overlap_seconds": value,
+            "raster_random_cache_miss_rate": 0.1,
+            "raster_spatial_cache_miss_rate": 0.1,
+            "sidecar_cache_miss_rate": 0.1,
         },
         "invariants": {
             "raster_order_independent": True,
@@ -64,6 +67,33 @@ def test_compare_results_accepts_measurements_within_the_regression_budget() -> 
 
 def test_compare_results_accepts_a_sha256_sidecar_invariant() -> None:
     assert compare_results(_results(10.0), _results(10.0)) == []
+
+
+def test_compare_results_reports_tile_cache_miss_rates(capsys) -> None:
+    candidate = _results(10.0)
+    candidate["metrics"].update(
+        {
+            "raster_random_cache_miss_rate": 0.478,
+            "raster_spatial_cache_miss_rate": 0.312,
+            "sidecar_cache_miss_rate": 0.25,
+        }
+    )
+
+    assert compare_results(_results(10.0), candidate) == []
+
+    output = capsys.readouterr().out
+    assert "raster_random_cache_miss_rate: candidate=47.8%" in output
+    assert "raster_spatial_cache_miss_rate: candidate=31.2%" in output
+    assert "sidecar_cache_miss_rate: candidate=25.0%" in output
+
+
+def test_compare_results_rejects_invalid_tile_cache_miss_rates() -> None:
+    candidate = _results(10.0)
+    candidate["metrics"]["sidecar_cache_miss_rate"] = 1.1  # type: ignore[index]
+
+    errors = compare_results(_results(10.0), candidate)
+
+    assert errors == ["candidate has no valid measurement for sidecar_cache_miss_rate"]
 
 
 def test_compare_results_rejects_a_malformed_sidecar_sha256() -> None:
