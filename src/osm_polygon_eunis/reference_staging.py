@@ -331,29 +331,3 @@ def _starts_reference_batch(
     if group.raster_assets:
         return not current[0].raster_assets or len(current) >= limits.raster_groups_per_batch
     return bool(current[0].raster_assets)
-
-
-@contextmanager
-def _open_reference_batch(
-    groups: tuple[EeaGroup, ...],
-    *,
-    workdir: Path,
-    threshold: int,
-    checksums: dict[str, str],
-    client: StreamClient,
-) -> Iterator[tuple[OverlapReference, ...]]:
-    first_record = groups[0].record_id[:8]
-    with _reference_staging_root(workdir, first_record) as root, ExitStack() as stack:
-        references = tuple(
-            stack.enter_context(
-                open_reference_group(
-                    group,
-                    _reference_group_directory(root, index, group),
-                    threshold=threshold,
-                    checksums=checksums,
-                    client=client,
-                )
-            )
-            for index, group in enumerate(groups)
-        )
-        yield references
