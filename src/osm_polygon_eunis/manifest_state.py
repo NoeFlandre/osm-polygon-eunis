@@ -21,7 +21,7 @@ from .publish import (
     _software_provenance,
     verify_dataset,
 )
-from .references import (
+from .reference_staging import (
     _asset_key,
 )
 from .release_plan import (

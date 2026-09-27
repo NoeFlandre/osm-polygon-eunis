@@ -14,6 +14,7 @@ def test_reference_reader_split_is_declared_in_architecture_layers() -> None:
         "raster_reference",
         "geopackage_reference",
         "reference",
+        "reference_staging",
     }
     dependencies = (
         ("reference_geometry", "geopackage_tiles"),
@@ -23,6 +24,14 @@ def test_reference_reader_split_is_declared_in_architecture_layers() -> None:
         ("geopackage_sql", "geopackage_reference"),
         ("raster_reference", "reference"),
         ("geopackage_reference", "reference"),
+        ("_protocols", "reference_staging"),
+        ("eea", "reference_staging"),
+        ("fileio", "reference_staging"),
+        ("geopackage_reference", "reference_staging"),
+        ("options", "reference_staging"),
+        ("raster_reference", "reference_staging"),
+        ("reference_cache", "reference_staging"),
+        ("transform", "reference_staging"),
     )
 
     assert required <= positions.keys()

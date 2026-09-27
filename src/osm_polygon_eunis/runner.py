@@ -4,7 +4,7 @@ from .card_publishing import IntersectionErrorLimitError
 from .geometry_jobs import process_geometry_paths
 from .options import BatchLimits, ReleaseOptions, ShardContext
 from .publish import VerificationError
-from .references import open_reference_group
+from .reference_staging import open_reference_group
 from .release_orchestration import (
     DEFAULT_WORKERS,
     ConfigError,

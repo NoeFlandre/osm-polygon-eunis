@@ -19,7 +19,7 @@ from .eea import EeaGroup
 from .fileio import DOWNLOAD_TIMEOUT
 from .geometry import OVERLAP_KERNEL_VERSION
 from .options import BatchLimits, GeometryPathOptions
-from .references import (
+from .reference_staging import (
     _close_worker_reference_cache,
     _http_client,
     _indexed_reference_group_batches,

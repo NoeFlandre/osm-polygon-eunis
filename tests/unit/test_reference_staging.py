@@ -9,7 +9,7 @@ from typing import cast
 
 import pytest
 
-from osm_polygon_eunis import reference_cache, references
+from osm_polygon_eunis import reference_cache, reference_staging
 from osm_polygon_eunis._protocols import StreamClient
 from osm_polygon_eunis.eea import EeaGroup, RemoteAsset
 
@@ -100,8 +100,8 @@ def test_open_reference_group_reuses_client_for_raster_and_vector(
         return f"sha-{asset.path}"
 
     monkeypatch.setattr(reference_cache, "download_asset", fake_download)
-    monkeypatch.setattr(references, "RasterReference", FakeReference)
-    monkeypatch.setattr(references, "GeoPackageReference", FakeReference)
+    monkeypatch.setattr(reference_staging, "RasterReference", FakeReference)
+    monkeypatch.setattr(reference_staging, "GeoPackageReference", FakeReference)
     client = cast(StreamClient, object())
     checksums: dict[str, str] = {}
     raster_group = EeaGroup(
@@ -123,11 +123,11 @@ def test_open_reference_group_reuses_client_for_raster_and_vector(
         _asset("/habitats.gpkg", code=None),
     )
 
-    with references.open_reference_group(
+    with reference_staging.open_reference_group(
         raster_group, tmp_path / "raster", threshold=0, checksums=checksums, client=client
     ) as reference:
         assert isinstance(reference, FakeReference)
-    with references.open_reference_group(
+    with reference_staging.open_reference_group(
         vector_group, tmp_path / "vector", threshold=1, checksums=checksums, client=client
     ) as reference:
         assert isinstance(reference, FakeReference)
@@ -141,7 +141,7 @@ def test_open_reference_group_reuses_client_for_raster_and_vector(
     empty_group = EeaGroup("empty", "empty", "folder", "service", {}, (), None)
     with (
         pytest.raises(ValueError, match="no reference asset"),
-        references.open_reference_group(
+        reference_staging.open_reference_group(
             empty_group, tmp_path / "empty", threshold=0, client=client
         ),
     ):
@@ -170,8 +170,8 @@ def test_worker_reference_batch_opens_local_groups_once_and_closes_on_exit(
         opened.append(_TrackedReference(*args, **kwargs))
         return opened[-1]
 
-    monkeypatch.setattr(references, "RasterReference", fake_reference)
-    monkeypatch.setattr(references, "GeoPackageReference", fake_reference)
+    monkeypatch.setattr(reference_staging, "RasterReference", fake_reference)
+    monkeypatch.setattr(reference_staging, "GeoPackageReference", fake_reference)
     raster_group = EeaGroup(
         "raster-record", "raster", "folder", "service", {}, (_asset("/Prob_R11.tif"),), None
     )
@@ -186,9 +186,9 @@ def test_worker_reference_batch_opens_local_groups_once_and_closes_on_exit(
     )
     groups = (raster_group, vector_group)
 
-    first = references._worker_reference_batch(groups, tmp_path, 3, start_index=2)
-    second = references._worker_reference_batch(groups, tmp_path, 3, start_index=2)
-    third = references._worker_reference_batch((raster_group,), tmp_path, 3, start_index=4)
+    first = reference_staging._worker_reference_batch(groups, tmp_path, 3, start_index=2)
+    second = reference_staging._worker_reference_batch(groups, tmp_path, 3, start_index=2)
+    third = reference_staging._worker_reference_batch((raster_group,), tmp_path, 3, start_index=4)
 
     assert first is second
     assert first == tuple(opened[:2])
@@ -198,12 +198,12 @@ def test_worker_reference_batch_opens_local_groups_once_and_closes_on_exit(
     ]
     assert opened[0].kwargs == {"threshold": 3}
     assert opened[1].args[0] == tmp_path / "03-vector-r" / "habitats.gpkg"
-    assert len(references._WORKER_REFERENCES) == 1
+    assert len(reference_staging._WORKER_REFERENCES) == 1
     assert all(cast(_TrackedReference, reference).closed for reference in first)
     assert not cast(_TrackedReference, third[0]).closed
-    references._close_worker_reference_cache()
+    reference_staging._close_worker_reference_cache()
     assert all(reference.closed for reference in opened)
-    assert references._WORKER_REFERENCES == {}
+    assert reference_staging._WORKER_REFERENCES == {}
 
 
 def test_worker_reference_batch_closes_opened_groups_on_failure(
@@ -215,24 +215,26 @@ def test_worker_reference_batch_closes_opened_groups_on_failure(
         opened.append(_TrackedReference(*args, **kwargs))
         return opened[-1]
 
-    monkeypatch.setattr(references, "RasterReference", fake_reference)
+    monkeypatch.setattr(reference_staging, "RasterReference", fake_reference)
     raster_group = EeaGroup(
         "raster-record", "raster", "folder", "service", {}, (_asset("/Prob_R11.tif"),), None
     )
     empty_group = EeaGroup("empty", "empty", "folder", "service", {}, (), None)
 
     with pytest.raises(ValueError, match="no reference asset"):
-        references._worker_reference_batch((raster_group, empty_group), tmp_path, 0, start_index=0)
+        reference_staging._worker_reference_batch(
+            (raster_group, empty_group), tmp_path, 0, start_index=0
+        )
 
     assert [reference.closed for reference in opened] == [True]
-    assert references._WORKER_REFERENCES == {}
+    assert reference_staging._WORKER_REFERENCES == {}
 
 
 def test_reference_assets_for_staging_rejects_assetless_group() -> None:
     group = EeaGroup("empty", "empty", "folder", "service", {}, (), None)
 
     with pytest.raises(ValueError, match="no reference asset"):
-        references._reference_assets_for_staging(group)
+        reference_staging._reference_assets_for_staging(group)
 
 
 def test_staged_reference_assets_use_grid_scratch_and_reuse_verified_bytes(
@@ -267,7 +269,7 @@ def test_staged_reference_assets_use_grid_scratch_and_reuse_verified_bytes(
 
     for _ in range(2):
         checksums: dict[str, str] = {}
-        with references._stage_reference_groups(
+        with reference_staging._stage_reference_groups(
             (group,), workdir=workdir, checksums=checksums, client=client
         ) as staged_root:
             staged_asset = staged_root / "00-record" / "R11.tif"
@@ -279,7 +281,9 @@ def test_staged_reference_assets_use_grid_scratch_and_reuse_verified_bytes(
     assert staged_asset.is_file()
 
     staged_asset.write_bytes(b"other")
-    with references._stage_reference_groups((group,), workdir=workdir, checksums={}, client=client):
+    with reference_staging._stage_reference_groups(
+        (group,), workdir=workdir, checksums={}, client=client
+    ):
         pass
 
     assert len(downloads) == 2
@@ -303,8 +307,8 @@ def test_open_reference_group_accepts_optional_checksum_collection(
         def __exit__(self, *_args: object) -> None:
             return None
 
-    monkeypatch.setattr(references, "RasterReference", FakeReference)
-    monkeypatch.setattr(references, "GeoPackageReference", FakeReference)
+    monkeypatch.setattr(reference_staging, "RasterReference", FakeReference)
+    monkeypatch.setattr(reference_staging, "GeoPackageReference", FakeReference)
     monkeypatch.setattr(
         reference_cache,
         "download_asset",
@@ -317,7 +321,7 @@ def test_open_reference_group_accepts_optional_checksum_collection(
             "vector", "vector", "folder", "service", {}, (), _asset("/v.gpkg", code=None)
         )
 
-    with references.open_reference_group(
+    with reference_staging.open_reference_group(
         group,
         tmp_path / kind,
         threshold=0,
@@ -346,7 +350,7 @@ def test_indexed_reference_batches_cover_raster_and_vector_transitions() -> None
         for index in range(2)
     )
 
-    batches = references._indexed_reference_group_batches((*rasters, *vectors))
+    batches = reference_staging._indexed_reference_group_batches((*rasters, *vectors))
 
     assert batches == ((0, rasters[:2]), (2, (rasters[2],)), (3, vectors))
 
@@ -376,7 +380,7 @@ def test_stage_reference_groups_downloads_each_asset_and_cleans_temporary_files(
 
     monkeypatch.setattr(reference_cache, "download_asset", fake_download)
     checksums: dict[str, str] = {}
-    with references._stage_reference_groups(
+    with reference_staging._stage_reference_groups(
         (raster, vector),
         workdir=tmp_path,
         checksums=checksums,

@@ -100,8 +100,6 @@ max-args = 6
 "tests/unit/test_grid5000.py" = ["S108"]
 # Internal type-narrowing invariants, not input validation.
 "src/osm_polygon_eunis/matching.py" = ["S101"]
-"src/osm_polygon_eunis/reference.py" = ["S101"]
-"src/osm_polygon_eunis/references.py" = ["S101"]
 # Keep parameter-list limits enabled for all production modules.
 "scripts/**" = ["T201"]
 "src/osm_polygon_eunis/cli.py" = ["T201"]

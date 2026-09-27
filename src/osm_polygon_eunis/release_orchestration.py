@@ -27,7 +27,7 @@ from .manifest_state import (
 )
 from .options import ReleaseOptions
 from .publish import VerificationError, duplicate_source, target_exists
-from .references import _http_client
+from .reference_staging import _http_client
 from .release_plan import (
     DatasetPlan,
     DatasetReceipt,

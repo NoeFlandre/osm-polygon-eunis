@@ -13,7 +13,7 @@ from typing import cast
 
 import pytest
 
-from osm_polygon_eunis import geometry_jobs, references
+from osm_polygon_eunis import geometry_jobs, reference_staging
 from osm_polygon_eunis._protocols import HubApi, StreamClient
 from osm_polygon_eunis.eea import EeaGroup, RemoteAsset
 from osm_polygon_eunis.options import BatchLimits, GeometryPathOptions
@@ -286,7 +286,7 @@ def test_reference_batches_respect_configured_raster_group_limit() -> None:
         for index in range(3)
     )
 
-    batches = references._reference_group_batches(
+    batches = reference_staging._reference_group_batches(
         groups,
         limits=BatchLimits(raster_groups_per_batch=1),
     )
@@ -377,7 +377,7 @@ def test_process_reference_groups_batches_reference_groups_for_all_plans(
     def fake_process(_api, plan, _source_path, selected_references, options):
         seen.append((plan.spec.name, selected_references, options.http_client))
 
-    monkeypatch.setattr(references, "open_reference_group", fake_open)
+    monkeypatch.setattr(reference_staging, "open_reference_group", fake_open)
     monkeypatch.setattr(geometry_jobs, "_process_geometry_path", fake_process)
     client = cast(StreamClient, object())
     geometry_jobs._process_reference_groups(
