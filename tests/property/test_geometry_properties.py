@@ -13,6 +13,8 @@ from osm_polygon_eunis.domain import EunisResult, OverlapCandidate
 from osm_polygon_eunis.geometry import is_usable, parse_geometry, safe_area, to_equal_area
 from osm_polygon_eunis.matching import choose_winner, prefer_result
 
+_EPSG_3035_TO_WGS84 = Transformer.from_crs("EPSG:3035", "EPSG:4326", always_xy=True)
+
 
 @st.composite
 def _small_boxes(draw: st.DrawFn):
@@ -68,8 +70,7 @@ def test_equal_area_projection_round_trips_small_eea_polygons(polygon: Polygon) 
     assert projected is not None
     assert projected.area > 0.0
 
-    inverse = Transformer.from_crs("EPSG:3035", "EPSG:4326", always_xy=True)
-    restored = transform(inverse.transform, projected)
+    restored = transform(_EPSG_3035_TO_WGS84.transform, projected)
     assert polygon.hausdorff_distance(restored) <= 1e-6
 
 

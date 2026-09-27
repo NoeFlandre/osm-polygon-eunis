@@ -755,6 +755,7 @@ def test_vector_asset_and_group_resolution_fail_closed(monkeypatch) -> None:
 
 
 def test_config_resolution_and_asset_download(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(eea.time, "sleep", lambda _delay: None)
     config_path = tmp_path / "reference.json"
     config_path.write_text(
         json.dumps(
@@ -813,10 +814,13 @@ def test_config_resolution_and_asset_download(monkeypatch, tmp_path: Path) -> No
             assert chunk_size > 0
             yield b"abc"
 
+    calls: list[str] = []
+
     class StreamClient:
         def stream(self, method, url):
             assert method == "GET"
             assert url.endswith("asset.bin")
+            calls.append(method)
             return Response()
 
     asset = RemoteAsset(
@@ -831,6 +835,7 @@ def test_config_resolution_and_asset_download(monkeypatch, tmp_path: Path) -> No
     )
     destination = tmp_path / "nested" / "asset.bin"
     assert download_asset(cast(httpx.Client, StreamClient()), asset, destination)
+    calls.clear()
     with pytest.raises(ValueError, match="byte count"):
         download_asset(
             cast(httpx.Client, StreamClient()),
@@ -846,6 +851,7 @@ def test_config_resolution_and_asset_download(monkeypatch, tmp_path: Path) -> No
             ),
             tmp_path / "bad.bin",
         )
+    assert calls == ["GET"] * eea._HTTP_RETRY_ATTEMPTS
 
 
 def test_webdav_listing_rejects_xml_entity_declarations() -> None:
