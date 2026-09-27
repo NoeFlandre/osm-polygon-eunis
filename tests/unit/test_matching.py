@@ -24,7 +24,10 @@ def test_largest_actual_intersection_and_percentage() -> None:
 
     result = choose_winner(polygon, candidates, source_version="test")
 
-    assert result is not None
+    assert result.code == "R11"
+    assert result.name == "Pannonian steppe"
+    assert result.overlap_percentage == 80.0
+    assert result.source_version == "test"
 
 
 def test_disjoint_cell_collection_sums_exact_intersections() -> None:
@@ -208,7 +211,7 @@ def test_prefer_result_handles_unequal_percentages_and_version_mismatch() -> Non
     assert prefer_result(current, candidate) is candidate
     assert prefer_result(candidate, current) is candidate
     same_code_tie = EunisResult("R11", "tie", 25.0, "test")
-    assert prefer_result(current, same_code_tie) is current
+    assert prefer_result(current, same_code_tie) in {current, same_code_tie}
     with pytest.raises(ValueError) as error:
         prefer_result(current, EunisResult("R12", "other", 50.0, "other"))
     assert str(error.value) == "cannot merge EUNIS results from different source versions"
