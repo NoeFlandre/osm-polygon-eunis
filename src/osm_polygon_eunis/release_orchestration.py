@@ -87,6 +87,16 @@ def validate_reference_config(config_path: Path) -> None:
 
 
 def _settings(config_path: Path) -> _ReferenceSettings:
+    config = _read_config_document(config_path)
+    try:
+        if not isinstance(config, Mapping):
+            raise SchemaError("reference config must be an object")
+        return _validated_settings(cast(Mapping[str, object], config))
+    except ValueError as error:
+        raise ConfigError(f"{config_path}: {error}") from error
+
+
+def _read_config_document(config_path: Path) -> object:
     if not config_path.is_file():
         raise ConfigError(f"reference config not found: {config_path}")
     try:
@@ -94,15 +104,9 @@ def _settings(config_path: Path) -> _ReferenceSettings:
     except (OSError, UnicodeError) as error:
         raise ConfigError(f"reference config cannot be read: {config_path}: {error}") from error
     try:
-        config = json.loads(contents)
+        return json.loads(contents)
     except json.JSONDecodeError as error:
         raise ConfigError(f"reference config is not valid JSON: {config_path}: {error}") from error
-    try:
-        if not isinstance(config, Mapping):
-            raise SchemaError("reference config must be an object")
-        return _validated_settings(cast(Mapping[str, object], config))
-    except ValueError as error:
-        raise ConfigError(f"{config_path}: {error}") from error
 
 
 def _validated_settings(config: Mapping[str, object]) -> _ReferenceSettings:
