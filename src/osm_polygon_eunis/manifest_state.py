@@ -18,6 +18,7 @@ from .publish import (
     ShardExpectation,
     VerificationError,
     VerificationReceipt,
+    _software_provenance,
     verify_dataset,
 )
 from .references import (
@@ -115,6 +116,7 @@ def _manifest_matches_inputs(
             manifest.get("target_repo") == plan.spec.output_repo,
             manifest.get("source_revision") == plan.source_revision,
             manifest.get("source_paths") == list(plan.source_files),
+            manifest.get("software") == _software_provenance(),
             _reference_identity(_mapping_field(manifest, "reference"))
             == _reference_identity(reference),
         )

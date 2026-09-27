@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
+import shutil
+import subprocess
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from importlib.metadata import version
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -18,7 +23,7 @@ from ._protocols import HubApi, StreamClient
 from .fileio import sha256_file
 from .sources import capture_revision, download_to_temp
 
-MANIFEST_VERSION = 4
+MANIFEST_VERSION = 5
 
 
 class VerificationError(ValueError):
@@ -172,6 +177,52 @@ def _manifest_geometry_policy(
     return dict(policy) if isinstance(policy, Mapping) else None
 
 
+def _software_provenance() -> dict[str, str]:
+    """Return the installed package version and the best available source commit."""
+
+    commit = _environment_source_commit() or _git_source_commit()
+    return {
+        "name": "osm-polygon-eunis",
+        "version": version("osm-polygon-eunis"),
+        "commit": _validated_source_commit(commit),
+    }
+
+
+def _environment_source_commit() -> str | None:
+    for name in ("EUNIS_SOURCE_COMMIT", "GRID5000_SOURCE_REVISION", "GITHUB_SHA"):
+        commit = os.environ.get(name)
+        if commit:
+            return commit
+    return None
+
+
+def _git_source_commit() -> str | None:
+    git = shutil.which("git")
+    if git is None:
+        return None
+    try:
+        result = subprocess.run(  # noqa: S603 - resolved Git executable and fixed arguments
+            (git, "rev-parse", "HEAD"),
+            cwd=Path(__file__).resolve().parents[2],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def _validated_source_commit(commit: str | None) -> str:
+    if commit is None:
+        raise ValueError("source commit unavailable; set EUNIS_SOURCE_COMMIT to a full commit SHA")
+    if re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", commit) is None:
+        raise ValueError("source commit must be a 40- or 64-character hexadecimal SHA")
+    return commit.lower()
+
+
 def build_manifest(options: ManifestBuildOptions) -> dict[str, Any]:
     """Build a stable manifest that makes source conservation explicit."""
 
@@ -191,6 +242,7 @@ def build_manifest(options: ManifestBuildOptions) -> dict[str, Any]:
         "shared_paths": sorted(set(source) - set(changed)),
         "rows_by_path": {path: options.rows_by_path[path] for path in sorted(options.rows_by_path)},
         "schema_by_path": {path: schemas[path] for path in sorted(schemas)},
+        "software": _software_provenance(),
         "reference": dict(options.reference_manifest),
         "geometry_policy": _manifest_geometry_policy(options.card_manifest),
         "card": dict(options.card_manifest) if options.card_manifest is not None else None,

@@ -33,6 +33,7 @@ def _plan() -> DatasetPlan:
 def _matching_manifest(plan: DatasetPlan) -> dict[str, object]:
     return {
         "manifest_version": manifest_state.MANIFEST_VERSION,
+        "software": manifest_state._software_provenance(),
         "source_repo": plan.spec.source_repo,
         "target_repo": plan.spec.output_repo,
         "source_revision": plan.source_revision,
@@ -118,7 +119,8 @@ def test_run_release_verifies_matching_manifests_without_processing(
     )
     reference = {"source_version": "EEA-test", "crs": "EPSG:3035", "threshold": 0}
     manifest = {
-        "manifest_version": 4,
+        "manifest_version": manifest_state.MANIFEST_VERSION,
+        "software": manifest_state._software_provenance(),
         "source_repo": "source",
         "target_repo": "target",
         "source_revision": "source-revision",
@@ -190,6 +192,7 @@ def test_no_op_manifest_helpers_validate_and_load_pinned_state(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
+    monkeypatch.setenv("EUNIS_SOURCE_COMMIT", "a" * 40)
     plan = DatasetPlan(
         DatasetSpec("website", "source", "target", "polygons/*.parquet"),
         "source-revision",
@@ -199,7 +202,8 @@ def test_no_op_manifest_helpers_validate_and_load_pinned_state(
     )
     reference = {"assets": [{"code": "R11", "sha256": "downloaded"}]}
     manifest = {
-        "manifest_version": 4,
+        "manifest_version": manifest_state.MANIFEST_VERSION,
+        "software": manifest_state._software_provenance(),
         "source_repo": "source",
         "target_repo": "target",
         "source_revision": "source-revision",
@@ -223,7 +227,18 @@ def test_no_op_manifest_helpers_validate_and_load_pinned_state(
     assert manifest_state._manifest_matches_inputs(plan, manifest, {"assets": [{"code": "R11"}]})
     assert not manifest_state._manifest_matches_inputs(
         plan,
+        {**manifest, "manifest_version": 4},
+        {"assets": [{"code": "R11"}]},
+    )
+    assert not manifest_state._manifest_matches_inputs(
+        plan,
         {**manifest, "source_revision": "different"},
+        {"assets": [{"code": "R11"}]},
+    )
+    monkeypatch.setenv("EUNIS_SOURCE_COMMIT", "b" * 40)
+    assert not manifest_state._manifest_matches_inputs(
+        plan,
+        manifest,
         {"assets": [{"code": "R11"}]},
     )
     assert manifest_state._manifest_expectations(manifest) == (

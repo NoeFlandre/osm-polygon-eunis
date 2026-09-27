@@ -79,6 +79,71 @@ def test_manifest_is_deterministic_and_contains_source_conservation() -> None:
     assert json.dumps(manifest, sort_keys=True, separators=(",", ":")) == encoded
 
 
+def test_manifest_records_software_provenance(monkeypatch) -> None:
+    source_commit = "0123456789abcdef0123456789abcdef01234567"
+    monkeypatch.setenv("EUNIS_SOURCE_COMMIT", source_commit)
+
+    manifest = build_manifest(
+        ManifestBuildOptions(
+            source_repo="org/source",
+            target_repo="org/target",
+            source_revision="abc",
+            source_paths=("polygons/a.parquet",),
+            changed_paths=("polygons/a.parquet",),
+            reference_manifest={"version": "EEA-test"},
+            rows_by_path={"polygons/a.parquet": 1},
+        )
+    )
+
+    assert manifest["manifest_version"] == 5
+    assert manifest["software"] == {
+        "name": "osm-polygon-eunis",
+        "version": "0.1.0",
+        "commit": source_commit,
+    }
+
+
+def test_manifest_rejects_invalid_source_commit(monkeypatch) -> None:
+    monkeypatch.setenv("EUNIS_SOURCE_COMMIT", "not-a-commit")
+
+    with pytest.raises(ValueError, match="40- or 64-character hexadecimal SHA"):
+        publish._software_provenance()
+
+
+def test_manifest_uses_git_commit_when_environment_is_empty(monkeypatch) -> None:
+    source_commit = "abcdef0123456789abcdef0123456789abcdef01"
+    for name in ("EUNIS_SOURCE_COMMIT", "GRID5000_SOURCE_REVISION", "GITHUB_SHA"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(publish.shutil, "which", lambda _name: "/usr/bin/git")
+    monkeypatch.setattr(
+        publish.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=f"{source_commit}\n"),
+    )
+
+    assert publish._software_provenance()["commit"] == source_commit
+
+
+@pytest.mark.parametrize("git_path", (None, "/usr/bin/git"), ids=("git-not-found", "git-failed"))
+def test_manifest_requires_source_commit(monkeypatch, git_path: str | None) -> None:
+    for name in ("EUNIS_SOURCE_COMMIT", "GRID5000_SOURCE_REVISION", "GITHUB_SHA"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(
+        publish.shutil,
+        "which",
+        lambda _name: git_path,
+    )
+    if git_path is not None:
+        monkeypatch.setattr(
+            publish.subprocess,
+            "run",
+            lambda *_args, **_kwargs: SimpleNamespace(returncode=128, stdout=""),
+        )
+
+    with pytest.raises(ValueError, match="source commit unavailable"):
+        publish._software_provenance()
+
+
 def test_manifest_records_added_card_artifacts() -> None:
     manifest = build_manifest(
         ManifestBuildOptions(
@@ -98,7 +163,7 @@ def test_manifest_records_added_card_artifacts() -> None:
         )
     )
 
-    assert manifest["manifest_version"] == 4
+    assert manifest["manifest_version"] == 5
     assert manifest["added_paths"] == ["eunis/world-map.svg"]
     assert manifest["shared_paths"] == []
     assert manifest["schema_by_path"] == {"polygons/a.parquet": "schema"}

@@ -55,7 +55,7 @@ def test_contributor_quality_task_is_shared_by_pre_commit_and_ci() -> None:
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
     qa_workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "qa.yml").read_text())
     pre_commit = yaml.safe_load((ROOT / ".pre-commit-config.yaml").read_text())
-    hooks = pre_commit["repos"][0]["hooks"]
+    hooks = [hook for repository in pre_commit["repos"] for hook in repository["hooks"]]
 
     assert (
         "quality: lint format-check typecheck test architecture crap vulture smoke docs" in makefile
@@ -64,7 +64,14 @@ def test_contributor_quality_task_is_shared_by_pre_commit_and_ci() -> None:
         step.get("run", "") for step in qa_workflow["jobs"]["deterministic-quality"]["steps"]
     ]
     assert "make quality" in quality_steps
-    assert {hook["id"] for hook in hooks} == {"ruff", "ruff-format", "ty"}
+    assert {hook["id"] for hook in hooks} == {
+        "check-added-large-files",
+        "check-yaml",
+        "end-of-file-fixer",
+        "ruff",
+        "ruff-format",
+        "ty",
+    }
     assert (ROOT / "CONTRIBUTING.md").is_file()
     assert (ROOT / ".github" / "ISSUE_TEMPLATE" / "bug_report.yml").is_file()
     assert (ROOT / ".github" / "ISSUE_TEMPLATE" / "feature_request.yml").is_file()

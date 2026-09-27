@@ -125,6 +125,9 @@ attribution and share-alike requirements. EEA datasets can carry item-specific
 reuse terms; check the notice attached to the exact reference asset and the
 [EEA legal notice](https://www.eea.europa.eu/en/legal-notice). The generated
 manifest records the source revisions and EEA asset metadata used for a run.
+It also records the package version and source commit that produced the labels;
+the Grid'5000 runner supplies its submitted commit SHA to this field. Releases
+from an installed artifact must set `EUNIS_SOURCE_COMMIT` to its full Git SHA.
 
 ## Citation
 

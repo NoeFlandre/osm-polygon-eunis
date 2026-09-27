@@ -85,6 +85,7 @@ def _reference_for(config: Path) -> dict[str, object]:
 def _manifest_for(plan: DatasetPlan, reference: dict[str, object]) -> dict[str, object]:
     return {
         "manifest_version": manifest_state.MANIFEST_VERSION,
+        "software": manifest_state._software_provenance(),
         "source_repo": plan.spec.source_repo,
         "target_repo": plan.spec.output_repo,
         "source_revision": plan.source_revision,

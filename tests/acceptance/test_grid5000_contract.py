@@ -30,6 +30,11 @@ def test_production_contract_is_grid5000_all_source_and_site_neutral() -> None:
     assert "all three" in readme
     assert "--dataset" not in worker
     assert '--receipt "$release_receipt"' in worker
+    assert (
+        worker.index('source_commit="$GRID5000_SOURCE_REVISION"')
+        < worker.index('export EUNIS_SOURCE_COMMIT="$source_commit"')
+        < worker.index("uv run --frozen --no-dev osm-polygon-eunis release")
+    )
     for field in (
         '"site": site',
         '"frontend": frontend',
