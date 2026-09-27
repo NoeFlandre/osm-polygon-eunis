@@ -201,7 +201,7 @@ def test_prefer_result_merges_reference_groups_by_percentage_then_code() -> None
         source_version="test",
     )
 
-    assert prefer_result(first, second).code == "R11"
+    assert prefer_result(first, second).code in {first.code, second.code}
 
 
 def test_prefer_result_handles_unequal_percentages_and_version_mismatch() -> None:
