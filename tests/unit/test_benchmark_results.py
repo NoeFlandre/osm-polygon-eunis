@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
+from benchmarks.test_synthetic_performance import _update_sidecar_compatibly
 from scripts.compare_benchmark_results import compare_results
 
 
@@ -22,6 +25,37 @@ def _results(value: float) -> dict[str, Any]:
             "geopackage_result_count": 1000,
         },
     }
+
+
+def test_sidecar_benchmark_call_supports_legacy_public_signature() -> None:
+    seen: list[tuple[object, ...]] = []
+
+    def update(source, destination, *, reference, batch_size):
+        seen.append((source, destination, reference, batch_size))
+        return 12
+
+    module = SimpleNamespace(update_label_sidecar=update)
+    reference = object()
+
+    result = _update_sidecar_compatibly(module, Path("source"), Path("output"), reference, 128)
+
+    assert result == 12
+    assert seen == [(Path("source"), Path("output"), reference, 128)]
+
+
+def test_sidecar_benchmark_call_supports_options_public_signature() -> None:
+    def update(_source, _destination, options):
+        return options
+
+    module = SimpleNamespace(
+        SidecarUpdateOptions=lambda **values: values,
+        update_label_sidecar=update,
+    )
+    reference = object()
+
+    result = _update_sidecar_compatibly(module, Path("source"), Path("output"), reference, 128)
+
+    assert result == {"reference": reference, "batch_size": 128}
 
 
 def test_compare_results_accepts_measurements_within_the_regression_budget() -> None:

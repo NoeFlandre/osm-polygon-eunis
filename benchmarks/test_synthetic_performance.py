@@ -26,9 +26,9 @@ from shapely.geometry import GeometryCollection, Point, shape
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import transform as transform_geometry
 
+from osm_polygon_eunis import transform as transform_module
 from osm_polygon_eunis.domain import EunisResult
 from osm_polygon_eunis.reference import GeoPackageReference, RasterLayer, RasterReference
-from osm_polygon_eunis.transform import SidecarUpdateOptions, update_label_sidecar
 
 _SEED = 20260926
 _RASTER_LAYERS = 10
@@ -189,6 +189,27 @@ def _signature(result: EunisResult) -> tuple[object, ...]:
     )
 
 
+def _update_sidecar_compatibly(
+    module: Any,
+    source: Path,
+    destination: Path,
+    reference: Any,
+    batch_size: int,
+) -> Any:
+    """Call the sidecar updater across the pre-options and options APIs."""
+
+    options_factory = getattr(module, "SidecarUpdateOptions", None)
+    if options_factory is None:
+        return module.update_label_sidecar(
+            source,
+            destination,
+            reference=reference,
+            batch_size=batch_size,
+        )
+    options = options_factory(reference=reference, batch_size=batch_size)
+    return module.update_label_sidecar(source, destination, options)
+
+
 def _measure_raster_order(
     case: SyntheticCase,
     order: tuple[int, ...],
@@ -284,10 +305,12 @@ def test_update_label_sidecar_benchmark(
     reference = RasterReference(synthetic_case.layers)
     started = time.perf_counter()
     with reference:
-        rows = update_label_sidecar(
+        rows = _update_sidecar_compatibly(
+            transform_module,
             synthetic_case.source_parquet,
             destination,
-            SidecarUpdateOptions(batch_size=256, reference=reference),
+            reference,
+            batch_size=256,
         )
     seconds = time.perf_counter() - started
     assert rows == len(synthetic_case.polygons)
