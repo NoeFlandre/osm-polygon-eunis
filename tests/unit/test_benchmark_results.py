@@ -73,8 +73,8 @@ def test_compare_results_reports_tile_cache_miss_rates(capsys) -> None:
     candidate = _results(10.0)
     candidate["metrics"].update(
         {
-            "raster_random_cache_miss_rate": 0.478,
-            "raster_spatial_cache_miss_rate": 0.312,
+            "raster_random_cache_miss_rate": 0.278,
+            "raster_spatial_cache_miss_rate": 0.212,
             "sidecar_cache_miss_rate": 0.25,
         }
     )
@@ -82,9 +82,18 @@ def test_compare_results_reports_tile_cache_miss_rates(capsys) -> None:
     assert compare_results(_results(10.0), candidate) == []
 
     output = capsys.readouterr().out
-    assert "raster_random_cache_miss_rate: candidate=47.8%" in output
-    assert "raster_spatial_cache_miss_rate: candidate=31.2%" in output
+    assert "raster_random_cache_miss_rate: candidate=27.8%" in output
+    assert "raster_spatial_cache_miss_rate: candidate=21.2%" in output
     assert "sidecar_cache_miss_rate: candidate=25.0%" in output
+
+
+def test_compare_results_rejects_tile_cache_miss_rate_above_target() -> None:
+    candidate = _results(10.0)
+    candidate["metrics"]["raster_random_cache_miss_rate"] = 0.478  # type: ignore[index]
+
+    errors = compare_results(_results(10.0), candidate)
+
+    assert errors == ["raster_random_cache_miss_rate is 47.8%, above the 30.0% limit"]
 
 
 def test_compare_results_rejects_invalid_tile_cache_miss_rates() -> None:

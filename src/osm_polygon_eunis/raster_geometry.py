@@ -15,7 +15,9 @@ from shapely.geometry.base import BaseGeometry
 
 from .reference_geometry import _geometry_collection
 
-_RASTER_TILE_SIZE = 64
+# 128-pixel cache windows meet the synthetic overlap miss-rate budget with
+# less polygonisation overhead than 256-pixel windows.
+_RASTER_TILE_SIZE = 128
 _CACHE_ENTRY_OVERHEAD_BYTES = 256
 _CACHE_GEOMETRY_SIZE_MULTIPLIER = 2
 EPSG_LAEA_EUROPE = 3035

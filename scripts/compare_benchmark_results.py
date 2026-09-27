@@ -22,6 +22,7 @@ _CACHE_MISS_METRICS = (
     "raster_spatial_cache_miss_rate",
     "sidecar_cache_miss_rate",
 )
+_MAX_CACHE_MISS_RATE = 0.30
 
 
 def compare_results(
@@ -59,6 +60,8 @@ def _report_cache_miss_rates(metrics: dict[str, Any]) -> list[str]:
             errors.append(f"candidate has no valid measurement for {name}")
             continue
         print(f"{name}: candidate={value:.1%}")
+        if value > _MAX_CACHE_MISS_RATE:
+            errors.append(f"{name} is {value:.1%}, above the {_MAX_CACHE_MISS_RATE:.1%} limit")
     return errors
 
 
