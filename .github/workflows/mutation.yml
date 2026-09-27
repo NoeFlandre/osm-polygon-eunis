@@ -33,6 +33,7 @@ jobs:
         run: |
           uv run mutmut export-cicd-stats
           uv run mutmut results --all true > mutation-results.txt
+          cat mutation-results.txt
           uv run python scripts/check_mutation.py
       - name: Preserve mutation report
         if: always()
