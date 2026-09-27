@@ -18,20 +18,18 @@ jobs:
   deterministic-quality:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           enable-cache: true
+          python-version: ${{ matrix.python-version }}
       - run: uv sync --locked --group dev
-      - run: uv run ruff check src tests scripts
-      - run: uv run ruff format --check src tests scripts
-      - run: uv run ty check src tests scripts
-      - run: uv run pytest --cov --cov-report=json --cov-report=term-missing
-      - run: uv run python scripts/check_architecture.py
-      - run: uv run python scripts/check_crap.py
-      - run: uv run python scripts/smoke.py
-      - run: uv run mutmut run
+      - run: make quality
 
   build:
     runs-on: ubuntu-latest
@@ -44,8 +42,26 @@ jobs:
       - run: uv build
       - name: Smoke-install the wheel in an isolated environment
         run: uv run --isolated --no-project --with dist/*.whl osm-polygon-eunis --help
+      - name: Verify the installed wheel includes the default EEA config
+        working-directory: ${{ runner.temp }}
+        run: >-
+          uv run --isolated --no-project --with "$GITHUB_WORKSPACE"/dist/*.whl
+          python -c 'from osm_polygon_eunis.cli import _default_reference_config; assert
+          _default_reference_config().is_file()'
       - run: uv sync --locked --group dev
       - run: uv run mkdocs build --strict
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build the runtime image
+        run: docker build --tag osm-polygon-eunis:ci .
+      - name: Check the CLI as the image's non-root user
+        run: |
+          docker run --rm osm-polygon-eunis:ci --help
+          docker run --rm osm-polygon-eunis:ci plan --help
 
   security:
     runs-on: ubuntu-latest
@@ -61,7 +77,7 @@ jobs:
   # Single required check for branch protection.
   qa-ok:
     if: always()
-    needs: [deterministic-quality, build, security]
+    needs: [deterministic-quality, build, docker, security]
     runs-on: ubuntu-latest
     steps:
       - name: Fail unless every QA job succeeded

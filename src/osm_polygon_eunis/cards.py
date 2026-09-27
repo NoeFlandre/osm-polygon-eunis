@@ -8,9 +8,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from shapely.geometry.base import BaseGeometry
+
 from .domain import EunisResult
 from .fileio import sha256_file
-from .geometry import parse_geometry
+from .geometry import GEOMETRY_POLICY, has_antimeridian_span, parse_geometry
 
 _CELL_SIZE = 2.0
 _MAX_CELL_SIZE = 180.0
@@ -145,6 +147,14 @@ class DatasetCardAccumulator:
     """Collect label counts and bounded map bins while shards stream past."""
 
     def __init__(self, *, cell_size: float = _CELL_SIZE) -> None:
+        """Create a card accumulator with the requested map-bin size.
+
+        Args:
+            cell_size: Maximum longitude/latitude width of each map bin in degrees.
+
+        Raises:
+            ValueError: If the size is not in the supported range.
+        """
         if cell_size <= 0.0 or cell_size > _MAX_CELL_SIZE:
             raise ValueError("cell_size must be in (0, 180]")
         self.cell_size = cell_size
@@ -157,11 +167,12 @@ class DatasetCardAccumulator:
 
     @property
     def total_rows(self) -> int:
+        """Return the number of rows observed for the current dataset."""
         return self._total_rows
 
     @property
     def invalid_geometries(self) -> int:
-        """Rows whose geometry value is present but cannot be decoded or repaired."""
+        """Rows with present geometry that is not a usable areal geometry."""
 
         return self._invalid_geometries
 
@@ -194,18 +205,14 @@ class DatasetCardAccumulator:
 
     def _record_map_bin(self, code: str | None, raw_geometry: object) -> None:
         geometry = parse_geometry(raw_geometry)
-        if geometry is None:
+        if geometry is None or has_antimeridian_span(geometry):
             if raw_geometry is not None:
                 self._invalid_geometries += 1
             return
-        point = geometry.representative_point()
-        longitude = float(point.x)
-        latitude = float(point.y)
-        if not (_LON_MIN <= longitude <= _LON_MAX and _LAT_MIN <= latitude <= _LAT_MAX):
+        indices = _map_cell_coordinates(geometry, self.cell_size)
+        if indices is None:
             return
-        longitude_index = _coordinate_index(longitude, _LON_MIN, _LON_MAX, self.cell_size)
-        latitude_index = _coordinate_index(latitude, _LAT_MIN, _LAT_MAX, self.cell_size)
-        key = (code, longitude_index, latitude_index)
+        key = (code, *indices)
         self._bins[key] = self._bins.get(key, 0) + 1
 
     def summaries(self) -> tuple[LabelSummary, ...]:
@@ -265,6 +272,7 @@ class DatasetCardAccumulator:
             "total_rows": self._total_rows,
             "invalid_geometries": self._invalid_geometries,
             "intersection_errors": self._intersection_errors,
+            "geometry_policy": dict(GEOMETRY_POLICY),
             "label_distribution": [
                 {
                     "code": summary.code,
@@ -326,8 +334,13 @@ class DatasetCardAccumulator:
                 "",
                 "EUNIS labels are selected by the largest actual polygon intersection "
                 "area after transforming geometries to EPSG:3035. Bounding boxes are "
-                "used only to prune candidates. Empty, invalid, and out-of-reference "
-                "polygons receive null EUNIS fields.",
+                "used only to prune candidates. Polygon and multipolygon inputs are "
+                "accepted; polygon parts of mixed geometry collections are retained. "
+                "WGS84 edges are densified to at most "
+                f"{GEOMETRY_POLICY['wgs84_max_segment_length_degrees']} degrees before "
+                "projection. Polygons spanning more than 180 degrees of longitude, "
+                "collapsed polygons, and non-areal geometries are rejected and counted "
+                "as invalid. Out-of-reference polygons receive null EUNIS fields.",
                 "",
                 f"Source: `{source_repo}` at `{source_revision}`.",
                 f"Output: `{target_repo}`.",
@@ -395,6 +408,18 @@ class DatasetCardAccumulator:
 def _coordinate_index(value: float, lower: float, upper: float, cell_size: float) -> int:
     cells = max(1, math.ceil((upper - lower) / cell_size))
     return min(cells - 1, max(0, math.floor((value - lower) / cell_size)))
+
+
+def _map_cell_coordinates(geometry: BaseGeometry, cell_size: float) -> tuple[int, int] | None:
+    point = geometry.representative_point()
+    longitude = float(point.x)
+    latitude = float(point.y)
+    if not (_LON_MIN <= longitude <= _LON_MAX and _LAT_MIN <= latitude <= _LAT_MAX):
+        return None
+    return (
+        _coordinate_index(longitude, _LON_MIN, _LON_MAX, cell_size),
+        _coordinate_index(latitude, _LAT_MIN, _LAT_MAX, cell_size),
+    )
 
 
 def _label_identity(result: EunisResult) -> tuple[str | None, str]:

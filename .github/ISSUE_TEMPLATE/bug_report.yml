@@ -1,0 +1,31 @@
+name: Bug report
+description: Report an incorrect result or a reproducible failure.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+      description: Include the command, error, and relevant non-secret log excerpt.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: input
+    id: revision
+    attributes:
+      label: Source revision or release version
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Provide a small geometry or fixture when possible. Do not upload credentials or licensed data.
+    validations:
+      required: true

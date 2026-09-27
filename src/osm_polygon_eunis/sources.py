@@ -17,6 +17,14 @@ from ._protocols import InventoryApi as _InventoryApi
 from ._protocols import StreamClient as _StreamClient
 from .fileio import DOWNLOAD_TIMEOUT, write_chunks
 
+__all__ = [
+    "DatasetSpec",
+    "capture_revision",
+    "dataset_spec",
+    "list_parquet_files",
+    "list_repo_files",
+]
+
 
 @dataclass(frozen=True, slots=True)
 class DatasetSpec:
@@ -72,7 +80,19 @@ def capture_revision(api: _InventoryApi, repo_id: str) -> str:
 
 
 def list_parquet_files(api: _InventoryApi, repo_id: str, revision: str) -> tuple[str, ...]:
-    """List remote Parquet files in deterministic order."""
+    """List Parquet files at an immutable Hub revision in sorted order.
+
+    Parameters:
+        api: Hub inventory client.
+        repo_id: Dataset repository identifier in ``owner/name`` form.
+        revision: Immutable Hub commit SHA to inspect.
+
+    Returns:
+        Paths for every Parquet file at ``revision`` in lexical order.
+
+    Raises:
+        huggingface_hub.HfHubHTTPError: If the repository or revision cannot be read.
+    """
 
     entries = api.list_repo_tree(
         repo_id,

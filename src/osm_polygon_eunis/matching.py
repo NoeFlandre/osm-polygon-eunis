@@ -1,5 +1,6 @@
 """Pure deterministic selection of the largest actual geometry overlap."""
 
+import logging
 from collections.abc import Callable, Iterable
 from typing import TypeGuard
 
@@ -10,6 +11,8 @@ from shapely.geometry.base import BaseGeometry
 
 from .domain import EunisResult, OverlapCandidate
 from .geometry import is_usable
+
+logger = logging.getLogger(__name__)
 
 
 def _ignore_error() -> None:
@@ -69,7 +72,12 @@ def _intersection_area(
         return None
     try:
         area = _exact_intersection_area(polygon, candidate)
-    except (ValueError, RuntimeError):
+    except (ValueError, RuntimeError) as error:
+        logger.warning(
+            "skipping EUNIS candidate %s after intersection error: %s",
+            candidate.code,
+            error,
+        )
         on_error()
         return None
     return area if area > 0.0 else None

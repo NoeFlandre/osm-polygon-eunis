@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Iterator, Mapping
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
+from multiprocessing import get_context
 from pathlib import Path
+from typing import cast
 
 import httpx
 from huggingface_hub import HfApi
@@ -13,12 +17,14 @@ from huggingface_hub import HfApi
 from ._protocols import HubApi, StreamClient
 from .eea import EeaGroup
 from .fileio import DOWNLOAD_TIMEOUT
+from .geometry import OVERLAP_KERNEL_VERSION
+from .options import BatchLimits, GeometryPathOptions
 from .references import (
+    _close_worker_reference_cache,
     _http_client,
     _indexed_reference_group_batches,
     _open_reference_batch,
     _reference_group_batches,
-    _stage_reference_batch,
     _stage_reference_groups,
     _worker_reference_batch,
 )
@@ -33,13 +39,11 @@ from .sources import (
 )
 from .transform import (
     OverlapReference,
+    SidecarUpdateOptions,
     update_label_sidecar,
 )
 
-_SOURCE_MICRO_BATCH_SIZE = 128
-
-
-_GEOMETRY_TASKS_PER_WORKER = 4
+_DEFAULT_BATCH_LIMITS = BatchLimits()
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,9 +57,39 @@ class _GeometryChunk:
     sidecar_root: Path
     source_root: Path
     threshold: int
-    batch_size: int
+    limits: BatchLimits
     endpoint: str
     token: str | bool | None
+    reference_signature: str
+
+
+@dataclass(frozen=True, slots=True)
+class _GeometryRunOptions:
+    """Shared inputs for processing every geometry shard in one release."""
+
+    api: HubApi
+    plans: tuple[DatasetPlan, ...]
+    groups: tuple[EeaGroup, ...]
+    sidecar_root: Path
+    source_root: Path
+    workdir: Path
+    threshold: int
+    checksums: dict[str, str]
+    limits: BatchLimits
+    progress: Progress | None
+    http_client: StreamClient
+
+
+@dataclass(frozen=True, slots=True)
+class _GeometryWorker:
+    """Per-process state shared by a bounded set of geometry jobs."""
+
+    chunk: _GeometryChunk
+    plans: Mapping[str, DatasetPlan]
+    api: HubApi
+    reference_batches: tuple[tuple[int, tuple[EeaGroup, ...]], ...]
+    batch_indexes: set[int]
+    client: StreamClient
 
 
 def process_geometry_paths(
@@ -63,68 +97,66 @@ def process_geometry_paths(
     plan: DatasetPlan,
     *,
     reference: OverlapReference,
-    sidecar_root: Path,
-    source_root: Path,
-    batch_size: int,
-    progress: Progress | None = None,
-    http_client: StreamClient | None = None,
-    retain_source: bool = False,
+    options: GeometryPathOptions,
 ) -> None:
     """Merge one reference group into every geometry shard's compact sidecar."""
 
-    with _http_client(http_client) as reusable_client:
-        source_root.mkdir(parents=True, exist_ok=True)
+    with _http_client(options.http_client) as reusable_client:
+        options.source_root.mkdir(parents=True, exist_ok=True)
         for source_path in plan.geometry_paths:
             _process_geometry_path(
                 api,
                 plan,
-                source_path=source_path,
-                references=(reference,),
-                sidecar_root=sidecar_root,
-                source_root=source_root,
-                batch_size=batch_size,
-                progress=progress,
-                http_client=reusable_client,
-                retain_source=retain_source,
+                source_path,
+                (reference,),
+                GeometryPathOptions(
+                    sidecar_root=options.sidecar_root,
+                    source_root=options.source_root,
+                    limits=options.limits,
+                    progress=options.progress,
+                    http_client=reusable_client,
+                    retain_source=options.retain_source,
+                    reset_sidecar=options.reset_sidecar,
+                ),
             )
 
 
 def _process_geometry_path(
     api: HubApi,
     plan: DatasetPlan,
-    *,
     source_path: str,
     references: tuple[OverlapReference, ...],
-    sidecar_root: Path,
-    source_root: Path,
-    batch_size: int,
-    progress: Progress | None,
-    http_client: StreamClient,
-    retain_source: bool,
+    options: GeometryPathOptions,
 ) -> None:
     local_source = _download_geometry_source(
         api,
         plan,
         source_path,
-        source_root,
-        retain_source=retain_source,
-        client=http_client,
+        options.source_root,
+        retain_source=options.retain_source,
+        client=options.http_client,
     )
-    sidecar = _sidecar_path(sidecar_root, plan.spec, source_path)
+    sidecar = _sidecar_path(options.sidecar_root, plan.spec, source_path)
     sidecar.parent.mkdir(parents=True, exist_ok=True)
-    next_sidecar = sidecar.with_name(f"{sidecar.name}.next")
+    # Keep any pre-existing .next file as recovery evidence. This fresh staging
+    # path is consumed atomically after a complete sidecar pass.
+    next_sidecar = sidecar.with_name(f"{sidecar.name}.merge.next")
     update_label_sidecar(
         local_source,
         next_sidecar,
-        references=references,
-        current=sidecar if sidecar.is_file() else None,
-        batch_size=batch_size,
+        SidecarUpdateOptions(
+            batch_size=options.limits.parquet_batch_size,
+            references=references,
+            current=sidecar if sidecar.is_file() and not options.reset_sidecar else None,
+        ),
     )
     next_sidecar.replace(sidecar)
-    if not retain_source:
+    if not options.retain_source:
         local_source.unlink(missing_ok=True)
-    if progress is not None:
-        progress({"event": "sidecar_updated", "dataset": plan.spec.name, "path": source_path})
+    if options.progress is not None:
+        options.progress(
+            {"event": "sidecar_updated", "dataset": plan.spec.name, "path": source_path}
+        )
 
 
 def _download_geometry_source(
@@ -150,170 +182,69 @@ def _download_geometry_source(
     )
 
 
-def _process_reference_groups(
-    api: HubApi,
-    plans: tuple[DatasetPlan, ...],
-    groups: tuple[EeaGroup, ...],
-    *,
-    sidecar_root: Path,
-    source_root: Path,
-    workdir: Path,
-    threshold: int,
-    checksums: dict[str, str],
-    batch_size: int,
-    progress: Progress | None,
-    http_client: StreamClient,
-    parallelism: int = 1,
-) -> None:
+def _process_reference_groups(options: _GeometryRunOptions) -> None:
     """Process bounded reference batches with resumable compact sidecars."""
 
-    if parallelism > 1:
-        _process_reference_groups_parallel(
-            api,
-            plans,
-            groups=groups,
-            sidecar_root=sidecar_root,
-            source_root=source_root,
-            workdir=workdir,
-            threshold=threshold,
-            checksums=checksums,
-            batch_size=batch_size,
-            progress=progress,
-            http_client=http_client,
-            parallelism=parallelism,
-        )
+    if options.limits.workers > 1:
+        _process_reference_groups_parallel(options)
         return
-    for batch in _reference_group_batches(groups):
-        _process_reference_batch_serial(
-            api,
-            plans,
-            groups=batch,
-            sidecar_root=sidecar_root,
-            source_root=source_root,
-            workdir=workdir,
-            threshold=threshold,
-            checksums=checksums,
-            batch_size=batch_size,
-            progress=progress,
-            http_client=http_client,
-        )
+    for batch in _reference_group_batches(
+        options.groups,
+        limits=options.limits,
+    ):
+        _process_reference_batch_serial(options, batch)
 
 
-def _process_reference_groups_parallel(
-    api: HubApi,
-    plans: tuple[DatasetPlan, ...],
-    *,
-    groups: tuple[EeaGroup, ...],
-    sidecar_root: Path,
-    source_root: Path,
-    workdir: Path,
-    threshold: int,
-    checksums: dict[str, str],
-    batch_size: int,
-    progress: Progress | None,
-    http_client: StreamClient,
-    parallelism: int,
-) -> None:
+def _process_reference_groups_parallel(options: _GeometryRunOptions) -> None:
     """Stream bounded source micro-batches through every reference batch."""
 
-    jobs = _geometry_jobs(plans)
+    jobs = _geometry_jobs(options.plans)
     if not jobs:
         return
+    reference_checksums: dict[str, str] = {}
     with _stage_reference_groups(
-        groups,
-        workdir=workdir,
-        checksums=checksums,
-        client=http_client,
+        options.groups,
+        workdir=options.workdir,
+        checksums=reference_checksums,
+        client=options.http_client,
     ) as reference_directory:
+        options.checksums.update(reference_checksums)
         work = _geometry_work_units(
-            api,
-            plans,
-            groups,
+            options,
             jobs,
-            reference_directory=reference_directory,
-            sidecar_root=sidecar_root,
-            source_root=source_root,
-            threshold=threshold,
-            batch_size=batch_size,
-            parallelism=parallelism,
+            reference_directory,
+            _reference_signature(reference_checksums, options.threshold),
         )
-        _run_geometry_workers(work, progress, max_workers=parallelism)
+        _run_geometry_workers(work, options.progress, max_workers=options.limits.workers)
 
 
 def _process_reference_batch_serial(
-    api: HubApi,
-    plans: tuple[DatasetPlan, ...],
-    *,
+    options: _GeometryRunOptions,
     groups: tuple[EeaGroup, ...],
-    sidecar_root: Path,
-    source_root: Path,
-    workdir: Path,
-    threshold: int,
-    checksums: dict[str, str],
-    batch_size: int,
-    progress: Progress | None,
-    http_client: StreamClient,
 ) -> None:
     with _open_reference_batch(
         groups,
-        workdir=workdir,
-        threshold=threshold,
-        checksums=checksums,
-        client=http_client,
+        workdir=options.workdir,
+        threshold=options.threshold,
+        checksums=options.checksums,
+        client=options.http_client,
     ) as references:
-        for plan in plans:
+        for plan in options.plans:
             for source_path in plan.geometry_paths:
                 _process_geometry_path(
-                    api,
+                    options.api,
                     plan,
-                    source_path=source_path,
-                    references=references,
-                    sidecar_root=sidecar_root,
-                    source_root=source_root,
-                    batch_size=batch_size,
-                    progress=progress,
-                    http_client=http_client,
-                    retain_source=True,
+                    source_path,
+                    references,
+                    GeometryPathOptions(
+                        sidecar_root=options.sidecar_root,
+                        source_root=options.source_root,
+                        limits=options.limits,
+                        progress=options.progress,
+                        http_client=options.http_client,
+                        retain_source=True,
+                    ),
                 )
-
-
-def _process_reference_batch_parallel(
-    api: HubApi,
-    plans: tuple[DatasetPlan, ...],
-    *,
-    groups: tuple[EeaGroup, ...],
-    sidecar_root: Path,
-    source_root: Path,
-    workdir: Path,
-    threshold: int,
-    checksums: dict[str, str],
-    batch_size: int,
-    progress: Progress | None,
-    http_client: StreamClient,
-    parallelism: int,
-) -> None:
-    jobs = _geometry_jobs(plans)
-    if not jobs:
-        return
-    with _stage_reference_batch(
-        groups,
-        workdir=workdir,
-        checksums=checksums,
-        client=http_client,
-    ) as reference_directory:
-        work = _geometry_work_units(
-            api,
-            plans,
-            groups,
-            jobs,
-            reference_directory=reference_directory,
-            sidecar_root=sidecar_root,
-            source_root=source_root,
-            threshold=threshold,
-            batch_size=batch_size,
-            parallelism=parallelism,
-        )
-        _run_geometry_workers(work, progress, max_workers=parallelism)
 
 
 def _geometry_jobs(plans: tuple[DatasetPlan, ...]) -> tuple[tuple[str, str], ...]:
@@ -323,34 +254,28 @@ def _geometry_jobs(plans: tuple[DatasetPlan, ...]) -> tuple[tuple[str, str], ...
 
 
 def _geometry_work_units(
-    api: HubApi,
-    plans: tuple[DatasetPlan, ...],
-    groups: tuple[EeaGroup, ...],
+    options: _GeometryRunOptions,
     jobs: tuple[tuple[str, str], ...],
-    *,
     reference_directory: Path,
-    sidecar_root: Path,
-    source_root: Path,
-    threshold: int,
-    batch_size: int,
-    parallelism: int,
+    reference_signature: str,
 ) -> tuple[_GeometryChunk, ...]:
-    endpoint = str(getattr(api, "endpoint", None) or "https://huggingface.co")
-    token = getattr(api, "token", None)
+    endpoint = str(getattr(options.api, "endpoint", None) or "https://huggingface.co")
+    token = getattr(options.api, "token", None)
     return tuple(
         _GeometryChunk(
-            groups=groups,
+            groups=options.groups,
             reference_directory=reference_directory,
-            plans=plans,
+            plans=options.plans,
             jobs=chunk,
-            sidecar_root=sidecar_root,
-            source_root=source_root,
-            threshold=threshold,
-            batch_size=batch_size,
+            sidecar_root=options.sidecar_root,
+            source_root=options.source_root,
+            threshold=options.threshold,
+            limits=options.limits,
             endpoint=endpoint,
             token=token,
+            reference_signature=reference_signature,
         )
-        for chunk in _geometry_chunks(jobs, parallelism)
+        for chunk in _geometry_chunks(jobs, options.limits)
     )
 
 
@@ -361,7 +286,10 @@ def _run_geometry_workers(
     max_workers: int,
 ) -> None:
     worker_count = min(max(max_workers, 1), len(work))
-    with ProcessPoolExecutor(max_workers=worker_count) as executor:
+    with ProcessPoolExecutor(
+        max_workers=worker_count,
+        mp_context=get_context("spawn"),
+    ) as executor:
         for completed in executor.map(_process_geometry_chunk, work):
             _report_completed_geometry(completed, progress)
 
@@ -384,47 +312,237 @@ def _report_completed_geometry(
 
 def _geometry_chunks(
     jobs: tuple[tuple[str, str], ...],
-    parallelism: int,
+    limits: BatchLimits = _DEFAULT_BATCH_LIMITS,
 ) -> tuple[tuple[tuple[str, str], ...], ...]:
     if not jobs:
         return ()
-    worker_count = min(max(parallelism, 1), len(jobs))
-    task_count = min(len(jobs), worker_count * _GEOMETRY_TASKS_PER_WORKER)
+    worker_count = min(max(limits.workers, 1), len(jobs))
+    task_count = min(len(jobs), worker_count * limits.geometry_tasks_per_worker)
     chunk_size = max(1, (len(jobs) + task_count - 1) // task_count)
     return tuple(jobs[start : start + chunk_size] for start in range(0, len(jobs), chunk_size))
 
 
 def _process_geometry_chunk(chunk: _GeometryChunk) -> tuple[tuple[str, str], ...]:
     plans = {plan.spec.name: plan for plan in chunk.plans}
-    api = HfApi(endpoint=chunk.endpoint, token=chunk.token)
-    reference_batches = _indexed_reference_group_batches(chunk.groups)
-    with httpx.Client(follow_redirects=True, timeout=DOWNLOAD_TIMEOUT) as client:
-        for jobs in _geometry_micro_batches(chunk.jobs):
-            _cache_geometry_jobs(api, plans, jobs, chunk.source_root, client)
-            try:
-                for start_index, groups in reference_batches:
-                    references = _worker_reference_batch(
-                        groups,
-                        chunk.reference_directory,
-                        chunk.threshold,
-                        start_index=start_index,
-                    )
-                    for dataset, source_path in jobs:
-                        _process_geometry_path(
-                            api,
-                            plans[dataset],
-                            source_path=source_path,
-                            references=references,
-                            sidecar_root=chunk.sidecar_root,
-                            source_root=chunk.source_root,
-                            batch_size=chunk.batch_size,
-                            progress=None,
-                            http_client=client,
-                            retain_source=True,
-                        )
-            finally:
-                _remove_cached_geometry_jobs(plans, jobs, chunk.source_root)
+    api = cast(HubApi, HfApi(endpoint=chunk.endpoint, token=chunk.token))
+    reference_batches = _indexed_reference_group_batches(
+        chunk.groups,
+        limits=chunk.limits,
+    )
+    try:
+        with httpx.Client(follow_redirects=True, timeout=DOWNLOAD_TIMEOUT) as client:
+            _process_geometry_micro_batches(
+                _GeometryWorker(
+                    chunk=chunk,
+                    plans=plans,
+                    api=api,
+                    reference_batches=reference_batches,
+                    batch_indexes={start_index for start_index, _ in reference_batches},
+                    client=client,
+                )
+            )
+    finally:
+        _close_worker_reference_cache()
     return chunk.jobs
+
+
+def _process_geometry_micro_batches(worker: _GeometryWorker) -> None:
+    for micro_batch in _geometry_micro_batches(worker.chunk.jobs, worker.chunk.limits):
+        _process_geometry_micro_batch(worker, micro_batch)
+
+
+def _process_geometry_micro_batch(
+    worker: _GeometryWorker,
+    micro_batch: tuple[tuple[str, str], ...],
+) -> None:
+    chunk = worker.chunk
+    pending = _pending_geometry_batches(chunk, worker.plans, micro_batch)
+    jobs = _unfinished_geometry_jobs(micro_batch, worker.batch_indexes, pending)
+    if not jobs:
+        return
+    reset_sidecars = _reset_geometry_sidecars(chunk, worker.plans, jobs, pending)
+    _cache_geometry_jobs(worker.api, worker.plans, jobs, chunk.source_root, worker.client)
+    try:
+        _process_geometry_reference_batches(
+            worker,
+            jobs,
+            pending,
+            reset_sidecars,
+        )
+    finally:
+        _remove_cached_geometry_jobs(worker.plans, jobs, chunk.source_root)
+
+
+def _pending_geometry_batches(
+    chunk: _GeometryChunk,
+    plans: Mapping[str, DatasetPlan],
+    jobs: tuple[tuple[str, str], ...],
+) -> dict[tuple[str, str], set[int]]:
+    return {
+        job: _completed_batches(
+            _sidecar_path(chunk.sidecar_root, plans[job[0]].spec, job[1]),
+            chunk.reference_signature,
+        )
+        for job in jobs
+    }
+
+
+def _unfinished_geometry_jobs(
+    jobs: tuple[tuple[str, str], ...],
+    batch_indexes: set[int],
+    pending: Mapping[tuple[str, str], set[int]],
+) -> tuple[tuple[str, str], ...]:
+    return tuple(job for job in jobs if not batch_indexes <= pending[job])
+
+
+def _reset_geometry_sidecars(
+    chunk: _GeometryChunk,
+    plans: Mapping[str, DatasetPlan],
+    jobs: tuple[tuple[str, str], ...],
+    pending: Mapping[tuple[str, str], set[int]],
+) -> set[tuple[str, str]]:
+    return {
+        job
+        for job in jobs
+        if not pending[job]
+        and _sidecar_path(chunk.sidecar_root, plans[job[0]].spec, job[1]).is_file()
+    }
+
+
+def _process_geometry_reference_batches(
+    worker: _GeometryWorker,
+    jobs: tuple[tuple[str, str], ...],
+    pending: Mapping[tuple[str, str], set[int]],
+    reset_sidecars: set[tuple[str, str]],
+) -> None:
+    for start_index, groups in worker.reference_batches:
+        _process_geometry_reference_batch(
+            worker,
+            groups,
+            jobs,
+            pending,
+            reset_sidecars,
+            start_index,
+        )
+
+
+def _process_geometry_reference_batch(
+    worker: _GeometryWorker,
+    groups: tuple[EeaGroup, ...],
+    jobs: tuple[tuple[str, str], ...],
+    pending: Mapping[tuple[str, str], set[int]],
+    reset_sidecars: set[tuple[str, str]],
+    start_index: int,
+) -> None:
+    outstanding = tuple(job for job in jobs if start_index not in pending[job])
+    if not outstanding:
+        return
+    references = _worker_reference_batch(
+        groups,
+        worker.chunk.reference_directory,
+        worker.chunk.threshold,
+        start_index=start_index,
+    )
+    for job in outstanding:
+        _process_geometry_job(
+            worker,
+            job,
+            references,
+            start_index,
+            pending[job],
+            reset_sidecars,
+        )
+
+
+def _process_geometry_job(
+    worker: _GeometryWorker,
+    job: tuple[str, str],
+    references: tuple[OverlapReference, ...],
+    start_index: int,
+    completed: set[int],
+    reset_sidecars: set[tuple[str, str]],
+) -> None:
+    dataset, source_path = job
+    chunk = worker.chunk
+    _process_geometry_path(
+        worker.api,
+        worker.plans[dataset],
+        source_path,
+        references,
+        GeometryPathOptions(
+            sidecar_root=chunk.sidecar_root,
+            source_root=chunk.source_root,
+            limits=chunk.limits,
+            http_client=worker.client,
+            retain_source=True,
+            reset_sidecar=job in reset_sidecars,
+        ),
+    )
+    reset_sidecars.discard(job)
+    completed.add(start_index)
+    sidecar = _sidecar_path(chunk.sidecar_root, worker.plans[dataset].spec, source_path)
+    _record_completed_batch(sidecar, chunk.reference_signature, completed)
+
+
+def _reference_signature(checksums: Mapping[str, str], threshold: int) -> str:
+    """Fingerprint staged references and overlap policy for resumable sidecars."""
+
+    payload = json.dumps(
+        {
+            "checksums": dict(sorted(checksums.items())),
+            "threshold": threshold,
+            "kernel": OVERLAP_KERNEL_VERSION,
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _checkpoint_path(sidecar: Path) -> Path:
+    return sidecar.with_name(f"{sidecar.name}.done")
+
+
+def _completed_batches(sidecar: Path, signature: str) -> set[int]:
+    """Return completed reference batches for the matching reference signature."""
+
+    payload = _read_checkpoint(_checkpoint_path(sidecar))
+    return _checkpoint_batches(payload, signature)
+
+
+def _read_checkpoint(path: Path) -> object | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _checkpoint_batches(payload: object, signature: str) -> set[int]:
+    if not isinstance(payload, Mapping):
+        return set()
+    if payload.get("signature") != signature:
+        return set()
+    return _integer_batch_ids(payload.get("batches"))
+
+
+def _integer_batch_ids(value: object) -> set[int]:
+    if not isinstance(value, list):
+        return set()
+    return {item for item in value if type(item) is int}
+
+
+def _record_completed_batch(sidecar: Path, signature: str, completed: set[int]) -> None:
+    """Atomically record merged reference batches after the sidecar is durable."""
+
+    path = _checkpoint_path(sidecar)
+    temporary = path.with_name(f"{path.name}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps({"signature": signature, "batches": sorted(completed)}),
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+    except OSError:
+        temporary.unlink(missing_ok=True)
 
 
 def _cache_geometry_jobs(
@@ -456,6 +574,7 @@ def _remove_cached_geometry_jobs(
 
 def _geometry_micro_batches(
     jobs: tuple[tuple[str, str], ...],
+    limits: BatchLimits = _DEFAULT_BATCH_LIMITS,
 ) -> Iterator[tuple[tuple[str, str], ...]]:
-    for start in range(0, len(jobs), _SOURCE_MICRO_BATCH_SIZE):
-        yield jobs[start : start + _SOURCE_MICRO_BATCH_SIZE]
+    for start in range(0, len(jobs), limits.retained_source_shards_per_worker):
+        yield jobs[start : start + limits.retained_source_shards_per_worker]

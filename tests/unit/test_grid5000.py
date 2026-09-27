@@ -1,0 +1,489 @@
+import json
+import shlex
+import subprocess
+from dataclasses import replace
+from pathlib import Path
+from typing import NotRequired, TypedDict, Unpack
+
+import pytest
+
+from osm_polygon_eunis import grid5000
+from osm_polygon_eunis.grid5000 import (
+    Grid5000Config,
+    Grid5000Job,
+    build_oarsub_command,
+    build_policy_command,
+    build_rsync_command,
+    build_ssh_command,
+    build_status_command,
+    parse_job_id,
+    submit_grid5000,
+    validate_persistent_root,
+)
+
+
+class _ConfigOverrides(TypedDict):
+    frontend: NotRequired[str]
+    persistent_root: NotRequired[str]
+    site: NotRequired[str]
+    cluster: NotRequired[str]
+    cores: NotRequired[int]
+    workers: NotRequired[int]
+    walltime: NotRequired[str]
+    batch_size: NotRequired[int]
+
+
+def _config(**overrides: Unpack[_ConfigOverrides]) -> Grid5000Config:
+    return Grid5000Config(
+        frontend=overrides.get("frontend", "fgrenoble"),
+        persistent_root=overrides.get("persistent_root", "/home/u/eunis"),
+        site=overrides.get("site", "grenoble"),
+        cluster=overrides.get("cluster", "dahu"),
+        cores=overrides.get("cores", 16),
+        workers=overrides.get("workers", 16),
+        walltime=overrides.get("walltime", "1:00:00"),
+        batch_size=overrides.get("batch_size", 256),
+    )
+
+
+def test_grid5000_default_walltime_is_one_hour() -> None:
+    config = Grid5000Config(
+        frontend="fgrenoble",
+        persistent_root="/home/u/eunis",
+        site="grenoble",
+        cluster="dahu",
+    )
+
+    assert config.walltime == "1:00:00"
+
+
+def test_profile_requests_one_cpu_host_on_any_explicit_site() -> None:
+    config = _config()
+
+    assert build_oarsub_command(
+        config,
+        "/home/u/eunis/source/scripts/grid5000/release.sh",
+    ) == (
+        "oarsub",
+        "-q",
+        "default",
+        "-p",
+        "cluster='dahu'",
+        "-l",
+        "host=1/core=16,walltime=1:00:00",
+        (
+            "GRID5000_PERSISTENT_ROOT=/home/u/eunis GRID5000_FRONTEND=fgrenoble "
+            "GRID5000_SITE=grenoble GRID5000_CLUSTER=dahu GRID5000_QUEUE=default "
+            "GRID5000_CORES=16 GRID5000_WORKERS=16 GRID5000_WALLTIME=1:00:00 "
+            "GRID5000_BATCH_SIZE=256 "
+            "/home/u/eunis/source/scripts/grid5000/release.sh"
+        ),
+    )
+
+
+def test_submission_command_records_optional_job_metadata() -> None:
+    config = replace(_config(), job_type="deploy")
+
+    command = build_oarsub_command(
+        config,
+        "/home/u/eunis/source/scripts/grid5000/release.sh",
+        source_revision="abc123",
+    )
+
+    assert command[command.index("-t") + 1] == "deploy"
+    assert "GRID5000_JOB_TYPE=deploy" in command[-1]
+    assert "GRID5000_SOURCE_REVISION=abc123" in command[-1]
+
+
+def test_config_rejects_invalid_resource_values() -> None:
+    with pytest.raises(ValueError, match="frontend"):
+        _config(frontend="")
+    with pytest.raises(ValueError, match="cores"):
+        _config(cores=0)
+    with pytest.raises(ValueError, match="workers"):
+        _config(workers=0)
+    with pytest.raises(ValueError, match="walltime"):
+        _config(walltime="forever")
+    with pytest.raises(ValueError, match="persistent"):
+        _config(persistent_root="relative/eunis")
+
+
+def test_persistent_root_rejects_ephemeral_or_mac_paths() -> None:
+    for path in (
+        "/tmp/eunis",
+        "/private/tmp/eunis",
+        "/Volumes/Seagate/eunis",
+        "/Users/noe/eunis",
+    ):
+        with pytest.raises(ValueError):
+            validate_persistent_root(path)
+
+    assert validate_persistent_root("/home/u/eunis") == "/home/u/eunis"
+    assert validate_persistent_root("/groups/project/eunis") == "/groups/project/eunis"
+
+
+def test_job_id_parser_accepts_oar_output_and_rejects_ambiguous_text() -> None:
+    assert parse_job_id("[AO] Adding job 123456\n") == "123456"
+    assert parse_job_id("OAR_JOB_ID=123456\n") == "123456"
+    with pytest.raises(ValueError):
+        parse_job_id("submission failed")
+    with pytest.raises(ValueError, match="exactly one"):
+        parse_job_id("Adding job 1\nAdding job 2\n")
+
+
+@pytest.mark.parametrize(
+    ("output", "state"),
+    [
+        ("Job 123456 running", "active"),
+        ("ERROR: job not found", "missing"),
+        ("Job 123456 terminated", "terminal"),
+        ("No status returned", "unknown"),
+    ],
+)
+def test_job_status_state_classifies_oar_output(output: str, state: str) -> None:
+    assert grid5000._job_status_state(output) == state
+
+
+def test_live_submission_state_path_is_required_only_for_live_jobs() -> None:
+    assert grid5000._validate_live_submission_state(None, dry_run=True) is None
+    with pytest.raises(ValueError, match="state_path is required"):
+        grid5000._validate_live_submission_state(None, dry_run=False)
+
+
+def test_policy_status_and_ssh_commands() -> None:
+    assert build_policy_command() == ("usagepolicycheck", "-t")
+    assert build_status_command("123456") == ("oarstat", "-j", "123456")
+    assert build_ssh_command("fgrenoble", ("usagepolicycheck", "-t")) == (
+        "ssh",
+        "fgrenoble",
+        "usagepolicycheck -t",
+    )
+    with pytest.raises(ValueError):
+        build_status_command("not-a-job")
+
+
+def test_ssh_command_preserves_oar_expression_quotes_for_remote_shell() -> None:
+    remote_command = ("oarsub", "-p", "cluster='grappe'")
+
+    ssh_command = build_ssh_command("fnancy", remote_command)
+
+    assert ssh_command == ("ssh", "fnancy", shlex.join(remote_command))
+    assert tuple(shlex.split(ssh_command[2])) == remote_command
+
+
+def test_rsync_excludes_credentials_and_ephemeral_project_state() -> None:
+    command = build_rsync_command(
+        Path("/workspace/eunis"),
+        "fgrenoble",
+        "/home/u/eunis/source",
+    )
+
+    assert command[:2] == ("rsync", "-az")
+    assert "--exclude=.git" in command
+    assert "--exclude=.venv" in command
+    assert "--exclude=.eunis-run-final" in command
+    assert "--exclude=.grid5000-*.json" in command
+    assert "--exclude=.env" in command
+    assert "--exclude=.cache" in command
+    assert "--exclude=.coverage*" in command
+    assert "--exclude=coverage.json" in command
+    assert command[-2:] == (
+        "/workspace/eunis/",
+        "fgrenoble:/home/u/eunis/source/",
+    )
+    assert "HF_TOKEN" not in " ".join(command)
+
+
+def test_grid_job_is_immutable() -> None:
+    job = Grid5000Job(
+        job_id="123456",
+        submitted_at="2026-09-22T10:00:00Z",
+        config=_config(),
+        source_revision="abc123",
+    )
+
+    with pytest.raises(AttributeError):
+        job.__setattr__("job_id", "654321")
+
+
+def test_submit_runs_policy_sync_oar_and_post_policy_without_secrets(tmp_path: Path) -> None:
+    config = _config()
+    state = tmp_path / "job.json"
+    calls: list[tuple[str, ...]] = []
+
+    def fake_runner(command: tuple[str, ...]) -> str:
+        calls.append(command)
+        if command[:2] == ("ssh", "fgrenoble") and shlex.split(command[2])[0] == "oarsub":
+            return "[AO] Adding job 123456\n"
+        return ""
+
+    result = submit_grid5000(
+        config,
+        tmp_path,
+        source_revision="abc123",
+        state_path=state,
+        runner=fake_runner,
+    )
+
+    assert result.job is not None
+    assert result.job.job_id == "123456"
+    assert result.datasets == ("website", "wikidata", "description")
+    assert result.source_revision == "abc123"
+    assert calls[0] == ("ssh", "fgrenoble", "usagepolicycheck -t")
+    assert calls[1] == ("ssh", "fgrenoble", "mkdir -p /home/u/eunis/source")
+    assert calls[2][0:2] == ("rsync", "-az")
+    assert calls[3][:2] == ("ssh", "fgrenoble")
+    remote_oarsub = tuple(shlex.split(calls[3][2]))
+    assert remote_oarsub[remote_oarsub.index("-p") + 1] == "cluster='dahu'"
+    assert remote_oarsub[-1] == (
+        "GRID5000_PERSISTENT_ROOT=/home/u/eunis GRID5000_FRONTEND=fgrenoble "
+        "GRID5000_SITE=grenoble GRID5000_CLUSTER=dahu GRID5000_QUEUE=default "
+        "GRID5000_CORES=16 GRID5000_WORKERS=16 GRID5000_WALLTIME=1:00:00 "
+        "GRID5000_BATCH_SIZE=256 GRID5000_SOURCE_REVISION=abc123 "
+        "/home/u/eunis/source/scripts/grid5000/release.sh"
+    )
+    assert calls[4] == ("ssh", "fgrenoble", "usagepolicycheck -t")
+    assert all("HF_TOKEN" not in " ".join(command) for command in calls)
+    assert json.loads(state.read_text(encoding="utf-8"))["job_id"] == "123456"
+
+
+def test_live_submission_requires_a_persistent_state_path(tmp_path: Path) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    with pytest.raises(ValueError, match="state_path is required"):
+        submit_grid5000(
+            _config(),
+            tmp_path,
+            source_revision="abc123",
+            runner=lambda command: calls.append(command) or "",
+        )
+
+    assert calls == []
+
+
+def test_submit_persists_job_id_before_post_submission_policy_check(tmp_path: Path) -> None:
+    config = _config()
+    state = tmp_path / "job.json"
+    policy_checks = 0
+
+    def fake_runner(command: tuple[str, ...]) -> str:
+        nonlocal policy_checks
+        if command[-1] == "usagepolicycheck -t":
+            policy_checks += 1
+            if policy_checks == 2:
+                raise subprocess.CalledProcessError(1, command, stderr="policy violation")
+        if command[:2] == ("ssh", "fgrenoble") and shlex.split(command[2])[0] == "oarsub":
+            return "[AO] Adding job 123456\n"
+        return ""
+
+    with pytest.raises(subprocess.CalledProcessError, match="returned non-zero"):
+        submit_grid5000(
+            config,
+            tmp_path,
+            source_revision="abc123",
+            state_path=state,
+            runner=fake_runner,
+        )
+
+    assert state.exists()
+    assert json.loads(state.read_text(encoding="utf-8"))["job_id"] == "123456"
+
+
+def test_submit_rejects_an_existing_active_job(tmp_path: Path) -> None:
+    config = _config()
+    state = tmp_path / "job.json"
+    state.write_text('{"job_id": "123456"}\n', encoding="utf-8")
+    calls: list[tuple[str, ...]] = []
+
+    def fake_runner(command: tuple[str, ...]) -> str:
+        calls.append(command)
+        return "running"
+
+    with pytest.raises(RuntimeError, match="already active"):
+        submit_grid5000(
+            config,
+            tmp_path,
+            source_revision="abc123",
+            state_path=state,
+            runner=fake_runner,
+        )
+
+    assert calls == [("ssh", "fgrenoble", "oarstat -j 123456")]
+
+
+def test_submit_refuses_when_existing_job_status_cannot_be_verified(tmp_path: Path) -> None:
+    config = _config()
+    state = tmp_path / "job.json"
+    state.write_text('{"job_id": "123456"}\n', encoding="utf-8")
+    calls: list[tuple[str, ...]] = []
+
+    def fake_runner(command: tuple[str, ...]) -> str:
+        calls.append(command)
+        raise subprocess.CalledProcessError(255, command, stderr="Connection timed out")
+
+    with pytest.raises(RuntimeError, match="cannot verify"):
+        submit_grid5000(
+            config,
+            tmp_path,
+            source_revision="abc123",
+            state_path=state,
+            runner=fake_runner,
+        )
+
+    assert calls == [("ssh", "fgrenoble", "oarstat -j 123456")]
+
+
+def test_config_rejects_capacity_batch_and_blank_profile_fields() -> None:
+    with pytest.raises(ValueError, match="workers must not exceed"):
+        _config(workers=17)
+    with pytest.raises(ValueError, match="batch_size"):
+        _config(batch_size=0)
+    with pytest.raises(ValueError, match="site"):
+        _config(site=" ")
+
+
+def test_path_and_command_builders_reject_unsafe_inputs() -> None:
+    for path in ("", "\x00", "/home", "/home/u/../eunis"):
+        with pytest.raises(ValueError):
+            validate_persistent_root(path)
+
+    config = _config()
+    with pytest.raises(ValueError, match="absolute remote"):
+        build_oarsub_command(config, "scripts/worker.sh")
+    with pytest.raises(ValueError, match="frontend"):
+        build_ssh_command("fl ille", ("true",))
+    with pytest.raises(ValueError, match="must not be empty"):
+        build_ssh_command("fgrenoble", ())
+
+
+def test_submit_dry_run_builds_commands_without_contacting_grid5000(tmp_path: Path) -> None:
+    config = _config()
+    calls: list[tuple[str, ...]] = []
+
+    def fake_runner(command: tuple[str, ...]) -> str:
+        calls.append(command)
+        return ""
+
+    result = submit_grid5000(
+        config,
+        tmp_path,
+        source_revision="abc123",
+        runner=fake_runner,
+        dry_run=True,
+    )
+
+    assert result.job is None
+    assert result.commands[0] == ("ssh", "fgrenoble", "usagepolicycheck -t")
+    assert calls == []
+
+
+def test_submit_replaces_state_after_terminal_job_and_writes_safe_state(
+    tmp_path: Path,
+) -> None:
+    config = _config()
+    state = tmp_path / "state.json"
+    calls: list[tuple[str, ...]] = []
+
+    def fake_runner(command: tuple[str, ...]) -> str:
+        calls.append(command)
+        if command[:2] == ("ssh", "fgrenoble") and shlex.split(command[2])[0] == "oarstat":
+            raise subprocess.CalledProcessError(1, command, stderr="ERROR: job not found")
+        if command[:2] == ("ssh", "fgrenoble") and shlex.split(command[2])[0] == "oarsub":
+            return "Adding job 654321"
+        return ""
+
+    first = submit_grid5000(
+        config,
+        tmp_path,
+        source_revision="abc123",
+        runner=fake_runner,
+        state_path=state,
+    )
+    calls.clear()
+    second = submit_grid5000(
+        config,
+        tmp_path,
+        source_revision="def456",
+        runner=fake_runner,
+        state_path=state,
+    )
+
+    assert first.job is not None
+    assert second.job is not None
+    assert second.job.job_id == "654321"
+    payload = state.read_text(encoding="utf-8")
+    assert '"job_id": "654321"' in payload
+    assert '"cluster": "dahu"' in payload
+    assert '"datasets": [\n    "website",\n    "wikidata",\n    "description"\n  ]' in payload
+    assert '"site": "grenoble"' in payload
+    assert "HF_TOKEN" not in payload
+    assert calls[0] == (
+        "ssh",
+        "fgrenoble",
+        f"oarstat -j {first.job.job_id}",
+    )
+
+
+def test_status_error_output_preserves_both_captured_streams() -> None:
+    error = subprocess.CalledProcessError(
+        255,
+        ("ssh", "fgrenoble", "oarstat -j 123456"),
+        output="stdout detail",
+        stderr="stderr detail",
+    )
+
+    assert grid5000._status_error_output(error) == "stdout detail\nstderr detail"
+
+
+def test_submit_rejects_corrupt_or_incomplete_state(tmp_path: Path) -> None:
+    config = _config()
+    for contents in ("not json", "{}"):
+        state = tmp_path / "state.json"
+        state.write_text(contents, encoding="utf-8")
+        with pytest.raises(ValueError, match="job state"):
+            submit_grid5000(
+                config,
+                tmp_path,
+                source_revision="abc123",
+                runner=lambda command: "",
+                state_path=state,
+            )
+
+
+def test_config_rejects_unsafe_cluster() -> None:
+    with pytest.raises(ValueError, match="cluster"):
+        _config(cluster="dahu' OR 1=1")
+
+
+def test_resolve_source_revision_checks_cleanliness() -> None:
+    def clean_runner(command: tuple[str, ...]) -> str:
+        return "abc123\n" if command[-1] == "HEAD" else ""
+
+    assert (
+        grid5000.resolve_source_revision(Path("/workspace/eunis"), runner=clean_runner) == "abc123"
+    )
+
+    def dirty_runner(command: tuple[str, ...]) -> str:
+        return "M README.md" if command[-1] == "--porcelain" else ""
+
+    with pytest.raises(RuntimeError, match="dirty"):
+        grid5000.resolve_source_revision(Path("/workspace/eunis"), runner=dirty_runner)
+    assert (
+        grid5000.resolve_source_revision(
+            Path("/workspace/eunis"),
+            explicit="def456",
+            allow_dirty=True,
+            runner=dirty_runner,
+        )
+        == "def456-dirty"
+    )
+
+
+def test_run_command_returns_combined_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(command, **kwargs):
+        assert command == ("true",)
+        assert kwargs["check"] is True
+        return subprocess.CompletedProcess(command, 0, stdout="out", stderr="err")
+
+    monkeypatch.setattr(grid5000.subprocess, "run", fake_run)
+    assert grid5000.run_command(("true",)) == "outerr"

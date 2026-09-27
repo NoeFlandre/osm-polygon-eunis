@@ -11,9 +11,10 @@ from pyproj import Transformer
 from shapely.geometry import box, mapping
 from shapely.ops import transform
 
-from osm_polygon_eunis import geometry_jobs, references
+from osm_polygon_eunis import geometry_jobs, reference_cache
 from osm_polygon_eunis._protocols import HubApi, StreamClient
 from osm_polygon_eunis.eea import EeaGroup, RemoteAsset
+from osm_polygon_eunis.options import BatchLimits
 from osm_polygon_eunis.reference import RasterLayer, RasterReference
 from osm_polygon_eunis.runner import DatasetPlan
 from osm_polygon_eunis.sources import DatasetSpec
@@ -96,7 +97,7 @@ def test_parallel_reference_batch_processes_cached_geometry_shards(
         destination.write_bytes(raster_path.read_bytes())
         return "sha"
 
-    monkeypatch.setattr(references, "download_asset", fake_download)
+    monkeypatch.setattr(reference_cache, "download_asset", fake_download)
     (tmp_path / "run").mkdir()
     plan = DatasetPlan(
         DatasetSpec("website", "source", "target", "polygons/*.parquet"),
@@ -108,18 +109,19 @@ def test_parallel_reference_batch_processes_cached_geometry_shards(
     progress: list[Mapping[str, object]] = []
 
     geometry_jobs._process_reference_groups(
-        cast(HubApi, SimpleNamespace(endpoint="https://huggingface.co", token=None)),
-        (plan,),
-        (group,),
-        sidecar_root=sidecar_root,
-        source_root=source_root,
-        workdir=tmp_path / "run",
-        threshold=0,
-        checksums={},
-        batch_size=1,
-        progress=progress.append,
-        http_client=cast(StreamClient, object()),
-        parallelism=2,
+        geometry_jobs._GeometryRunOptions(
+            api=cast(HubApi, SimpleNamespace(endpoint="https://huggingface.co", token=None)),
+            plans=(plan,),
+            groups=(group,),
+            sidecar_root=sidecar_root,
+            source_root=source_root,
+            workdir=tmp_path / "run",
+            threshold=0,
+            checksums={},
+            limits=BatchLimits(workers=2, parquet_batch_size=1),
+            progress=progress.append,
+            http_client=cast(StreamClient, object()),
+        )
     )
 
     for name in ("a", "b"):

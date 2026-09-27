@@ -42,4 +42,5 @@ class EunisResult:
 
     @property
     def is_empty(self) -> bool:
+        """Return whether this result has no EUNIS code."""
         return self.code is None

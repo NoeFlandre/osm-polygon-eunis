@@ -1,5 +1,53 @@
 # Operations
 
+## Grid'5000 execution
+
+Run the production release on one explicitly selected Grid'5000 site. Before
+every submission, inspect current EUNIS jobs across all sites through working
+credentials and require none to be active. Then run `usagepolicycheck -t` from a
+reachable frontend and require a clean all-site result; an incomplete check or
+an unreachable site is not a pass. Select a reachable non-Bordeaux site when
+Bordeaux access is unavailable. A clean check and the all-site job inspection
+are required even when the selected compute site differs.
+
+The controller syncs only source code and submits all three sources together:
+`website`, `wikidata`, and `description`. The site, frontend, and cluster must
+be explicit. The one-host request uses the `default` queue, 16 CPU cores and a
+one-hour walltime; after a short job ends, rerun from the signature-checked
+checkpoints rather than extending a reservation beyond policy.
+
+Keep the controller state file on the external HDD. The worker stores resumable
+run data at `GRID5000_PERSISTENT_ROOT/runs/eunis`, sidecars at
+`GRID5000_PERSISTENT_ROOT/sidecars/eunis`, logs under `logs`, and receipts under
+`receipts`. Source/reference staging and the UV cache use node-local scratch;
+that scratch is not backed up and must be recreated by a resumed job.
+
+Example after the all-site checks pass (replace the site-specific values and
+keep the state file on persistent local storage):
+
+```bash
+uv run osm-polygon-eunis grid5000 submit \
+  --site SITE \
+  --frontend FRONTEND \
+  --cluster CLUSTER \
+  --persistent-root /home/USER/osm-polygon-eunis \
+  --state /path/on/external-HDD/eunis-grid5000-state.json
+```
+
+The controller checks `usagepolicycheck -t` before syncing and again after
+submission. Its OAR request is `oarsub -q default -p "cluster='CLUSTER'" -l
+host=1/core=16,walltime=1:00:00`; it does not pass a dataset selector, so the
+worker runs the default all-source release. The exact source commit is passed
+into the worker environment and written into the receipt. The release CLI
+supports `--receipt PATH`; the worker adds the job ID, config hash, attempt and
+retry counts, error count and log path before atomically saving the final
+receipt under `receipts/`.
+`EUNIS_SOURCE_DIR` and `EUNIS_REFERENCE_DIR` point to node-local scratch, while
+`EUNIS_SIDECAR_DIR` points to persistent storage. The staged reference cache is
+reused only after its size, metadata identity and recorded SHA-256 are checked.
+Do not submit again until the prior job is verified terminal and no active
+EUNIS job exists on any site.
+
 Use a temporary directory on the HDD with enough room for one source shard,
 one replacement shard, and the resolved EEA reference assets. Set `UV_CACHE_DIR`
 outside the dataset root. Production commands emit JSON-line progress records
@@ -9,8 +57,8 @@ the final JSON result on stdout. They verify row counts and schemas after every 
 Local checks use a task-scoped cache on the temporary volume:
 
 ```bash
-UV_PROJECT_ENVIRONMENT=/private/tmp/osm-polygon-eunis-venv \
-UV_CACHE_DIR=/private/tmp/osm-polygon-eunis-uv \
+UV_PROJECT_ENVIRONMENT="$TMPDIR/osm-polygon-eunis-venv" \
+UV_CACHE_DIR="$TMPDIR/osm-polygon-eunis-uv" \
 uv run osm-polygon-eunis plan
 ```
 
@@ -25,10 +73,21 @@ It requires a valid `HF_TOKEN` with write access to the target repositories.
 Each release uses eight bounded worker processes over disjoint source shards and
 shared read-only reference files:
 
+Dataset-scale release runs only through the Grid'5000 controller above. Local
+`release --dry-run` is available for previews; do not run the enrichment pipeline
+on the Mac.
+
+Hypothesis tests use the `deterministic` profile by default (100 derandomized
+examples). CI selects `ci` (300 derandomized examples); local property fuzzing
+can use `HYPOTHESIS_PROFILE=dev` for randomized examples. Set
+`HYPOTHESIS_DATABASE_DIR` to a persistent directory outside the checkout when
+you want Hypothesis to keep examples between runs; the database is disabled by
+default.
+
 ```bash
-UV_PROJECT_ENVIRONMENT=/private/tmp/osm-polygon-eunis-venv \
-UV_CACHE_DIR=/private/tmp/osm-polygon-eunis-uv \
-uv run osm-polygon-eunis release --batch-size 256 --workdir .eunis-run
+HYPOTHESIS_PROFILE=dev \
+HYPOTHESIS_DATABASE_DIR=/path/on/persistent-storage/hypothesis \
+uv run pytest -m property
 ```
 
 Preview a release without any Hub writes (no token required):
@@ -58,8 +117,8 @@ information with examples.
 |---|---|---|---|
 | `plan` | `--dataset NAME` | all | limit to `website`, `wikidata` or `description`; repeatable |
 | `plan` | `--endpoint URL` | public Hub | Hub endpoint |
-| `release` | `--reference-config PATH` | `config/eea-2021-reference.json` | EEA reference config |
-| `release` | `--workdir PATH` | `.eunis-run` | local staging directory |
+| `release` | `--reference-config PATH` | bundled EEA 2021 config | EEA reference config |
+| `release`, `verify` | `--workdir PATH` | `OSM_EUNIS_WORKDIR` or `.eunis-run` | local staging directory |
 | `release` | `--batch-size N` | 256 | Parquet rows per streamed batch (must be > 0) |
 | `release` | `--workers N` | 8 | geometry worker processes (must be > 0) |
 | `release` | `--max-intersection-errors N` | no limit | fail a dataset before its manifest is published when more than N overlap candidates were dropped by GEOS intersection errors (`card.intersection_errors`) |
@@ -67,8 +126,19 @@ information with examples.
 | `release` | `--dry-run` | off | preview without Hub writes |
 | `release` | `--endpoint URL` | public Hub | Hub endpoint |
 | `verify` | `--dataset NAME` | all | limit verification; repeatable |
-| `verify` | `--workdir PATH` | `.eunis-run` | temporary download directory |
 | `verify` | `--endpoint URL` | public Hub | Hub endpoint |
+
+The default reference configuration is bundled with the installed wheel. In a
+source checkout it resolves to `config/eea-2021-reference.json`. Set
+`OSM_EUNIS_WORKDIR` to choose the default local staging directory for both
+`release` and `verify`; an explicit `--workdir` takes precedence.
+
+The Python API accepts one `ReleaseOptions` value containing `BatchLimits`.
+Defaults are 8 geometry workers, 256 Parquet rows per batch, at most 128
+retained source shards per worker, 2 raster groups per batch, and 4 geometry
+tasks per worker. The CLI exposes worker and Parquet batch limits as
+`--workers` and `--batch-size`; callers that need the other memory bounds can
+set them through `BatchLimits` directly.
 
 `verify` is read-only: it loads each target's `eunis/manifest.json` and checks
 the remote tree, shared blob identities, Parquet rows and schemas, and card
@@ -87,19 +157,18 @@ Global flags, accepted before or after the command: `--version`, `-q/--quiet`,
 | 3 | Hub/network or authentication error |
 | 4 | verification failed (published target does not match its expectation or manifest) |
 
-Before handoff, run the deterministic gates in this order (these mirror
-`.github/workflows/qa.yml`; keep the two in sync):
+Before handoff, run the deterministic gates through the same task used by
+`.github/workflows/qa.yml`:
 
 ```bash
-uv run ruff check src tests scripts
-uv run ruff format --check src tests scripts
-uv run ty check src tests scripts
-uv run pytest --cov --cov-report=json --cov-report=term-missing
-uv run python scripts/check_architecture.py
-uv run python scripts/check_crap.py
-uv run python scripts/smoke.py
-uv run mutmut run
+make quality
 ```
+
+The `Makefile` lists each individual gate. The CRAP check uses statement and
+branch coverage; its threshold of `6.0` means a fully covered function must
+have cyclomatic complexity below 6. A source module omitted from the selected
+coverage JSON fails the gate. Mutation tests run separately in the
+path-filtered and weekly workflow; see `docs/mutation-testing.md`.
 
 CI also runs, in parallel jobs of the same workflow: `uv build` plus an
 isolated smoke install of the wheel, `uv run mkdocs build --strict`, and

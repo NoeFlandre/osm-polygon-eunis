@@ -1,3 +1,4 @@
+import os
 from collections.abc import Callable
 from pathlib import Path
 
@@ -5,9 +6,14 @@ import numpy as np
 import pytest
 import rasterio
 from hypothesis import HealthCheck, settings
+from hypothesis.database import DirectoryBasedExampleDatabase
 from rasterio.transform import from_origin
 from shapely.geometry.base import BaseGeometry
 
+_DATABASE_DIRECTORY = os.environ.get("HYPOTHESIS_DATABASE_DIR")
+_HYPOTHESIS_DATABASE = (
+    DirectoryBasedExampleDatabase(_DATABASE_DIRECTORY) if _DATABASE_DIRECTORY else None
+)
 settings.register_profile(
     "deterministic",
     settings(
@@ -17,7 +23,26 @@ settings.register_profile(
         suppress_health_check=[HealthCheck.too_slow],
     ),
 )
-settings.load_profile("deterministic")
+settings.register_profile(
+    "ci",
+    settings(
+        deadline=None,
+        derandomize=True,
+        max_examples=300,
+        suppress_health_check=[HealthCheck.too_slow],
+    ),
+)
+settings.register_profile(
+    "dev",
+    settings(
+        database=_HYPOTHESIS_DATABASE,
+        deadline=None,
+        derandomize=False,
+        max_examples=100,
+        suppress_health_check=[HealthCheck.too_slow],
+    ),
+)
+settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "deterministic"))
 
 
 def write_single_pixel_raster(

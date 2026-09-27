@@ -1,0 +1,13 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "OSM Polygon EUNIS"
+type: software
+authors:
+  - family-names: Flandre
+    given-names: Noe
+    alias: NoeFlandre
+abstract: >-
+  Enriches OpenStreetMap polygon datasets with exact-overlap EUNIS habitat
+  labels from the European Environment Agency reference data.
+repository-code: "https://github.com/NoeFlandre/osm-polygon-eunis"
+license: Apache-2.0

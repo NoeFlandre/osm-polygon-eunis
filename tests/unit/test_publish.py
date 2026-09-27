@@ -11,8 +11,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from osm_polygon_eunis import publish
 from osm_polygon_eunis._protocols import HubApi
 from osm_polygon_eunis.publish import (
+    DatasetVerificationOptions,
+    ManifestBuildOptions,
     ShardExpectation,
     build_manifest,
     duplicate_source,
@@ -58,13 +61,15 @@ def test_duplicate_source_calls_server_side_copy_once_when_missing() -> None:
 
 def test_manifest_is_deterministic_and_contains_source_conservation() -> None:
     manifest = build_manifest(
-        source_repo="org/source",
-        target_repo="org/target",
-        source_revision="abc",
-        source_paths=("polygons/z.parquet", "polygons/a.parquet"),
-        changed_paths=("polygons/z.parquet",),
-        reference_manifest={"version": "EEA-test", "sha256": "ref"},
-        rows_by_path={"polygons/z.parquet": 12},
+        ManifestBuildOptions(
+            source_repo="org/source",
+            target_repo="org/target",
+            source_revision="abc",
+            source_paths=("polygons/z.parquet", "polygons/a.parquet"),
+            changed_paths=("polygons/z.parquet",),
+            reference_manifest={"version": "EEA-test", "sha256": "ref"},
+            rows_by_path={"polygons/z.parquet": 12},
+        )
     )
 
     encoded = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
@@ -76,23 +81,36 @@ def test_manifest_is_deterministic_and_contains_source_conservation() -> None:
 
 def test_manifest_records_added_card_artifacts() -> None:
     manifest = build_manifest(
-        source_repo="org/source",
-        target_repo="org/target",
-        source_revision="abc",
-        source_paths=("README.md", "polygons/a.parquet"),
-        changed_paths=("README.md", "polygons/a.parquet"),
-        added_paths=("eunis/world-map.svg",),
-        reference_manifest={"version": "EEA-test"},
-        rows_by_path={"polygons/a.parquet": 1},
-        schema_by_path={"polygons/a.parquet": "schema"},
-        card_manifest={"map_path": "eunis/world-map.svg"},
+        ManifestBuildOptions(
+            source_repo="org/source",
+            target_repo="org/target",
+            source_revision="abc",
+            source_paths=("README.md", "polygons/a.parquet"),
+            changed_paths=("README.md", "polygons/a.parquet"),
+            added_paths=("eunis/world-map.svg",),
+            reference_manifest={"version": "EEA-test"},
+            rows_by_path={"polygons/a.parquet": 1},
+            schema_by_path={"polygons/a.parquet": "schema"},
+            card_manifest={
+                "map_path": "eunis/world-map.svg",
+                "geometry_policy": {"overlap_kernel_version": 3},
+            },
+        )
     )
 
-    assert manifest["manifest_version"] == 3
+    assert manifest["manifest_version"] == 4
     assert manifest["added_paths"] == ["eunis/world-map.svg"]
     assert manifest["shared_paths"] == []
     assert manifest["schema_by_path"] == {"polygons/a.parquet": "schema"}
-    assert manifest["card"] == {"map_path": "eunis/world-map.svg"}
+    assert manifest["card"] == {
+        "map_path": "eunis/world-map.svg",
+        "geometry_policy": {"overlap_kernel_version": 3},
+    }
+    assert manifest["geometry_policy"] == {"overlap_kernel_version": 3}
+
+
+def test_manifest_geometry_policy_ignores_non_mapping_card_value() -> None:
+    assert publish._manifest_geometry_policy({"geometry_policy": ["unexpected"]}) is None
 
 
 def test_upload_replacement_and_manifest_use_explicit_paths(tmp_path: Path) -> None:
@@ -136,8 +154,10 @@ def test_verify_dataset_rejects_missing_target_paths() -> None:
         verify_dataset(
             cast(HubApi, Api()),
             "org/target",
-            expectations=(ShardExpectation("polygons/a.parquet", 1, "schema"),),
-            expected_tree_paths=("polygons/a.parquet",),
+            DatasetVerificationOptions(
+                expectations=(ShardExpectation("polygons/a.parquet", 1, "schema"),),
+                expected_tree_paths=("polygons/a.parquet",),
+            ),
         )
 
 
@@ -204,7 +224,11 @@ def test_verify_dataset_checks_remote_parquet_shared_blobs_and_manifest(
 ) -> None:
     kwargs = _verification_kwargs(tmp_path, monkeypatch)
 
-    receipt = verify_dataset(cast(HubApi, _FakeTargetApi(_TARGET_ENTRIES)), "org/target", **kwargs)
+    receipt = verify_dataset(
+        cast(HubApi, _FakeTargetApi(_TARGET_ENTRIES)),
+        "org/target",
+        DatasetVerificationOptions(**kwargs),
+    )
 
     assert receipt.target_revision == "target-sha"
     assert receipt.rows_by_path == {"polygons/a.parquet": 1}
@@ -243,7 +267,11 @@ def test_verify_dataset_fails_closed_on_remote_mismatch(
     kwargs = _verification_kwargs(tmp_path, monkeypatch) | override
 
     with pytest.raises(ValueError, match=message):
-        verify_dataset(cast(HubApi, _FakeTargetApi(_TARGET_ENTRIES)), "org/target", **kwargs)
+        verify_dataset(
+            cast(HubApi, _FakeTargetApi(_TARGET_ENTRIES)),
+            "org/target",
+            DatasetVerificationOptions(**kwargs),
+        )
 
 
 @pytest.mark.parametrize(
@@ -260,12 +288,14 @@ def test_build_manifest_rejects_inconsistent_path_sets(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         build_manifest(
-            source_repo="org/source",
-            target_repo="org/target",
-            source_revision="abc",
-            source_paths=("polygons/a.parquet",),
-            changed_paths=changed,
-            added_paths=added,
-            reference_manifest={"version": "EEA-test"},
-            rows_by_path={},
+            ManifestBuildOptions(
+                source_repo="org/source",
+                target_repo="org/target",
+                source_revision="abc",
+                source_paths=("polygons/a.parquet",),
+                changed_paths=changed,
+                added_paths=added,
+                reference_manifest={"version": "EEA-test"},
+                rows_by_path={},
+            )
         )

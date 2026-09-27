@@ -5,7 +5,10 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import logging
 import re
+import tempfile
+import time
 import xml.etree.ElementTree as ET  # types only; parsing goes through defusedxml
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -18,11 +21,14 @@ import httpx
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 from ._protocols import HttpClient as _HttpClient
+from ._protocols import HttpResponse as _HttpResponse
 from ._protocols import RequestClient as _RequestClient
 from ._protocols import StreamClient
 from .domain import SchemaError
 from .fileio import write_chunks
-from .reference import parse_layer_code
+from .raster_reference import parse_layer_code
+
+logger = logging.getLogger(__name__)
 
 _USER_AGENT = "osm-polygon-eunis/" + ".".join(version("osm-polygon-eunis").split(".")[:2])
 
@@ -34,6 +40,18 @@ _DEFAULT_CATALOG_API = "https://sdi.eea.europa.eu/catalogue/datahub/api/records"
 _DEFAULT_CLASSIFICATION_RECORD = "bfe4c237-e378-4a83-ab21-b3807f96c2e2"
 _WEBDAV_DEPTH = "1"
 _XLSX_MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+_HTTP_RETRY_ATTEMPTS = 3
+_HTTP_RETRY_BASE_SECONDS = 0.5
+_HTTP_TOO_MANY_REQUESTS = 429
+_HTTP_SERVER_ERROR_MIN = 500
+_HTTP_STATUS_CODE_LIMIT = 600
+__all__ = [
+    "EeaGroup",
+    "RemoteAsset",
+    "WebDavEntry",
+    "resolve_config",
+    "resolve_config_data",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +90,16 @@ class EeaGroup:
     labels: Mapping[str, str]
     raster_assets: tuple[RemoteAsset, ...]
     vector_asset: RemoteAsset | None
+
+
+@dataclass(frozen=True, slots=True)
+class _WebDavTraversalContext:
+    parent_url: str
+    depth: int
+    max_depth: int
+    file_suffixes: tuple[str, ...]
+    queue: list[tuple[str, int]]
+    files: list[WebDavEntry]
 
 
 def _local_name(tag: str) -> str:
@@ -368,6 +396,14 @@ def raster_assets_from_entries(
     return tuple(sorted(assets, key=lambda asset: asset.path))
 
 
+def _raster_codes(entries: Iterable[WebDavEntry]) -> tuple[str, ...]:
+    return tuple(
+        parse_layer_code(Path(entry.path).name)
+        for entry in entries
+        if not entry.is_collection and entry.path.lower().endswith((".tif", ".tiff"))
+    )
+
+
 def _raster_asset(
     entry: WebDavEntry,
     labels: Mapping[str, str],
@@ -531,8 +567,9 @@ def _discover_entries(
         seen.add(url)
         response = client.request("PROPFIND", url, headers={"Depth": _WEBDAV_DEPTH})
         response.raise_for_status()
+        context = _WebDavTraversalContext(url, depth, max_depth, file_suffixes, queue, files)
         for entry in parse_webdav_entries(response.content):
-            _collect_entry(entry, url, depth, max_depth, file_suffixes, queue, files)
+            _collect_entry(entry, context)
     return tuple(sorted(files, key=lambda entry: entry.path))
 
 
@@ -540,23 +577,15 @@ def _should_visit(url: str, depth: int, seen: set[str], max_depth: int) -> bool:
     return url not in seen and depth <= max_depth
 
 
-def _collect_entry(
-    entry: WebDavEntry,
-    parent_url: str,
-    depth: int,
-    max_depth: int,
-    file_suffixes: tuple[str, ...],
-    queue: list[tuple[str, int]],
-    files: list[WebDavEntry],
-) -> None:
-    if entry.url.rstrip("/") == parent_url.rstrip("/"):
+def _collect_entry(entry: WebDavEntry, context: _WebDavTraversalContext) -> None:
+    if entry.url.rstrip("/") == context.parent_url.rstrip("/"):
         return
     if entry.is_collection:
-        if depth < max_depth:
-            queue.append((entry.url.rstrip("/") + "/", depth + 1))
+        if context.depth < context.max_depth:
+            context.queue.append((entry.url.rstrip("/") + "/", context.depth + 1))
         return
-    if entry.path.lower().endswith(file_suffixes):
-        files.append(entry)
+    if entry.path.lower().endswith(context.file_suffixes):
+        context.files.append(entry)
 
 
 def _fetch_arcgis_labels(
@@ -575,8 +604,69 @@ def _fetch_arcgis_labels(
         offset += len(page_labels)
 
 
+def _retryable_status(status_code: int) -> bool:
+    return status_code == _HTTP_TOO_MANY_REQUESTS or (
+        _HTTP_SERVER_ERROR_MIN <= status_code < _HTTP_STATUS_CODE_LIMIT
+    )
+
+
+def _retry_delay(attempt: int) -> float:
+    return _HTTP_RETRY_BASE_SECONDS * (2**attempt)
+
+
+def _get_attempt(
+    client: _HttpClient,
+    url: str,
+    kwargs: Mapping[str, object],
+    attempt: int,
+) -> _HttpResponse | None:
+    try:
+        response = client.get(url, **kwargs)
+    except httpx.TransportError as error:
+        if attempt + 1 == _HTTP_RETRY_ATTEMPTS:
+            raise
+        logger.warning(
+            "retrying EEA metadata GET %s after transport error (attempt %d/%d): %s",
+            url,
+            attempt + 1,
+            _HTTP_RETRY_ATTEMPTS,
+            error,
+        )
+        time.sleep(_retry_delay(attempt))
+        return None
+    if _retryable_status(response.status_code) and attempt + 1 < _HTTP_RETRY_ATTEMPTS:
+        logger.warning(
+            "retrying EEA metadata GET %s after HTTP %d (attempt %d/%d)",
+            url,
+            response.status_code,
+            attempt + 1,
+            _HTTP_RETRY_ATTEMPTS,
+        )
+        time.sleep(_retry_delay(attempt))
+        return None
+    response.raise_for_status()
+    return response
+
+
+def _get_with_retry(
+    client: _HttpClient,
+    url: str,
+    *,
+    params: Mapping[str, object] | None = None,
+) -> _HttpResponse:
+    """Retry transient metadata GET failures a small, bounded number of times."""
+
+    kwargs = {"params": params} if params is not None else {}
+    for attempt in range(_HTTP_RETRY_ATTEMPTS):
+        response = _get_attempt(client, url, kwargs, attempt)
+        if response is not None:
+            return response
+    raise AssertionError("unreachable retry loop")
+
+
 def _fetch_arcgis_page(client: _HttpClient, service_url: str, offset: int) -> Mapping[str, object]:
-    response = client.get(
+    response = _get_with_retry(
+        client,
         f"{service_url.rstrip('/')}/query",
         params={
             "where": "1=1",
@@ -626,10 +716,10 @@ def resolve_classification_labels(
 ) -> dict[str, str]:
     """Fetch and parse the small authoritative 2021 EUNIS table in memory."""
 
-    response = client.get(f"{catalog_api.rstrip('/')}/{record_id}?language=eng")
+    response = _get_with_retry(client, f"{catalog_api.rstrip('/')}/{record_id}?language=eng")
     response.raise_for_status()
     _title, folder_url = _classification_catalog_links(response.json())
-    share_page = client.get(folder_url)
+    share_page = _get_with_retry(client, folder_url)
     share_page.raise_for_status()
     token = extract_share_token(share_page.text)
     entries = _discover_entries(
@@ -641,7 +731,7 @@ def resolve_classification_labels(
     entry = _select_classification_entry(entries)
     if entry.size is None:
         raise ValueError("EEA classification workbook has no byte size")
-    workbook = client.get(entry.url)
+    workbook = _get_with_retry(client, entry.url)
     workbook.raise_for_status()
     if len(workbook.content) != entry.size:
         raise ValueError("EEA classification workbook byte count differs from metadata")
@@ -658,14 +748,14 @@ def resolve_group(
 ) -> EeaGroup:
     """Resolve one official catalog record without downloading its data."""
 
-    response = client.get(f"{catalog_api.rstrip('/')}/{record_id}?language=eng")
+    response = _get_with_retry(client, f"{catalog_api.rstrip('/')}/{record_id}?language=eng")
     response.raise_for_status()
     title, folder_url, service_url = catalog_links(response.json())
-    share_page = client.get(folder_url)
+    share_page = _get_with_retry(client, folder_url)
     share_page.raise_for_status()
     token = extract_share_token(share_page.text)
     entries = _discover_entries(client, _webdav_folder_url(folder_url, token))
-    labels = _fetch_arcgis_labels(client, service_url, fallback_labels)
+    labels = _resolve_group_labels(client, service_url, entries, fallback_labels)
     raster_assets = raster_assets_from_entries(
         entries,
         labels,
@@ -676,6 +766,19 @@ def resolve_group(
     if not raster_assets and vector_asset is None:
         raise ValueError(f"EEA record has no GeoTIFF or GeoPackage assets: {record_id}")
     return EeaGroup(record_id, title, folder_url, service_url, labels, raster_assets, vector_asset)
+
+
+def _resolve_group_labels(
+    client: _HttpClient,
+    service_url: str,
+    entries: Iterable[WebDavEntry],
+    fallback_labels: Mapping[str, str] | None,
+) -> dict[str, str]:
+    labels = dict(fallback_labels or {})
+    raster_codes = _raster_codes(entries)
+    if not raster_codes or any(code not in labels for code in raster_codes):
+        return _fetch_arcgis_labels(client, service_url, labels)
+    return labels
 
 
 def _vector_asset(
@@ -715,13 +818,36 @@ def _build_vector_asset(
 
 
 def resolve_config(config_path: Path) -> tuple[EeaGroup, ...]:
-    """Resolve all configured EEA records using one bounded HTTP client."""
+    """Resolve an EEA reference JSON file with one bounded HTTP client.
+
+    Parameters:
+        config_path: Path to the project's reference configuration JSON.
+
+    Returns:
+        Resolved raster or vector assets and their classification labels.
+
+    Raises:
+        OSError: If the configuration file cannot be read.
+        ValueError: If configuration or EEA metadata is invalid.
+        httpx.HTTPError: If a metadata request fails after bounded retries.
+    """
 
     return resolve_config_data(json.loads(config_path.read_text(encoding="utf-8")))
 
 
 def resolve_config_data(config: object) -> tuple[EeaGroup, ...]:
-    """Resolve an already-parsed reference config document."""
+    """Resolve an already-parsed EEA reference configuration.
+
+    Parameters:
+        config: Parsed JSON object that follows the reference config schema.
+
+    Returns:
+        Resolved EEA groups and classification labels.
+
+    Raises:
+        ValueError: If the config or resolved EEA metadata is invalid.
+        httpx.HTTPError: If an EEA metadata request fails after bounded retries.
+    """
 
     settings = _config_settings(config)
     with httpx.Client(
@@ -800,16 +926,96 @@ def _resolve_groups(
     )
 
 
+def _should_retry_download_error(
+    error: httpx.HTTPStatusError | httpx.TransportError,
+    attempt: int,
+) -> bool:
+    if attempt + 1 == _HTTP_RETRY_ATTEMPTS:
+        return False
+    if isinstance(error, httpx.TransportError):
+        return True
+    return _retryable_status(error.response.status_code)
+
+
+def _stream_asset(
+    client: StreamClient,
+    asset: RemoteAsset,
+    partial_path: Path,
+) -> tuple[int, str]:
+    digest = hashlib.sha256()
+    with client.stream("GET", asset.url) as response:
+        response.raise_for_status()
+        with partial_path.open("wb") as output:
+            written = write_chunks(
+                response.iter_bytes(chunk_size=8 * 1024 * 1024),
+                output,
+                digest,
+            )
+    return written, digest.hexdigest()
+
+
+def _download_attempt_result(
+    written: int,
+    expected_size: int,
+    digest: str,
+    attempt: int,
+) -> str | None:
+    if written == expected_size:
+        return digest
+    if attempt + 1 == _HTTP_RETRY_ATTEMPTS:
+        raise ValueError(f"EEA asset byte count {written} does not match metadata {expected_size}")
+    return None
+
+
+def _download_asset_attempt(
+    client: StreamClient,
+    asset: RemoteAsset,
+    partial_path: Path,
+    attempt: int,
+) -> str | None:
+    try:
+        written, digest = _stream_asset(client, asset, partial_path)
+    except (httpx.HTTPStatusError, httpx.TransportError) as error:
+        if not _should_retry_download_error(error, attempt):
+            raise
+        logger.warning(
+            "retrying EEA asset download %s after %s (attempt %d/%d): %s",
+            asset.url,
+            type(error).__name__,
+            attempt + 1,
+            _HTTP_RETRY_ATTEMPTS,
+            error,
+        )
+        return None
+    result = _download_attempt_result(written, asset.size, digest, attempt)
+    if result is None:
+        logger.warning(
+            "retrying EEA asset download %s after byte count mismatch (attempt %d/%d)",
+            asset.url,
+            attempt + 1,
+            _HTTP_RETRY_ATTEMPTS,
+        )
+    return result
+
+
 def download_asset(client: StreamClient, asset: RemoteAsset, destination: Path) -> str:
     """Stream one EEA asset and return its SHA-256 after size validation."""
 
     destination.parent.mkdir(parents=True, exist_ok=True)
-    digest = hashlib.sha256()
-    with client.stream("GET", asset.url) as response:
-        response.raise_for_status()
-        with destination.open("wb") as output:
-            written = write_chunks(response.iter_bytes(chunk_size=8 * 1024 * 1024), output, digest)
-    if written != asset.size:
-        destination.unlink(missing_ok=True)
-        raise ValueError(f"EEA asset byte count {written} does not match metadata {asset.size}")
-    return digest.hexdigest()
+    with tempfile.NamedTemporaryFile(
+        dir=destination.parent,
+        prefix=f".{destination.name}.",
+        suffix=".part",
+        delete=False,
+    ) as temporary:
+        partial_path = Path(temporary.name)
+    try:
+        for attempt in range(_HTTP_RETRY_ATTEMPTS):
+            digest = _download_asset_attempt(client, asset, partial_path, attempt)
+            if digest is not None:
+                partial_path.replace(destination)
+                return digest
+            time.sleep(_retry_delay(attempt))
+    finally:
+        partial_path.unlink(missing_ok=True)
+    raise AssertionError("unreachable retry loop")

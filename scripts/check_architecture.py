@@ -17,11 +17,19 @@ MODULES = {
 LAYERS = (
     "_protocols",
     "domain",
+    "options",
     "fileio",
     "geometry",
     "matching",
+    "reference_geometry",
+    "raster_geometry",
+    "geopackage_sql",
+    "geopackage_tiles",
+    "geopackage_reference",
+    "raster_reference",
     "reference",
     "eea",
+    "reference_cache",
     "transform",
     "cards",
     "sources",
@@ -30,7 +38,11 @@ LAYERS = (
     "release_plan",
     "geometry_jobs",
     "manifest_state",
+    "shard_processing",
+    "card_publishing",
+    "release_orchestration",
     "runner",
+    "grid5000",
     "cli",
 )
 FORBIDDEN = {module: set(LAYERS[index + 1 :]) for index, module in enumerate(LAYERS)}
@@ -81,6 +93,7 @@ def _cycles(graph: dict[str, set[str]]) -> list[str]:
 
 
 def main() -> int:
+    """Return a failure status when package imports violate the layer graph."""
     errors = [
         f"{module} is not declared in LAYERS"
         for module in sorted(MODULES.keys() - FORBIDDEN.keys())

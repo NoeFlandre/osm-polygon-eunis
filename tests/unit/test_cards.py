@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
-from shapely.geometry import box, mapping
+from shapely.geometry import GeometryCollection, LineString, Point, Polygon, box, mapping
+from shapely.geometry.base import BaseGeometry
 
-from osm_polygon_eunis.cards import DatasetCardAccumulator
+from osm_polygon_eunis.cards import DatasetCardAccumulator, _map_cell_coordinates
 from osm_polygon_eunis.domain import EunisResult
+from osm_polygon_eunis.geometry import GEOMETRY_POLICY
 
 
 def _geometry(longitude: float, latitude: float) -> str:
@@ -46,6 +49,7 @@ def test_card_artifacts_have_distribution_table_and_static_world_map(tmp_path: P
     ]
     assert "eunis/world-map.svg" in first.files["README.md"].read_text(encoding="utf-8")
     assert first.manifest["total_rows"] == 3
+    assert first.manifest["geometry_policy"] == GEOMETRY_POLICY
     for path in ("README.md", "eunis/world-map.svg"):
         assert first.files[path].read_bytes() == second.files[path].read_bytes()
     assert first.hashes == {
@@ -76,6 +80,14 @@ def test_card_counts_rows_even_when_geometry_is_invalid_or_outside_world() -> No
     assert [summary.rows for summary in card.summaries()] == [1, 1]
 
 
+def test_map_cell_coordinates_uses_representative_point_and_rejects_outside_world() -> None:
+    polygon: BaseGeometry = box(2.0, 48.0, 3.0, 49.0)
+    outside: BaseGeometry = box(200.0, 0.0, 201.0, 1.0)
+
+    assert _map_cell_coordinates(polygon, 2.0) == (91, 69)
+    assert _map_cell_coordinates(outside, 2.0) is None
+
+
 def test_card_counts_undecodable_geometries_separately_from_missing_ones(
     tmp_path: Path,
 ) -> None:
@@ -99,6 +111,32 @@ def test_card_counts_undecodable_geometries_separately_from_missing_ones(
     assert artifacts.manifest["total_rows"] == 4
 
 
+def test_card_counts_non_areal_and_collapsed_geometry_as_invalid(tmp_path: Path) -> None:
+    card = DatasetCardAccumulator()
+    result = EunisResult(None, None, None, None)
+    values = (
+        mapping(Point(1, 2)),
+        mapping(LineString([(0, 0), (1, 1)])),
+        mapping(Polygon([(0, 0), (1, 1), (2, 2), (0, 0)])),
+        mapping(box(-179.0, 50.0, 179.0, 60.0)),
+        mapping(GeometryCollection((box(1, 2, 3, 4), LineString([(0, 0), (1, 1)])))),
+    )
+    for value in values:
+        card.observe(result, value)
+
+    artifacts = card.write_artifacts(
+        tmp_path,
+        dataset_name="website",
+        source_repo="org/source",
+        target_repo="org/target",
+        source_revision="source-revision",
+        reference_version="EEA-test",
+    )
+
+    assert artifacts.manifest["invalid_geometries"] == 4
+    assert artifacts.manifest["total_rows"] == 5
+
+
 def _golden_card() -> DatasetCardAccumulator:
     card = DatasetCardAccumulator()
     for index in range(25):
@@ -111,7 +149,14 @@ def _golden_card() -> DatasetCardAccumulator:
 
 
 def test_default_card_artifacts_are_byte_identical_to_golden_hashes(tmp_path: Path) -> None:
-    # Card and map hashes feed the release manifest and no-op detection.
+    """Assert golden hashes and document their intentional refresh command.
+
+    Card and map hashes feed the release manifest and no-op detection. To
+    refresh after an intentional output change, run:
+    ``EUNIS_UPDATE_CARD_GOLDEN_HASHES=1 uv run pytest
+    tests/unit/test_cards.py::test_default_card_artifacts_are_byte_identical_to_golden_hashes -s``.
+    The opt-in prints replacement values; ``-s`` makes them visible.
+    """
     artifacts = _golden_card().write_artifacts(
         tmp_path,
         dataset_name="website-polygons",
@@ -120,9 +165,11 @@ def test_default_card_artifacts_are_byte_identical_to_golden_hashes(tmp_path: Pa
         source_revision="rev",
         reference_version="EEA",
     )
+    if os.environ.get("EUNIS_UPDATE_CARD_GOLDEN_HASHES") == "1":
+        print(json.dumps(dict(artifacts.hashes), indent=2, sort_keys=True))  # noqa: T201
 
     assert dict(artifacts.hashes) == {
-        "README.md": "bfedb82974521e86cbec5eec9de77d88adfd3e15a10c5cdf28b80050eabedc7e",
+        "README.md": "b6d3caf3702fba491bd8093452baec1e3b58ad2495047b3bbbfc88c7f2f3fd5a",
         "eunis/world-map.svg": "adb1d18e0876692cb71143402828c0aaa5a2df98762e9b43bcb6353d8fdbf731",
     }
 

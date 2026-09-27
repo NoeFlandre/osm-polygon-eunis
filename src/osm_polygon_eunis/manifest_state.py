@@ -14,6 +14,7 @@ from ._protocols import HubApi, StreamClient
 from .eea import EeaGroup
 from .publish import (
     MANIFEST_VERSION,
+    DatasetVerificationOptions,
     ShardExpectation,
     VerificationError,
     VerificationReceipt,
@@ -249,13 +250,15 @@ def _verify_no_op_dataset(
     verification = _verify_final_dataset(
         api,
         plan,
-        expectations=expectations,
-        added_paths=tuple(added_paths),
-        expected_shared_blobs=shared_blobs,
-        expected_manifest=manifest,
-        expected_artifacts=artifacts,
-        temp_dir=workdir / "verify-no-op",
-        http_client=client,
+        options=_FinalDatasetVerificationOptions(
+            expectations=expectations,
+            added_paths=tuple(added_paths),
+            expected_shared_blobs=shared_blobs,
+            expected_manifest=manifest,
+            expected_artifacts=artifacts,
+            temp_dir=workdir / "verify-no-op",
+            http_client=client,
+        ),
     )
     return DatasetReceipt(plan, expectations, verification, no_op=True)
 
@@ -328,28 +331,38 @@ def _try_no_op_release(
     return ReleaseReceipt(receipts, _mapping_field(manifest, "reference"))
 
 
+@dataclass(frozen=True, slots=True)
+class _FinalDatasetVerificationOptions:
+    expectations: tuple[ShardExpectation, ...]
+    added_paths: tuple[str, ...]
+    expected_shared_blobs: Mapping[str, str]
+    expected_manifest: Mapping[str, Any]
+    expected_artifacts: Mapping[str, str]
+    temp_dir: Path
+    http_client: StreamClient
+
+
 def _verify_final_dataset(
     api: HubApi,
     plan: DatasetPlan,
-    *,
-    expectations: tuple[ShardExpectation, ...],
-    added_paths: tuple[str, ...],
-    expected_shared_blobs: Mapping[str, str],
-    expected_manifest: Mapping[str, Any],
-    expected_artifacts: Mapping[str, str],
-    temp_dir: Path,
-    http_client: StreamClient,
+    options: _FinalDatasetVerificationOptions,
 ) -> VerificationReceipt:
     return verify_dataset(
         api,
         plan.spec.output_repo,
-        expectations=expectations,
-        expected_tree_paths=(*plan.source_files, *added_paths, "eunis/manifest.json"),
-        expected_shared_blobs=expected_shared_blobs,
-        expected_manifest=expected_manifest,
-        expected_artifacts=expected_artifacts,
-        temp_dir=temp_dir,
-        http_client=http_client,
+        DatasetVerificationOptions(
+            expectations=options.expectations,
+            expected_tree_paths=(
+                *plan.source_files,
+                *options.added_paths,
+                "eunis/manifest.json",
+            ),
+            expected_shared_blobs=options.expected_shared_blobs,
+            expected_manifest=options.expected_manifest,
+            expected_artifacts=options.expected_artifacts,
+            temp_dir=options.temp_dir,
+            http_client=options.http_client,
+        ),
     )
 
 

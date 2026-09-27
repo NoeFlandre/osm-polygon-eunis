@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import atexit
+import os
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
@@ -12,14 +12,17 @@ from urllib.parse import unquote
 import httpx
 
 from ._protocols import StreamClient
-from .eea import EeaGroup, RemoteAsset, download_asset
+from .eea import EeaGroup, RemoteAsset
 from .fileio import DOWNLOAD_TIMEOUT
-from .reference import GeoPackageReference, RasterLayer, RasterReference
+from .geopackage_reference import GeoPackageReference
+from .options import BatchLimits
+from .raster_reference import RasterLayer, RasterReference
+from .reference_cache import _stage_or_verify_asset
 from .transform import (
     OverlapReference,
 )
 
-_RASTER_GROUP_BATCH_SIZE = 2
+_DEFAULT_LIMITS = BatchLimits()
 
 
 _WORKER_REFERENCE_STACKS: dict[tuple[str, int, int, tuple[str, ...]], ExitStack] = {}
@@ -99,7 +102,7 @@ def _stage_reference_group(
     directory.mkdir(parents=True, exist_ok=True)
     for asset in _reference_assets_for_staging(group):
         path = directory / _asset_filename(asset)
-        checksums[_asset_key(group, asset)] = download_asset(client, asset, path)
+        checksums[_asset_key(group, asset)] = _stage_or_verify_asset(client, asset, path)
 
 
 def _reference_assets_for_staging(group: EeaGroup) -> tuple[RemoteAsset, ...]:
@@ -174,11 +177,7 @@ def _stage_reference_groups(
     client: StreamClient,
 ) -> Iterator[Path]:
     first_record = groups[0].record_id[:8]
-    with TemporaryDirectory(
-        dir=workdir,
-        prefix=f"reference-{first_record}-",
-    ) as directory:
-        root = Path(directory)
+    with _reference_staging_root(workdir, first_record) as root:
         for index, group in enumerate(groups):
             _stage_reference_group(
                 client,
@@ -190,44 +189,17 @@ def _stage_reference_groups(
 
 
 @contextmanager
-def _stage_reference_batch(
-    groups: tuple[EeaGroup, ...],
-    *,
-    workdir: Path,
-    checksums: dict[str, str],
-    client: StreamClient,
-) -> Iterator[Path]:
-    """Stage one reference batch for the legacy single-batch worker path."""
+def _reference_staging_root(workdir: Path, first_record: str) -> Iterator[Path]:
+    """Use Grid node scratch when configured, otherwise a temporary workdir."""
 
-    with _stage_reference_groups(
-        groups,
-        workdir=workdir,
-        checksums=checksums,
-        client=client,
-    ) as root:
+    configured = os.environ.get("EUNIS_REFERENCE_DIR")
+    if configured:
+        root = Path(configured)
+        root.mkdir(parents=True, exist_ok=True)
         yield root
-
-
-@contextmanager
-def _open_local_reference_batch(
-    groups: tuple[EeaGroup, ...],
-    root: Path,
-    threshold: int,
-    *,
-    start_index: int = 0,
-) -> Iterator[tuple[OverlapReference, ...]]:
-    with ExitStack() as stack:
-        references = tuple(
-            stack.enter_context(
-                _open_local_reference_group(
-                    group,
-                    _reference_group_directory(root, start_index + index, group),
-                    threshold,
-                )
-            )
-            for index, group in enumerate(groups)
-        )
-        yield references
+        return
+    with TemporaryDirectory(dir=workdir, prefix=f"reference-{first_record}-") as directory:
+        yield Path(directory)
 
 
 def _worker_reference_batch(
@@ -242,6 +214,7 @@ def _worker_reference_batch(
     cached = _WORKER_REFERENCES.get(key)
     if cached is not None:
         return cached
+    _close_worker_reference_cache()
     stack = ExitStack()
     try:
         references = tuple(
@@ -269,9 +242,6 @@ def _close_worker_reference_cache() -> None:
     _WORKER_REFERENCES.clear()
 
 
-atexit.register(_close_worker_reference_cache)
-
-
 @contextmanager
 def _raster_group_reference(
     client: StreamClient,
@@ -283,7 +253,7 @@ def _raster_group_reference(
     layers = []
     for asset in group.raster_assets:
         path = directory / _asset_filename(asset)
-        digest = download_asset(client, asset, path)
+        digest = _stage_or_verify_asset(client, asset, path)
         if checksums is not None:
             checksums[_asset_key(group, asset)] = digest
         layers.append(
@@ -306,10 +276,11 @@ def _vector_group_reference(
     threshold: int,
     checksums: dict[str, str] | None,
 ) -> Iterator[GeoPackageReference]:
-    assert group.vector_asset is not None
     asset = group.vector_asset
+    if asset is None:
+        raise ValueError(f"EEA group has no reference asset: {group.record_id}")
     path = directory / _asset_filename(asset)
-    digest = download_asset(client, asset, path)
+    digest = _stage_or_verify_asset(client, asset, path)
     if checksums is not None:
         checksums[_asset_key(group, asset)] = digest
     with GeoPackageReference(
@@ -323,12 +294,14 @@ def _vector_group_reference(
 
 def _reference_group_batches(
     groups: tuple[EeaGroup, ...],
+    *,
+    limits: BatchLimits = _DEFAULT_LIMITS,
 ) -> tuple[tuple[EeaGroup, ...], ...]:
     """Bound raster groups while coalescing adjacent vector groups."""
 
     batches: list[list[EeaGroup]] = []
     for group in groups:
-        if _starts_reference_batch(batches, group):
+        if _starts_reference_batch(batches, group, limits):
             batches.append([])
         batches[-1].append(group)
     return tuple(tuple(batch) for batch in batches)
@@ -336,21 +309,27 @@ def _reference_group_batches(
 
 def _indexed_reference_group_batches(
     groups: tuple[EeaGroup, ...],
+    *,
+    limits: BatchLimits = _DEFAULT_LIMITS,
 ) -> tuple[tuple[int, tuple[EeaGroup, ...]], ...]:
     indexed: list[tuple[int, tuple[EeaGroup, ...]]] = []
     start_index = 0
-    for batch in _reference_group_batches(groups):
+    for batch in _reference_group_batches(groups, limits=limits):
         indexed.append((start_index, batch))
         start_index += len(batch)
     return tuple(indexed)
 
 
-def _starts_reference_batch(batches: list[list[EeaGroup]], group: EeaGroup) -> bool:
+def _starts_reference_batch(
+    batches: list[list[EeaGroup]],
+    group: EeaGroup,
+    limits: BatchLimits,
+) -> bool:
     if not batches:
         return True
     current = batches[-1]
     if group.raster_assets:
-        return not current[0].raster_assets or len(current) >= _RASTER_GROUP_BATCH_SIZE
+        return not current[0].raster_assets or len(current) >= limits.raster_groups_per_batch
     return bool(current[0].raster_assets)
 
 
@@ -364,18 +343,12 @@ def _open_reference_batch(
     client: StreamClient,
 ) -> Iterator[tuple[OverlapReference, ...]]:
     first_record = groups[0].record_id[:8]
-    with (
-        TemporaryDirectory(
-            dir=workdir,
-            prefix=f"reference-{first_record}-",
-        ) as directory,
-        ExitStack() as stack,
-    ):
+    with _reference_staging_root(workdir, first_record) as root, ExitStack() as stack:
         references = tuple(
             stack.enter_context(
                 open_reference_group(
                     group,
-                    _reference_group_directory(Path(directory), index, group),
+                    _reference_group_directory(root, index, group),
                     threshold=threshold,
                     checksums=checksums,
                     client=client,

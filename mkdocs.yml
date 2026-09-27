@@ -1,10 +1,15 @@
 site_name: OSM Polygon EUNIS
 site_description: Exact-overlap EUNIS enrichment for OSM polygon datasets
+site_url: https://noeflandre.github.io/osm-polygon-eunis/
+repo_url: https://github.com/NoeFlandre/osm-polygon-eunis
+edit_uri: edit/main/docs/
 theme:
   name: material
 nav:
   - Home: index.md
+  - Python API: api.md
   - Operations: operations.md
+  - Mutation testing: mutation-testing.md
   - Architecture decisions:
       - Reference data and overlap: adr/0001-reference-data-and-overlap.md
       - Hub shard processing: adr/0002-hub-shard-processing.md
