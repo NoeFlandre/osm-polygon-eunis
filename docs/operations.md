@@ -177,6 +177,9 @@ isolated smoke install of the wheel, `uv run mkdocs build --strict`, and
 required status check in branch protection. CodeQL (Python) runs in its own
 workflow, `.github/workflows/codeql.yml`. QA runs once per PR push (`push` is
 limited to `main`), and every third-party action is pinned by commit SHA.
+The separate synthetic performance workflow reports raster tile-cache misses
+and peak process RSS; candidate RSS growth must remain within the configured
+raster tile-cache byte budget.
 
 The release order is:
 

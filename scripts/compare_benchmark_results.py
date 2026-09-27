@@ -8,7 +8,7 @@ import math
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 _TIMING_METRICS = (
     "raster_random_seconds",
@@ -43,6 +43,7 @@ def compare_results(
         return ["candidate benchmark results must contain an invariants object"]
     errors.extend(_candidate_invariant_errors(candidate_invariants))
     errors.extend(_timing_errors(baseline_metrics, candidate_metrics, max_slowdown))
+    errors.extend(_peak_rss_errors(baseline_metrics, candidate_metrics))
     errors.extend(_report_cache_miss_rates(candidate_metrics))
     return errors
 
@@ -103,6 +104,38 @@ def _timing_errors(
         )
         if slowdown > max_slowdown:
             errors.append(f"{name} is {slowdown:.1%} slower, above the {max_slowdown:.1%} limit")
+    return errors
+
+
+def _peak_rss_errors(
+    baseline_metrics: dict[str, Any],
+    candidate_metrics: dict[str, Any],
+) -> list[str]:
+    baseline = baseline_metrics.get("peak_rss_bytes")
+    candidate = candidate_metrics.get("peak_rss_bytes")
+    budget = candidate_metrics.get("raster_tile_cache_budget_bytes")
+    errors: list[str] = []
+    for name, value in (
+        ("baseline", baseline),
+        ("candidate", candidate),
+        ("candidate raster tile cache budget", budget),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            errors.append(f"{name} must have a positive integer measurement")
+    if errors:
+        return errors
+    baseline_bytes = cast(int, baseline)
+    candidate_bytes = cast(int, candidate)
+    budget_bytes = cast(int, budget)
+    print(
+        f"peak RSS: baseline={baseline_bytes} bytes, candidate={candidate_bytes} bytes, "
+        f"increase={candidate_bytes - baseline_bytes} bytes, cache budget={budget_bytes} bytes"
+    )
+    if candidate_bytes - baseline_bytes > budget_bytes:
+        errors.append(
+            f"peak RSS increased by {candidate_bytes - baseline_bytes} bytes, "
+            f"above the {budget_bytes}-byte cache budget"
+        )
     return errors
 
 

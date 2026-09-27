@@ -6,6 +6,13 @@ import hashlib
 import importlib
 import json
 import os
+import sys
+
+try:
+    import resource
+except ImportError:  # pragma: no cover - resource is unavailable on Windows.
+    resource = None
+
 import sqlite3
 import struct
 import time
@@ -180,6 +187,9 @@ def benchmark_result(request: pytest.FixtureRequest) -> dict[str, object]:
     def write_result() -> None:
         destination = os.environ.get("EUNIS_BENCHMARK_RESULT")
         if destination:
+            metrics = result["metrics"]
+            assert isinstance(metrics, dict)
+            metrics["peak_rss_bytes"] = _process_peak_rss_bytes()
             path = Path(destination)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(result, sort_keys=True, indent=2) + "\n", encoding="utf-8")
@@ -194,6 +204,23 @@ def _signature(result: EunisResult) -> tuple[object, ...]:
         result.name,
         result.overlap_percentage,
         result.source_version,
+    )
+
+
+def _peak_rss_bytes_from_platform_units(value: float, *, platform: str) -> int:
+    """Normalize ``ru_maxrss`` to bytes on macOS and Linux benchmark hosts."""
+
+    return int(value if platform == "darwin" else value * 1024)
+
+
+def _process_peak_rss_bytes() -> int:
+    """Read this benchmark process's high-water RSS in bytes."""
+
+    if resource is None:
+        raise RuntimeError("peak RSS measurements require the Unix resource module")
+    return _peak_rss_bytes_from_platform_units(
+        resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+        platform=sys.platform,
     )
 
 
@@ -221,7 +248,7 @@ def _update_sidecar_compatibly(
 def _measure_raster_order(
     case: SyntheticCase,
     order: tuple[int, ...],
-) -> tuple[float, tuple[tuple[object, ...], ...], float | None]:
+) -> tuple[float, tuple[tuple[object, ...], ...], float | None, int | None]:
     reference = RasterReference(case.layers)
     results: list[tuple[object, ...] | None] = [None] * len(order)
     started = time.perf_counter()
@@ -230,7 +257,13 @@ def _measure_raster_order(
             results[index] = _signature(reference.overlap(case.polygons_projected[index]))
     seconds = time.perf_counter() - started
     miss_rate = getattr(reference, "tile_cache_miss_rate", None)
-    return seconds, tuple(result for result in results if result is not None), miss_rate
+    cache_budget = getattr(reference, "tile_cache_byte_budget", None)
+    return (
+        seconds,
+        tuple(result for result in results if result is not None),
+        miss_rate,
+        cache_budget,
+    )
 
 
 def _mask_geometry_function() -> Callable[[np.ndarray, Any], BaseGeometry | None]:
@@ -260,8 +293,14 @@ def test_raster_overlap_random_and_spatial_order_benchmark(
     count = len(case.polygons_projected)
     random_order = tuple(range(count))
     spatial_order = tuple(sorted(random_order, key=lambda index: case.positions[index]))
-    random_seconds, random_results, random_miss_rate = _measure_raster_order(case, random_order)
-    spatial_seconds, spatial_results, spatial_miss_rate = _measure_raster_order(case, spatial_order)
+    random_seconds, random_results, random_miss_rate, cache_budget = _measure_raster_order(
+        case,
+        random_order,
+    )
+    spatial_seconds, spatial_results, spatial_miss_rate, _ = _measure_raster_order(
+        case,
+        spatial_order,
+    )
 
     assert random_results == spatial_results
     assert any(result[0] is not None for result in random_results)
@@ -271,6 +310,7 @@ def test_raster_overlap_random_and_spatial_order_benchmark(
     metrics["raster_spatial_seconds"] = spatial_seconds
     metrics["raster_random_cache_miss_rate"] = random_miss_rate
     metrics["raster_spatial_cache_miss_rate"] = spatial_miss_rate
+    metrics["raster_tile_cache_budget_bytes"] = cache_budget
     invariants = benchmark_result["invariants"]
     assert isinstance(invariants, dict)
     invariants["raster_order_independent"] = True

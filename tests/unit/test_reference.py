@@ -291,6 +291,44 @@ def test_raster_tile_cache_byte_budget_preserves_sidecar_bytes_and_reports_misse
     assert references[1].tile_cache_miss_rate == 1.0
 
 
+def test_raster_tile_cache_evicts_oldest_geometry_at_its_byte_budget() -> None:
+    geometry = box(0, 0, 1, 1)
+    byte_budget = raster_geometry_module._tile_geometry_cache_size(geometry)
+    reference = RasterReference((), tile_cache_bytes=byte_budget)
+
+    reference._cache_tile_geometry(("R11", 0, 0), geometry)
+    reference._cache_tile_geometry(("R11", 0, 1), geometry)
+
+    assert list(reference._tile_cache) == [("R11", 0, 1)]
+    assert reference.tile_cache_bytes == byte_budget
+
+
+def test_raster_overlap_returns_no_result_for_invalid_and_outside_polygons(
+    tmp_path: Path,
+) -> None:
+    raster = _write_raster(tmp_path / "Prob_R11_100m.tif", [[1, 1], [0, 0]])
+    reference = RasterReference((RasterLayer("R11", "steppe", raster, "EEA-test"),))
+
+    invalid = reference.overlap(None)
+    with reference:
+        outside = reference.overlap(box(100, 100, 110, 110))
+        touching = reference.overlap(box(20, 5, 25, 10))
+
+    assert invalid.code is None
+    assert outside.code is None
+    assert touching.code is None
+
+
+def test_raster_reference_rejects_a_nonpositive_tile_cache_budget(tmp_path: Path) -> None:
+    raster = _write_raster(tmp_path / "Prob_R11_100m.tif", [[1, 1], [0, 0]])
+
+    with pytest.raises(ValueError, match="byte budget must be positive"):
+        RasterReference(
+            (RasterLayer("R11", "steppe", raster, "EEA-test"),),
+            tile_cache_bytes=0,
+        )
+
+
 @pytest.mark.filterwarnings(
     "ignore:Use `@` matmul instead of `*` mul operator for matrix multiplication:"
     "PendingDeprecationWarning"
@@ -466,6 +504,31 @@ def test_geopackage_tile_reference_uses_exact_positive_pixels(tmp_path: Path) ->
 
     assert result.code == "R11"
     assert result.overlap_percentage == 50.0
+
+
+def test_geopackage_candidate_lookup_skips_tiles_outside_the_matrix() -> None:
+    layer = tiles_module._TileLayer(
+        "R11",
+        0.0,
+        0.0,
+        20.0,
+        20.0,
+        1,
+        1,
+        2,
+        2,
+        10.0,
+        10.0,
+        0,
+    )
+
+    rows = GeoPackageReference._candidate_tile_rows(
+        sqlite3.connect(":memory:"),
+        layer,
+        box(100, 100, 110, 110),
+    )
+
+    assert rows == []
 
 
 def test_raster_cell_collection_preserves_exact_intersection_area() -> None:

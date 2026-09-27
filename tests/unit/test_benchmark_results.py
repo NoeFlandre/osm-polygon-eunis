@@ -4,7 +4,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from benchmarks.test_synthetic_performance import _update_sidecar_compatibly
+from benchmarks.test_synthetic_performance import (
+    _peak_rss_bytes_from_platform_units,
+    _update_sidecar_compatibly,
+)
 from scripts.compare_benchmark_results import compare_results
 
 
@@ -19,6 +22,8 @@ def _results(value: float) -> dict[str, Any]:
             "raster_random_cache_miss_rate": 0.1,
             "raster_spatial_cache_miss_rate": 0.1,
             "sidecar_cache_miss_rate": 0.1,
+            "peak_rss_bytes": 1_000_000_000,
+            "raster_tile_cache_budget_bytes": 512 * 1024 * 1024,
         },
         "invariants": {
             "raster_order_independent": True,
@@ -61,8 +66,33 @@ def test_sidecar_benchmark_call_supports_options_public_signature() -> None:
     assert result == {"reference": reference, "batch_size": 128}
 
 
+def test_peak_rss_normalizes_macos_bytes_and_linux_kibibytes() -> None:
+    assert _peak_rss_bytes_from_platform_units(123, platform="darwin") == 123
+    assert _peak_rss_bytes_from_platform_units(123, platform="linux") == 123 * 1024
+
+
 def test_compare_results_accepts_measurements_within_the_regression_budget() -> None:
     assert compare_results(_results(10.0), _results(11.4)) == []
+
+
+def test_compare_results_accepts_peak_rss_increase_within_the_cache_budget() -> None:
+    baseline = _results(10.0)
+    candidate = _results(10.0)
+    candidate["metrics"]["peak_rss_bytes"] = 1_500_000_000
+
+    assert compare_results(baseline, candidate) == []
+
+
+def test_compare_results_rejects_peak_rss_increase_over_the_cache_budget() -> None:
+    baseline = _results(10.0)
+    candidate = _results(10.0)
+    candidate["metrics"]["peak_rss_bytes"] = 1_536_870_913
+
+    errors = compare_results(baseline, candidate)
+
+    assert errors == [
+        "peak RSS increased by 536870913 bytes, above the 536870912-byte cache budget"
+    ]
 
 
 def test_compare_results_accepts_a_sha256_sidecar_invariant() -> None:
