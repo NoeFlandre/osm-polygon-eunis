@@ -165,19 +165,25 @@ def _asset(path: str, *, code: str | None = "R11") -> RemoteAsset:
 
 
 @pytest.mark.parametrize(
-    ("payload", "message"),
+    ("contents", "message"),
     [
-        ([], "must be an object"),
-        ({"source_version": "", "crs": "EPSG:3035", "threshold": 0}, "missing source_version"),
-        ({"source_version": "ok", "crs": None, "threshold": 0}, "missing crs"),
-        ({"source_version": "ok", "crs": "EPSG:3035", "threshold": -1}, "invalid threshold"),
+        (None, "not found"),
+        (b"\xff", "cannot be read"),
+        ("[]", "must be an object"),
+        ('{"source_version":"","crs":"EPSG:3035","threshold":0}', "missing source_version"),
+        ('{"source_version":"ok","crs":null,"threshold":0}', "missing crs"),
+        ('{"source_version":"ok","crs":"EPSG:3035","threshold":-1}', "invalid threshold"),
+        ("{", "not valid JSON"),
     ],
 )
 def test_run_release_rejects_invalid_reference_config(
-    tmp_path: Path, payload: object, message: str
+    tmp_path: Path, contents: str | bytes | None, message: str
 ) -> None:
     config = tmp_path / "config.json"
-    config.write_text(json.dumps(payload), encoding="utf-8")
+    if isinstance(contents, bytes):
+        config.write_bytes(contents)
+    elif contents is not None:
+        config.write_text(contents, encoding="utf-8")
 
     with pytest.raises(ValueError, match=message):
         runner.run_release(

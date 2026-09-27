@@ -129,20 +129,6 @@ def test_existing_manifest_is_absent_for_missing_target(tmp_path: Path) -> None:
     )
 
 
-def test_validate_reference_config_rejects_missing_and_invalid(tmp_path: Path) -> None:
-    with pytest.raises(runner.ConfigError, match="not found"):
-        runner.validate_reference_config(tmp_path / "missing.json")
-    broken = tmp_path / "broken.json"
-    broken.write_text("{", encoding="utf-8")
-    with pytest.raises(ValueError, match="not valid JSON"):
-        runner.validate_reference_config(broken)
-    incomplete = tmp_path / "incomplete.json"
-    incomplete.write_text("{}", encoding="utf-8")
-    with pytest.raises(ValueError, match="source_version"):
-        runner.validate_reference_config(incomplete)
-    runner.validate_reference_config(_config(tmp_path))
-
-
 def _no_network() -> CliDependencies:
     return CliDependencies(
         api_factory=lambda _endpoint: pytest.fail("no Hub request expected"),
