@@ -85,3 +85,18 @@ def test_docker_runtime_installs_rasterio_shared_library_dependencies() -> None:
     assert "apt-get update" in runtime
     assert "libexpat1" in runtime
     assert "rm -rf /var/lib/apt/lists/*" in runtime
+
+
+def test_docker_ci_checks_non_root_user_and_secret_free_image_history() -> None:
+    workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "qa.yml").read_text())
+    docker_steps = workflow["jobs"]["docker"]["steps"]
+    commands = "\n".join(step.get("run", "") for step in docker_steps)
+
+    assert "docker image inspect --format" in commands
+    assert '[ "$image_user" = "0" ]' in commands
+    assert '[ "$image_user" = "root" ]' in commands
+    assert '[ "$image_user" = "0:0" ]' in commands
+    assert "docker history --no-trunc" in commands
+    assert "HF_TOKEN" in commands
+    assert "HUGGINGFACE_HUB_TOKEN" in commands
+    assert "hf_[A-Za-z0-9]" in commands

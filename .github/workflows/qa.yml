@@ -58,6 +58,20 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Build the runtime image
         run: docker build --tag osm-polygon-eunis:ci .
+      - name: Check runtime user and image history for Hub credentials
+        env:
+          IMAGE: osm-polygon-eunis:ci
+        run: |
+          image_user="$(docker image inspect --format '{{.Config.User}}' "$IMAGE")"
+          if [ -z "$image_user" ] || [ "$image_user" = "0" ] || [ "$image_user" = "root" ] || [ "$image_user" = "0:0" ]; then
+            echo "runtime image does not use a non-root user" >&2
+            exit 1
+          fi
+          history="$(docker history --no-trunc --format '{{.CreatedBy}}' "$IMAGE")"
+          if printf '%s\n' "$history" | grep -Eiq 'HF_TOKEN|HUGGINGFACE_HUB_TOKEN|hf_[A-Za-z0-9]{20,}'; then
+            echo "Hub credential marker found in runtime image history" >&2
+            exit 1
+          fi
       - name: Check the CLI as the image's non-root user
         run: |
           docker run --rm osm-polygon-eunis:ci --help
