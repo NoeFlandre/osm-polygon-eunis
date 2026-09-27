@@ -50,6 +50,7 @@ def test_real_geometry_to_synthetic_raster_shard(tmp_path: Path, single_pixel_ra
     assert output["eunis_overlap_percentage"].to_pylist() == [pytest.approx(4.822971, abs=1e-4)]
 
 
+@pytest.mark.slow
 def test_parallel_reference_batch_processes_cached_geometry_shards(
     tmp_path: Path,
     monkeypatch,

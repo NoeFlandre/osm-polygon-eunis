@@ -33,7 +33,7 @@ jobs:
         if: matrix.python-version == '3.12'
         run: |
           start_ns="$(date +%s%N)"
-          uv run --frozen pytest --durations=20
+          .venv/bin/pytest --durations=20
           elapsed_ms="$(( ($(date +%s%N) - start_ns) / 1000000 ))"
           echo "Default pytest runtime: ${elapsed_ms} ms (limit: 5000 ms)"
           if [ "$elapsed_ms" -ge 5000 ]; then

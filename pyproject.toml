@@ -46,11 +46,12 @@ packages = ["src/osm_polygon_eunis"]
 "config/eea-2021-reference.json" = "osm_polygon_eunis/eea-2021-reference.json"
 
 [tool.pytest.ini_options]
-addopts = "--strict-config --strict-markers"
+addopts = "--strict-config --strict-markers -m 'not slow'"
 testpaths = ["tests"]
 pythonpath = [".", "src"]
 markers = [
   "property: deterministic property-based tests",
+  "slow: computational tests run separately by the full quality target",
 ]
 
 [tool.coverage.run]

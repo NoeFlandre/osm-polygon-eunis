@@ -16,9 +16,11 @@ formatting, and `ty`. To run them over the checkout:
 uvx pre-commit run --all-files
 ```
 
-The full quality target also runs tests with the CI Hypothesis profile,
-branch-aware CRAP checks, architecture checks, Vulture, the release smoke test,
-and strict documentation validation:
+The default `pytest` command skips computational tests marked `slow` to stay
+under five seconds. `make test` and the full quality target run both the fast
+and slow tests with the CI Hypothesis profile, plus branch-aware CRAP checks,
+architecture checks, Vulture, the release smoke test, and strict documentation
+validation:
 
 ```bash
 make quality

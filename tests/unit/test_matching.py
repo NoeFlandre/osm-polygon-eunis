@@ -227,6 +227,7 @@ def _rectangles(draw: st.DrawFn):
 
 
 @pytest.mark.property
+@pytest.mark.slow
 @given(_rectangles(), st.lists(_rectangles(), min_size=1, max_size=5))
 def test_overlap_percentage_is_bounded(polygon, geometries) -> None:
     candidates = tuple(
@@ -240,6 +241,7 @@ def test_overlap_percentage_is_bounded(polygon, geometries) -> None:
 
 
 @pytest.mark.property
+@pytest.mark.slow
 @given(_rectangles(), st.lists(_rectangles(), min_size=1, max_size=5))
 def test_candidate_permutation_does_not_change_result(polygon, geometries) -> None:
     candidates = tuple(

@@ -151,6 +151,7 @@ def test_to_equal_area_projects_wgs84_geometry() -> None:
     assert safe_area(geometry) > 0
 
 
+@pytest.mark.slow
 def test_to_equal_area_densifies_large_wgs84_edges_before_projection() -> None:
     polygon = box(-10.0, 35.0, 30.0, 70.0)
     actual = to_equal_area(polygon)

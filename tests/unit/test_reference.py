@@ -366,6 +366,7 @@ def test_mask_geometry_uses_polygon_constructor_and_zero_copy_mask(
 
 
 @pytest.mark.property
+@pytest.mark.slow
 @pytest.mark.filterwarnings(
     "ignore:Use `@` matmul instead of `*` mul operator for matrix multiplication:"
     "PendingDeprecationWarning"
