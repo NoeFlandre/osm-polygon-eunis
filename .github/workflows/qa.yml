@@ -32,14 +32,21 @@ jobs:
       - name: Keep the default pytest run under five seconds
         if: matrix.python-version == '3.12'
         run: |
-          start_ns="$(date +%s%N)"
-          .venv/bin/pytest --durations=20
-          elapsed_ms="$(( ($(date +%s%N) - start_ns) / 1000000 ))"
-          echo "Default pytest runtime: ${elapsed_ms} ms (limit: 5000 ms)"
-          if [ "$elapsed_ms" -ge 5000 ]; then
-            echo "Default pytest exceeded the five-second limit" >&2
+          log_file="$RUNNER_TEMP/default-pytest.log"
+          if .venv/bin/pytest --durations=20 >"$log_file" 2>&1; then
+            cat "$log_file"
+          else
+            test_status=$?
+            cat "$log_file"
+            exit "$test_status"
+          fi
+          elapsed="$(sed -nE 's/^=+.* in ([0-9]+(\.[0-9]+)?)s =+$/\1/p' "$log_file" | tail -n 1)"
+          if [ -z "$elapsed" ]; then
+            echo "Could not read pytest's reported runtime" >&2
             exit 1
           fi
+          echo "Default pytest runtime: ${elapsed}s (limit: 5s)"
+          python -c 'import sys; sys.exit(float(sys.argv[1]) >= 5)' "$elapsed"
       - run: make quality
 
   build:
