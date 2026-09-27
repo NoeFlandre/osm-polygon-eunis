@@ -20,6 +20,85 @@ _WALLTIME_PATTERN: Final = re.compile(r"\d+:[0-5]\d:[0-5]\d")
 _TOKEN_PATTERN: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 _PERSISTENT_PREFIXES: Final = ("/home/", "/groups/", "/srv/")
 DEFAULT_DATASETS: Final = ("website", "wikidata", "description")
+_ACTIVE_EUNIS_JOBS_SCRIPT: Final = r"""import json
+import subprocess
+import urllib.parse
+import urllib.request
+
+BASE = "https://api.grid5000.fr/stable"
+TERMINAL = {"terminated", "error", "killed", "deleted", "finished", "completed"}
+MARKERS = ("osm-polygon-eunis", "/scripts/grid5000/release.sh", "grid5000_source_revision")
+
+def get_json(url):
+    request = urllib.request.Request(url, headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return json.load(response)
+    except Exception as error:
+        raise RuntimeError(f"Grid5000 API request failed for {url}: {error}") from error
+
+def items(url):
+    visited = set()
+    while url:
+        if url in visited:
+            raise RuntimeError("Grid5000 API pagination loop")
+        visited.add(url)
+        payload = get_json(url)
+        if isinstance(payload, list):
+            yield from payload
+            return
+        if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+            raise RuntimeError("unexpected Grid5000 API collection response")
+        yield from payload["items"]
+        links = payload.get("links", [])
+        next_link = next(
+            (link.get("href") for link in links
+             if isinstance(link, dict) and link.get("rel") == "next"),
+            None,
+        )
+        url = urllib.parse.urljoin(BASE + "/", next_link) if next_link else None
+
+sites = list(items(BASE + "/sites"))
+active_jobs = []
+errors = []
+for site in sites:
+    if not isinstance(site, dict):
+        raise RuntimeError("unexpected Grid5000 site entry")
+    site_id = site.get("uid") or site.get("id")
+    if not isinstance(site_id, str) or not site_id:
+        raise RuntimeError("Grid5000 site entry has no identifier")
+    try:
+        result = subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", site_id,
+             "oarstat", "-u", "-J"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        jobs = json.loads(result.stdout) if result.stdout.strip() else {}
+        if not isinstance(jobs, dict):
+            raise RuntimeError("oarstat did not return a job object")
+        for job_id, job in jobs.items():
+            if not isinstance(job, dict):
+                raise RuntimeError("oarstat returned a malformed job entry")
+            state = str(job.get("state", "")).casefold()
+            searchable = " ".join(
+                str(job.get(key, ""))
+                for key in ("name", "command", "launching_directory", "initial_request")
+            ).casefold()
+            if state not in TERMINAL and any(marker in searchable for marker in MARKERS):
+                active_jobs.append({
+                    "site": site_id,
+                    "job_id": str(job.get("id", job_id)),
+                    "state": state or "unknown",
+                    "name": job.get("name"),
+                })
+    except Exception as error:
+        errors.append({"site": site_id, "error": f"{type(error).__name__}: {error}"})
+print(json.dumps({"active_jobs": active_jobs, "errors": errors},
+                 sort_keys=True, separators=(",", ":")))
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +208,12 @@ def build_policy_command() -> Command:
     return ("usagepolicycheck", "-t")
 
 
+def build_active_eunis_jobs_command(frontend: str) -> Command:
+    """Query active project jobs on every site through authenticated OAR SSH."""
+
+    return build_ssh_command(frontend, ("python3", "-c", _ACTIVE_EUNIS_JOBS_SCRIPT))
+
+
 def build_oarsub_command(
     config: Grid5000Config,
     script: str,
@@ -140,6 +225,7 @@ def build_oarsub_command(
     if not script or not script.startswith("/"):
         raise ValueError("worker script must be an absolute remote path")
     command = ["oarsub", "-q", config.queue]
+    command.extend(("-n", "osm-polygon-eunis"))
     if config.job_type is not None:
         command.extend(("-t", config.job_type))
     worker_command = " ".join(
@@ -211,32 +297,52 @@ def build_ssh_command(frontend: str, command: Command) -> Command:
     return ("ssh", frontend, shlex.join(command))
 
 
-def build_rsync_command(local_root: Path, frontend: str, remote_root: str) -> Command:
-    """Build a code-only sync command with secrets and run state excluded."""
+def build_source_sync_command(
+    local_root: Path,
+    frontend: str,
+    persistent_root: str,
+    source_revision: str,
+) -> Command:
+    """Stream one exact Git commit to a staged, tracked-files-only source tree."""
 
-    remote = validate_persistent_root(remote_root)
-    source = Path(local_root).resolve()
-    return (
-        "rsync",
-        "-az",
-        "--exclude=.git",
-        "--exclude=.venv",
-        "--exclude=.eunis-run",
-        "--exclude=.eunis-run-final",
-        "--exclude=.grid5000-*.json",
-        "--exclude=.env",
-        "--exclude=.cache",
-        "--exclude=.uv-cache",
-        "--exclude=.coverage*",
-        "--exclude=coverage.json",
-        "--exclude=data",
-        "--exclude=results",
-        "--exclude=artifacts",
-        "--exclude=__pycache__",
-        "--exclude=.pytest_cache",
-        f"{source.as_posix().rstrip('/')}/",
-        f"{frontend}:{remote.rstrip('/')}/",
+    remote_root = validate_persistent_root(persistent_root)
+    source_root = f"{remote_root.rstrip('/')}/source"
+    stage_root = f"{remote_root.rstrip('/')}/.eunis-source-stage.XXXXXX"
+    remote_script = f"""set -eu
+target={shlex.quote(source_root)}
+parent={shlex.quote(remote_root)}
+stage="$(mktemp -d {shlex.quote(stage_root)})"
+backup="$parent/.eunis-source-backup.$$"
+cleanup() {{
+  if [ -d "$stage" ]; then rm -rf -- "$stage"; fi
+  if [ -e "$backup" ] && [ ! -e "$target" ]; then mv -- "$backup" "$target"; fi
+}}
+trap cleanup EXIT
+if [ -e "$backup" ] || [ -L "$target" ] || {{ [ -e "$target" ] && [ ! -d "$target" ]; }}; then
+  echo 'unsafe existing Grid source path' >&2
+  exit 2
+fi
+tar -xf - -C "$stage"
+if [ -e "$target" ]; then mv -- "$target" "$backup"; fi
+if ! mv -- "$stage" "$target"; then
+  if [ -e "$backup" ]; then mv -- "$backup" "$target"; fi
+  exit 1
+fi
+stage=''
+if [ -e "$backup" ]; then rm -rf -- "$backup"; fi
+trap - EXIT
+"""
+    remote_command = build_ssh_command(frontend, ("bash", "-c", remote_script))
+    archive_command = (
+        "git",
+        "-C",
+        str(Path(local_root).resolve()),
+        "archive",
+        "--format=tar",
+        source_revision,
     )
+    pipeline = f"{shlex.join(archive_command)} | {shlex.join(remote_command)}"
+    return ("bash", "-o", "pipefail", "-c", pipeline)
 
 
 def _remote_source_root(config: Grid5000Config) -> str:
@@ -363,7 +469,8 @@ def _command_runner(runner: CommandRunner | None) -> CommandRunner:
 
 
 def _source_tree_is_dirty(runner: CommandRunner, root: str) -> bool:
-    return bool(runner(("git", "-C", root, "status", "--porcelain")).strip())
+    status = runner(("git", "-C", root, "status", "--porcelain"))
+    return any(not line.startswith("?? ") for line in status.splitlines())
 
 
 def _resolve_revision(runner: CommandRunner, root: str, explicit: str | None) -> str:
@@ -387,14 +494,17 @@ def submit_grid5000(
     _validate_source_revision(source_revision)
     command_runner = _command_runner(runner)
     state_path = _validate_live_submission_state(state_path, dry_run=dry_run)
-    if not dry_run:
-        _reject_existing_state(config, state_path, command_runner)
 
     commands = _submission_commands(config, local_root, source_revision)
     if dry_run:
         return Grid5000Submission(None, DEFAULT_DATASETS, source_revision, commands)
 
-    job_id = _run_submission(commands[:-1], command_runner)
+    command_runner(commands[0])
+    _reject_active_eunis_jobs(command_runner(commands[1]))
+    _reject_existing_state(config, state_path, command_runner)
+    command_runner(commands[2])
+    command_runner(commands[3])
+    job_id = parse_job_id(command_runner(commands[4]))
     job = Grid5000Job(
         job_id=job_id,
         submitted_at=datetime.now(UTC).isoformat(),
@@ -402,7 +512,7 @@ def submit_grid5000(
         source_revision=source_revision,
     )
     _write_optional_state(state_path, job)
-    command_runner(commands[-1])
+    command_runner(commands[5])
     return Grid5000Submission(job, DEFAULT_DATASETS, source_revision, commands)
 
 
@@ -429,11 +539,16 @@ def _submission_commands(
     local_root: Path,
     source_revision: str,
 ) -> tuple[Command, ...]:
-    source_root = _remote_source_root(config)
     return (
         build_ssh_command(config.frontend, build_policy_command()),
-        build_ssh_command(config.frontend, ("mkdir", "-p", source_root)),
-        build_rsync_command(local_root, config.frontend, source_root),
+        build_active_eunis_jobs_command(config.frontend),
+        build_ssh_command(config.frontend, ("mkdir", "-p", config.persistent_root)),
+        build_source_sync_command(
+            local_root,
+            config.frontend,
+            config.persistent_root,
+            source_revision,
+        ),
         build_ssh_command(
             config.frontend,
             build_oarsub_command(
@@ -446,11 +561,32 @@ def _submission_commands(
     )
 
 
-def _run_submission(commands: tuple[Command, ...], runner: CommandRunner) -> str:
-    runner(commands[0])
-    runner(commands[1])
-    runner(commands[2])
-    return parse_job_id(runner(commands[3]))
+def _reject_active_eunis_jobs(output: str) -> None:
+    try:
+        report = json.loads(output)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("cannot verify active EUNIS jobs across Grid'5000 sites") from error
+    if not isinstance(report, dict):
+        raise TypeError("cannot verify active EUNIS jobs across Grid'5000 sites")
+    matches = report.get("active_jobs")
+    errors = report.get("errors")
+    if (
+        not isinstance(matches, list)
+        or any(not isinstance(item, dict) for item in matches)
+        or not isinstance(errors, list)
+        or any(not isinstance(item, dict) for item in errors)
+    ):
+        raise TypeError("cannot verify active EUNIS jobs across Grid'5000 sites")
+    if matches:
+        summary = ", ".join(
+            f"{item.get('site', 'unknown')}:{item.get('job_id', 'unknown')}"
+            f" ({item.get('state', 'unknown')})"
+            for item in matches
+        )
+        raise RuntimeError(f"active EUNIS Grid'5000 job(s) already exist: {summary}")
+    if errors:
+        sites = ", ".join(str(item.get("site", "unknown")) for item in errors)
+        raise RuntimeError(f"cannot verify active EUNIS jobs on Grid'5000 site(s): {sites}")
 
 
 def _write_optional_state(path: Path | None, job: Grid5000Job) -> None:

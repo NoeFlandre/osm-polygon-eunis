@@ -100,6 +100,18 @@ duplicate jobs across sites. The worker uses persistent sidecars and node-local
 scratch for large files. Follow [the operations runbook](docs/operations.md)
 for the policy check, submission, receipt, verification, and no-op rerun.
 
+After the all-site duplicate and policy checks pass, submit the resumable job
+from the controller:
+
+```bash
+osm-polygon-eunis grid5000 submit \
+  --site SITE \
+  --frontend FRONTEND \
+  --cluster CLUSTER \
+  --persistent-root /home/USER/osm-polygon-eunis \
+  --state /path/on/external-HDD/eunis-grid5000-state.json
+```
+
 ## Local development
 
 ```bash

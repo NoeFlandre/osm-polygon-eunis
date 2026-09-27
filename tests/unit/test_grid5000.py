@@ -11,15 +11,18 @@ from osm_polygon_eunis import grid5000
 from osm_polygon_eunis.grid5000 import (
     Grid5000Config,
     Grid5000Job,
+    build_active_eunis_jobs_command,
     build_oarsub_command,
     build_policy_command,
-    build_rsync_command,
+    build_source_sync_command,
     build_ssh_command,
     build_status_command,
     parse_job_id,
     submit_grid5000,
     validate_persistent_root,
 )
+
+_EMPTY_ALL_SITE_REPORT = '{"active_jobs": [], "errors": []}'
 
 
 class _ConfigOverrides(TypedDict):
@@ -67,6 +70,8 @@ def test_profile_requests_one_cpu_host_on_any_explicit_site() -> None:
         "oarsub",
         "-q",
         "default",
+        "-n",
+        "osm-polygon-eunis",
         "-p",
         "cluster='dahu'",
         "-l",
@@ -91,6 +96,7 @@ def test_submission_command_records_optional_job_metadata() -> None:
     )
 
     assert command[command.index("-t") + 1] == "deploy"
+    assert command[command.index("-n") + 1] == "osm-polygon-eunis"
     assert "GRID5000_JOB_TYPE=deploy" in command[-1]
     assert "GRID5000_SOURCE_REVISION=abc123" in command[-1]
 
@@ -171,27 +177,34 @@ def test_ssh_command_preserves_oar_expression_quotes_for_remote_shell() -> None:
     assert tuple(shlex.split(ssh_command[2])) == remote_command
 
 
-def test_rsync_excludes_credentials_and_ephemeral_project_state() -> None:
-    command = build_rsync_command(
+def test_source_sync_streams_only_the_requested_git_commit() -> None:
+    command = build_source_sync_command(
         Path("/workspace/eunis"),
         "fgrenoble",
-        "/home/u/eunis/source",
+        "/home/u/eunis",
+        "0123456789abcdef",
     )
 
-    assert command[:2] == ("rsync", "-az")
-    assert "--exclude=.git" in command
-    assert "--exclude=.venv" in command
-    assert "--exclude=.eunis-run-final" in command
-    assert "--exclude=.grid5000-*.json" in command
-    assert "--exclude=.env" in command
-    assert "--exclude=.cache" in command
-    assert "--exclude=.coverage*" in command
-    assert "--exclude=coverage.json" in command
-    assert command[-2:] == (
-        "/workspace/eunis/",
-        "fgrenoble:/home/u/eunis/source/",
-    )
+    assert command[:4] == ("bash", "-o", "pipefail", "-c")
+    assert "git -C /workspace/eunis archive --format=tar 0123456789abcdef" in command[4]
+    assert "ssh fgrenoble" in command[4]
+    assert "tar -xf -" in command[4]
+    assert ".eunis-run-final" not in command[4]
+    assert "rsync" not in " ".join(command)
     assert "HF_TOKEN" not in " ".join(command)
+
+
+def test_all_site_job_check_uses_oarstat_on_api_discovered_sites() -> None:
+    command = build_active_eunis_jobs_command("fgrenoble")
+    remote_args = shlex.split(command[2])
+
+    assert command[:2] == ("ssh", "fgrenoble")
+    assert "https://api.grid5000.fr/stable" in command[2]
+    assert '"/sites"' in command[2]
+    assert "jobs" in command[2]
+    assert "oarstat" in command[2]
+    assert "osm-polygon-eunis" in command[2]
+    compile(remote_args[-1], "<Grid5000 active-job check>", "exec")
 
 
 def test_grid_job_is_immutable() -> None:
@@ -213,6 +226,8 @@ def test_submit_runs_policy_sync_oar_and_post_policy_without_secrets(tmp_path: P
 
     def fake_runner(command: tuple[str, ...]) -> str:
         calls.append(command)
+        if command == grid5000.build_active_eunis_jobs_command("fgrenoble"):
+            return _EMPTY_ALL_SITE_REPORT
         if command[:2] == ("ssh", "fgrenoble") and shlex.split(command[2])[0] == "oarsub":
             return "[AO] Adding job 123456\n"
         return ""
@@ -230,10 +245,11 @@ def test_submit_runs_policy_sync_oar_and_post_policy_without_secrets(tmp_path: P
     assert result.datasets == ("website", "wikidata", "description")
     assert result.source_revision == "abc123"
     assert calls[0] == ("ssh", "fgrenoble", "usagepolicycheck -t")
-    assert calls[1] == ("ssh", "fgrenoble", "mkdir -p /home/u/eunis/source")
-    assert calls[2][0:2] == ("rsync", "-az")
-    assert calls[3][:2] == ("ssh", "fgrenoble")
-    remote_oarsub = tuple(shlex.split(calls[3][2]))
+    assert calls[1] == grid5000.build_active_eunis_jobs_command("fgrenoble")
+    assert calls[2] == ("ssh", "fgrenoble", "mkdir -p /home/u/eunis")
+    assert calls[3][:4] == ("bash", "-o", "pipefail", "-c")
+    assert calls[4][:2] == ("ssh", "fgrenoble")
+    remote_oarsub = tuple(shlex.split(calls[4][2]))
     assert remote_oarsub[remote_oarsub.index("-p") + 1] == "cluster='dahu'"
     assert remote_oarsub[-1] == (
         "GRID5000_PERSISTENT_ROOT=/home/u/eunis GRID5000_FRONTEND=fgrenoble "
@@ -242,7 +258,7 @@ def test_submit_runs_policy_sync_oar_and_post_policy_without_secrets(tmp_path: P
         "GRID5000_BATCH_SIZE=256 GRID5000_SOURCE_REVISION=abc123 "
         "/home/u/eunis/source/scripts/grid5000/release.sh"
     )
-    assert calls[4] == ("ssh", "fgrenoble", "usagepolicycheck -t")
+    assert calls[5] == ("ssh", "fgrenoble", "usagepolicycheck -t")
     assert all("HF_TOKEN" not in " ".join(command) for command in calls)
     assert json.loads(state.read_text(encoding="utf-8"))["job_id"] == "123456"
 
@@ -272,6 +288,8 @@ def test_submit_persists_job_id_before_post_submission_policy_check(tmp_path: Pa
             policy_checks += 1
             if policy_checks == 2:
                 raise subprocess.CalledProcessError(1, command, stderr="policy violation")
+        if command == grid5000.build_active_eunis_jobs_command("fgrenoble"):
+            return _EMPTY_ALL_SITE_REPORT
         if command[:2] == ("ssh", "fgrenoble") and shlex.split(command[2])[0] == "oarsub":
             return "[AO] Adding job 123456\n"
         return ""
@@ -297,6 +315,10 @@ def test_submit_rejects_an_existing_active_job(tmp_path: Path) -> None:
 
     def fake_runner(command: tuple[str, ...]) -> str:
         calls.append(command)
+        if command == grid5000.build_active_eunis_jobs_command("fgrenoble"):
+            return _EMPTY_ALL_SITE_REPORT
+        if shlex.split(command[2])[0] == "oarstat":
+            return "running"
         return "running"
 
     with pytest.raises(RuntimeError, match="already active"):
@@ -308,7 +330,81 @@ def test_submit_rejects_an_existing_active_job(tmp_path: Path) -> None:
             runner=fake_runner,
         )
 
-    assert calls == [("ssh", "fgrenoble", "oarstat -j 123456")]
+    assert calls[:2] == [
+        ("ssh", "fgrenoble", "usagepolicycheck -t"),
+        grid5000.build_active_eunis_jobs_command("fgrenoble"),
+    ]
+    assert calls[2] == ("ssh", "fgrenoble", "oarstat -j 123456")
+
+
+def test_submit_refuses_active_eunis_job_reported_by_any_site(tmp_path: Path) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_runner(command: tuple[str, ...]) -> str:
+        calls.append(command)
+        if command == grid5000.build_active_eunis_jobs_command("fgrenoble"):
+            return (
+                '{"active_jobs": [{"job_id": "6942984", "site": "nancy", '
+                '"state": "running"}], "errors": []}'
+            )
+        return ""
+
+    with pytest.raises(RuntimeError, match="nancy:6942984"):
+        submit_grid5000(
+            _config(),
+            tmp_path,
+            source_revision="abc123",
+            state_path=tmp_path / "state.json",
+            runner=fake_runner,
+        )
+
+    assert calls == [
+        ("ssh", "fgrenoble", "usagepolicycheck -t"),
+        grid5000.build_active_eunis_jobs_command("fgrenoble"),
+    ]
+    assert not (tmp_path / "state.json").exists()
+
+
+def test_submit_fails_closed_when_all_site_job_report_is_invalid(tmp_path: Path) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_runner(command: tuple[str, ...]) -> str:
+        calls.append(command)
+        if command == grid5000.build_active_eunis_jobs_command("fgrenoble"):
+            return "permission denied"
+        return ""
+
+    with pytest.raises(RuntimeError, match="cannot verify active EUNIS jobs"):
+        submit_grid5000(
+            _config(),
+            tmp_path,
+            source_revision="abc123",
+            state_path=tmp_path / "state.json",
+            runner=fake_runner,
+        )
+
+    assert len(calls) == 2
+
+
+def test_submit_fails_closed_when_any_site_inventory_failed(tmp_path: Path) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_runner(command: tuple[str, ...]) -> str:
+        calls.append(command)
+        if command == grid5000.build_active_eunis_jobs_command("fgrenoble"):
+            return '{"active_jobs": [], "errors": [{"site": "bordeaux"}]}'
+        return ""
+
+    with pytest.raises(RuntimeError, match="bordeaux"):
+        submit_grid5000(
+            _config(),
+            tmp_path,
+            source_revision="abc123",
+            state_path=tmp_path / "state.json",
+            runner=fake_runner,
+        )
+
+    assert len(calls) == 2
 
 
 def test_submit_refuses_when_existing_job_status_cannot_be_verified(tmp_path: Path) -> None:
@@ -319,7 +415,11 @@ def test_submit_refuses_when_existing_job_status_cannot_be_verified(tmp_path: Pa
 
     def fake_runner(command: tuple[str, ...]) -> str:
         calls.append(command)
-        raise subprocess.CalledProcessError(255, command, stderr="Connection timed out")
+        if command == grid5000.build_active_eunis_jobs_command("fgrenoble"):
+            return _EMPTY_ALL_SITE_REPORT
+        if command[:2] == ("ssh", "fgrenoble") and shlex.split(command[2])[0] == "oarstat":
+            raise subprocess.CalledProcessError(255, command, stderr="Connection timed out")
+        return ""
 
     with pytest.raises(RuntimeError, match="cannot verify"):
         submit_grid5000(
@@ -330,7 +430,11 @@ def test_submit_refuses_when_existing_job_status_cannot_be_verified(tmp_path: Pa
             runner=fake_runner,
         )
 
-    assert calls == [("ssh", "fgrenoble", "oarstat -j 123456")]
+    assert calls[:2] == [
+        ("ssh", "fgrenoble", "usagepolicycheck -t"),
+        grid5000.build_active_eunis_jobs_command("fgrenoble"),
+    ]
+    assert calls[2] == ("ssh", "fgrenoble", "oarstat -j 123456")
 
 
 def test_config_rejects_capacity_batch_and_blank_profile_fields() -> None:
@@ -374,6 +478,7 @@ def test_submit_dry_run_builds_commands_without_contacting_grid5000(tmp_path: Pa
 
     assert result.job is None
     assert result.commands[0] == ("ssh", "fgrenoble", "usagepolicycheck -t")
+    assert result.commands[1] == grid5000.build_active_eunis_jobs_command("fgrenoble")
     assert calls == []
 
 
@@ -386,6 +491,8 @@ def test_submit_replaces_state_after_terminal_job_and_writes_safe_state(
 
     def fake_runner(command: tuple[str, ...]) -> str:
         calls.append(command)
+        if command == grid5000.build_active_eunis_jobs_command("fgrenoble"):
+            return _EMPTY_ALL_SITE_REPORT
         if command[:2] == ("ssh", "fgrenoble") and shlex.split(command[2])[0] == "oarstat":
             raise subprocess.CalledProcessError(1, command, stderr="ERROR: job not found")
         if command[:2] == ("ssh", "fgrenoble") and shlex.split(command[2])[0] == "oarsub":
@@ -420,6 +527,12 @@ def test_submit_replaces_state_after_terminal_job_and_writes_safe_state(
     assert calls[0] == (
         "ssh",
         "fgrenoble",
+        "usagepolicycheck -t",
+    )
+    assert calls[1] == grid5000.build_active_eunis_jobs_command("fgrenoble")
+    assert calls[2] == (
+        "ssh",
+        "fgrenoble",
         f"oarstat -j {first.job.job_id}",
     )
 
@@ -441,11 +554,17 @@ def test_submit_rejects_corrupt_or_incomplete_state(tmp_path: Path) -> None:
         state = tmp_path / "state.json"
         state.write_text(contents, encoding="utf-8")
         with pytest.raises(ValueError, match="job state"):
+
+            def fake_runner(command: tuple[str, ...]) -> str:
+                if command == grid5000.build_active_eunis_jobs_command("fgrenoble"):
+                    return _EMPTY_ALL_SITE_REPORT
+                return ""
+
             submit_grid5000(
                 config,
                 tmp_path,
                 source_revision="abc123",
-                runner=lambda command: "",
+                runner=fake_runner,
                 state_path=state,
             )
 
@@ -463,8 +582,16 @@ def test_resolve_source_revision_checks_cleanliness() -> None:
         grid5000.resolve_source_revision(Path("/workspace/eunis"), runner=clean_runner) == "abc123"
     )
 
+    def untracked_runner(command: tuple[str, ...]) -> str:
+        return "?? .eunis-run-final/\n" if "--porcelain" in command else "abc123\n"
+
+    assert (
+        grid5000.resolve_source_revision(Path("/workspace/eunis"), runner=untracked_runner)
+        == "abc123"
+    )
+
     def dirty_runner(command: tuple[str, ...]) -> str:
-        return "M README.md" if command[-1] == "--porcelain" else ""
+        return "M README.md" if "--porcelain" in command else ""
 
     with pytest.raises(RuntimeError, match="dirty"):
         grid5000.resolve_source_revision(Path("/workspace/eunis"), runner=dirty_runner)

@@ -6,7 +6,7 @@ import hashlib
 import json
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -23,13 +23,50 @@ from osm_polygon_eunis.sources import DatasetSpec
 
 def test_reference_signature_is_order_independent_and_uses_current_kernel() -> None:
     expected_payload = json.dumps(
-        {"checksums": {"a": "1", "b": "2"}, "threshold": 4, "kernel": 3},
+        {
+            "checksums": {"a": "1", "b": "2"},
+            "threshold": 4,
+            "kernel": 3,
+            "reference_groups": [],
+        },
         sort_keys=True,
     )
 
     assert (
         geometry_jobs._reference_signature({"b": "2", "a": "1"}, 4)
         == hashlib.sha256(expected_payload.encode("utf-8")).hexdigest()
+    )
+
+
+def test_reference_signature_includes_reference_version_and_labels() -> None:
+    asset = _asset("/habitats.gpkg", code=None)
+    group = EeaGroup("record", "title", "folder", "service", {"R11": "steppe"}, (), asset)
+    revised_asset = replace(asset, source_version="EEA-next")
+    relabeled_group = replace(group, labels={"R11": "new name"})
+
+    initial = geometry_jobs._reference_signature({}, 4, (group,))
+
+    assert (
+        geometry_jobs._reference_signature({}, 4, (replace(group, vector_asset=revised_asset),))
+        != initial
+    )
+    assert geometry_jobs._reference_signature({}, 4, (relabeled_group,)) != initial
+
+
+def test_geometry_checkpoint_signature_includes_source_revision_and_shard() -> None:
+    spec = DatasetSpec("website", "source", "target", "polygons/*.parquet")
+    plan = DatasetPlan(spec, "revision-a", (), (), ())
+    initial = geometry_jobs._geometry_checkpoint_signature("references", plan, "polygons/a.parquet")
+
+    assert (
+        geometry_jobs._geometry_checkpoint_signature(
+            "references", replace(plan, source_revision="revision-b"), "polygons/a.parquet"
+        )
+        != initial
+    )
+    assert (
+        geometry_jobs._geometry_checkpoint_signature("references", plan, "polygons/b.parquet")
+        != initial
     )
 
 
@@ -152,7 +189,9 @@ def test_process_geometry_chunk_resumes_only_matching_checkpoint_batches(
     sidecar.parent.mkdir(parents=True)
     sidecar.write_text("old-kernel-labels")
     marker = sidecar.with_name(f"{sidecar.name}.done")
-    marker.write_text(json.dumps({"signature": existing_signature, "batches": existing_batches}))
+    current_signature = geometry_jobs._geometry_checkpoint_signature("kernel-v3", plan, job[1])
+    marker_signature = "kernel-v2" if existing_signature == "kernel-v2" else current_signature
+    marker.write_text(json.dumps({"signature": marker_signature, "batches": existing_batches}))
 
     events: list[tuple[object, ...]] = []
     group_batches = ((0, ("first",)), (1, ("second",)))
@@ -210,7 +249,7 @@ def test_process_geometry_chunk_resumes_only_matching_checkpoint_batches(
     assert [event[1] for event in events if event[0] == "process"] == expected_processed
     assert [event[2] for event in events if event[0] == "process"] == expected_reset
     assert json.loads(marker.read_text()) == {
-        "signature": "kernel-v3",
+        "signature": current_signature,
         "batches": [0, 1],
     }
     if existing_signature == "kernel-v2":
@@ -348,51 +387,36 @@ def _run_options(
     )
 
 
-def test_process_reference_groups_batches_reference_groups_for_all_plans(
+def test_process_reference_groups_uses_checkpointed_path_with_one_worker(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     group = EeaGroup(
         "record", "title", "folder", "service", {}, (), _asset("/habitats.gpkg", code=None)
     )
-    second_group = EeaGroup(
-        "record-2", "title", "folder", "service", {}, (), _asset("/other.gpkg", code=None)
-    )
     plans = (
         DatasetPlan(
             DatasetSpec("website", "source", "target", "polygons/*.parquet"), "rev", (), ("a",), ()
         ),
-        DatasetPlan(
-            DatasetSpec("description", "source", "target", "data/*.parquet"), "rev", (), ("b",), ()
+    )
+    seen: list[tuple[tuple[str, ...], int]] = []
+    monkeypatch.setattr(
+        geometry_jobs,
+        "_process_reference_groups_parallel",
+        lambda options: seen.append(
+            (tuple(item.record_id for item in options.groups), options.limits.workers)
         ),
     )
-    seen: list[tuple[str, tuple[object, ...], object]] = []
-
-    @contextmanager
-    def fake_open(*args, **kwargs):
-        del args, kwargs
-        reference = object()
-        yield reference
-
-    def fake_process(_api, plan, _source_path, selected_references, options):
-        seen.append((plan.spec.name, selected_references, options.http_client))
-
-    monkeypatch.setattr(reference_staging, "open_reference_group", fake_open)
-    monkeypatch.setattr(geometry_jobs, "_process_geometry_path", fake_process)
-    client = cast(StreamClient, object())
     geometry_jobs._process_reference_groups(
         _run_options(
             tmp_path,
             plans,
-            (group, second_group),
-            _RunOverrides(batch_size=2, http_client=client),
+            (group,),
+            _RunOverrides(batch_size=2, workers=1),
         )
     )
 
-    assert [name for name, _, _ in seen] == ["website", "description"]
-    assert all(len(references) == 2 for _, references, _ in seen)
-    assert seen[0][1] is seen[1][1]
-    assert all(item[2] is client for item in seen)
+    assert seen == [(("record",), 1)]
 
 
 def test_process_reference_groups_dispatches_streaming_parallel_batches(
@@ -422,7 +446,13 @@ def test_process_geometry_chunk_runs_each_micro_batch_against_each_reference_bat
     tmp_path: Path, monkeypatch
 ) -> None:
     events: list[tuple] = []
-    plan = SimpleNamespace(spec=SimpleNamespace(name="dataset"))
+    plan = DatasetPlan(
+        DatasetSpec("dataset", "source", "target", "*.parquet"),
+        "source-revision",
+        (),
+        ("a.parquet", "b.parquet"),
+        (),
+    )
     monkeypatch.setattr(geometry_jobs, "HfApi", lambda **kwargs: ("api", kwargs))
     monkeypatch.setattr(
         geometry_jobs, "_indexed_reference_group_batches", lambda groups: ((0, groups), (5, groups))
@@ -464,7 +494,7 @@ def test_process_geometry_chunk_runs_each_micro_batch_against_each_reference_bat
     chunk = geometry_jobs._GeometryChunk(
         groups=(),
         reference_directory=tmp_path,
-        plans=(plan,),  # ty: ignore[invalid-argument-type]
+        plans=(plan,),
         jobs=jobs,
         sidecar_root=tmp_path,
         source_root=tmp_path,
@@ -666,7 +696,7 @@ def test_parallel_reference_processing_stages_and_dispatches_geometry_work(
     assert options.limits.workers == 3
     assert jobs == (("website", "polygons/a.parquet"),)
     assert reference_directory == tmp_path / "references"
-    assert signature == geometry_jobs._reference_signature(staged_checksums, 2)
+    assert signature == geometry_jobs._reference_signature(staged_checksums, 2, groups)
     assert worker_calls == [(("work-unit",), progress, 3)]
 
 

@@ -3,12 +3,13 @@
 ## Grid'5000 execution
 
 Run the production release on one explicitly selected Grid'5000 site. Before
-every submission, inspect current EUNIS jobs across all sites through working
-credentials and require none to be active. Then run `usagepolicycheck -t` from a
-reachable frontend and require a clean all-site result; an incomplete check or
-an unreachable site is not a pass. Select a reachable non-Bordeaux site when
-Bordeaux access is unavailable. A clean check and the all-site job inspection
-are required even when the selected compute site differs.
+every submission, the controller runs `usagepolicycheck -t`, then queries the
+site inventory via the Grid'5000 API, then queries each site's OAR job list over
+SSH from the selected frontend using the authenticated account. It fails closed
+if either check is incomplete, if any EUNIS job is active, or if any site cannot
+be queried. Select a reachable
+non-Bordeaux site when Bordeaux access is unavailable; the all-site checks are
+still required even when the selected compute site differs.
 
 The controller syncs only source code and submits all three sources together:
 `website`, `wikidata`, and `description`. The site, frontend, and cluster must
@@ -35,7 +36,10 @@ uv run osm-polygon-eunis grid5000 submit \
 ```
 
 The controller checks `usagepolicycheck -t` before syncing and again after
-submission. Its OAR request is `oarsub -q default -p "cluster='CLUSTER'" -l
+submission, and refuses a job found in the all-site inventory. It streams only
+the exact Git commit into a clean remote source directory; untracked files,
+local caches, secrets, and run data are not part of that archive. Its OAR
+request is `oarsub -q default -p "cluster='CLUSTER'" -l
 host=1/core=16,walltime=1:00:00`; it does not pass a dataset selector, so the
 worker runs the default all-source release. The exact source commit is passed
 into the worker environment and written into the receipt. The release CLI

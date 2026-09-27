@@ -23,8 +23,6 @@ from .reference_staging import (
     _close_worker_reference_cache,
     _http_client,
     _indexed_reference_group_batches,
-    _open_reference_batch,
-    _reference_group_batches,
     _stage_reference_groups,
     _worker_reference_batch,
 )
@@ -184,15 +182,7 @@ def _download_geometry_source(
 
 def _process_reference_groups(options: _GeometryRunOptions) -> None:
     """Process bounded reference batches with resumable compact sidecars."""
-
-    if options.limits.workers > 1:
-        _process_reference_groups_parallel(options)
-        return
-    for batch in _reference_group_batches(
-        options.groups,
-        limits=options.limits,
-    ):
-        _process_reference_batch_serial(options, batch)
+    _process_reference_groups_parallel(options)
 
 
 def _process_reference_groups_parallel(options: _GeometryRunOptions) -> None:
@@ -213,38 +203,9 @@ def _process_reference_groups_parallel(options: _GeometryRunOptions) -> None:
             options,
             jobs,
             reference_directory,
-            _reference_signature(reference_checksums, options.threshold),
+            _reference_signature(reference_checksums, options.threshold, options.groups),
         )
         _run_geometry_workers(work, options.progress, max_workers=options.limits.workers)
-
-
-def _process_reference_batch_serial(
-    options: _GeometryRunOptions,
-    groups: tuple[EeaGroup, ...],
-) -> None:
-    with _open_reference_batch(
-        groups,
-        workdir=options.workdir,
-        threshold=options.threshold,
-        checksums=options.checksums,
-        client=options.http_client,
-    ) as references:
-        for plan in options.plans:
-            for source_path in plan.geometry_paths:
-                _process_geometry_path(
-                    options.api,
-                    plan,
-                    source_path,
-                    references,
-                    GeometryPathOptions(
-                        sidecar_root=options.sidecar_root,
-                        source_root=options.source_root,
-                        limits=options.limits,
-                        progress=options.progress,
-                        http_client=options.http_client,
-                        retain_source=True,
-                    ),
-                )
 
 
 def _geometry_jobs(plans: tuple[DatasetPlan, ...]) -> tuple[tuple[str, str], ...]:
@@ -381,7 +342,11 @@ def _pending_geometry_batches(
     return {
         job: _completed_batches(
             _sidecar_path(chunk.sidecar_root, plans[job[0]].spec, job[1]),
-            chunk.reference_signature,
+            _geometry_checkpoint_signature(
+                chunk.reference_signature,
+                plans[job[0]],
+                job[1],
+            ),
         )
         for job in jobs
     }
@@ -481,10 +446,19 @@ def _process_geometry_job(
     reset_sidecars.discard(job)
     completed.add(start_index)
     sidecar = _sidecar_path(chunk.sidecar_root, worker.plans[dataset].spec, source_path)
-    _record_completed_batch(sidecar, chunk.reference_signature, completed)
+    signature = _geometry_checkpoint_signature(
+        chunk.reference_signature,
+        worker.plans[dataset],
+        source_path,
+    )
+    _record_completed_batch(sidecar, signature, completed)
 
 
-def _reference_signature(checksums: Mapping[str, str], threshold: int) -> str:
+def _reference_signature(
+    checksums: Mapping[str, str],
+    threshold: int,
+    groups: tuple[EeaGroup, ...] = (),
+) -> str:
     """Fingerprint staged references and overlap policy for resumable sidecars."""
 
     payload = json.dumps(
@@ -492,6 +466,47 @@ def _reference_signature(checksums: Mapping[str, str], threshold: int) -> str:
             "checksums": dict(sorted(checksums.items())),
             "threshold": threshold,
             "kernel": OVERLAP_KERNEL_VERSION,
+            "reference_groups": [_reference_group_signature(group) for group in groups],
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _reference_group_signature(group: EeaGroup) -> dict[str, object]:
+    assets = group.raster_assets
+    if group.vector_asset is not None:
+        assets += (group.vector_asset,)
+    return {
+        "record_id": group.record_id,
+        "labels": dict(sorted(group.labels.items())),
+        "assets": [
+            {
+                "path": asset.path,
+                "record_id": asset.record_id,
+                "source_version": asset.source_version,
+                "code": asset.code,
+                "name": asset.name,
+            }
+            for asset in assets
+        ],
+    }
+
+
+def _geometry_checkpoint_signature(
+    reference_signature: str,
+    plan: DatasetPlan,
+    source_path: str,
+) -> str:
+    """Bind a sidecar checkpoint to its immutable source shard and references."""
+
+    payload = json.dumps(
+        {
+            "references": reference_signature,
+            "dataset": plan.spec.name,
+            "source_repo": plan.spec.source_repo,
+            "source_revision": plan.source_revision,
+            "source_path": source_path,
         },
         sort_keys=True,
     )
