@@ -76,3 +76,12 @@ def test_contributor_quality_task_is_shared_by_pre_commit_and_ci() -> None:
     assert (ROOT / ".github" / "ISSUE_TEMPLATE" / "bug_report.yml").is_file()
     assert (ROOT / ".github" / "ISSUE_TEMPLATE" / "feature_request.yml").is_file()
     assert (ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md").is_file()
+
+
+def test_docker_runtime_installs_rasterio_shared_library_dependencies() -> None:
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    runtime = dockerfile.split("FROM python:3.12-slim-bookworm AS runtime", maxsplit=1)[1]
+
+    assert "apt-get update" in runtime
+    assert "libexpat1" in runtime
+    assert "rm -rf /var/lib/apt/lists/*" in runtime
