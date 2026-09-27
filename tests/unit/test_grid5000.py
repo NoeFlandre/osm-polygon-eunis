@@ -407,6 +407,35 @@ def test_submit_fails_closed_when_any_site_inventory_failed(tmp_path: Path) -> N
     assert len(calls) == 2
 
 
+def test_parse_active_eunis_jobs_report_returns_validated_job_lists() -> None:
+    parse_report = getattr(grid5000, "_parse_active_eunis_jobs_report", None)
+    assert callable(parse_report), "active-job report parsing should be a separate unit"
+
+    active = [{"site": "nancy", "job_id": "6942984", "state": "running"}]
+    errors = [{"site": "bordeaux", "error": "unreachable"}]
+    output = json.dumps({"active_jobs": active, "errors": errors})
+
+    assert parse_report(output) == (active, errors)
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "[]",
+        '{"active_jobs": "invalid", "errors": []}',
+        '{"active_jobs": [null], "errors": []}',
+        '{"active_jobs": [], "errors": "invalid"}',
+        '{"active_jobs": [], "errors": [null]}',
+    ],
+)
+def test_parse_active_eunis_jobs_report_rejects_malformed_lists(output: str) -> None:
+    parse_report = getattr(grid5000, "_parse_active_eunis_jobs_report", None)
+    assert callable(parse_report), "active-job report parsing should be a separate unit"
+
+    with pytest.raises(TypeError, match="cannot verify active EUNIS jobs"):
+        parse_report(output)
+
+
 def test_submit_refuses_when_existing_job_status_cannot_be_verified(tmp_path: Path) -> None:
     config = _config()
     state = tmp_path / "job.json"

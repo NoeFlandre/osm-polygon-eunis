@@ -10,7 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Final
+from typing import Final, TypeGuard
 
 Command = tuple[str, ...]
 CommandRunner = Callable[[Command], str]
@@ -562,6 +562,18 @@ def _submission_commands(
 
 
 def _reject_active_eunis_jobs(output: str) -> None:
+    matches, errors = _parse_active_eunis_jobs_report(output)
+    if matches:
+        summary = _active_eunis_job_summary(matches)
+        raise RuntimeError(f"active EUNIS Grid'5000 job(s) already exist: {summary}")
+    if errors:
+        sites = _unreachable_eunis_site_summary(errors)
+        raise RuntimeError(f"cannot verify active EUNIS jobs on Grid'5000 site(s): {sites}")
+
+
+def _parse_active_eunis_jobs_report(
+    output: str,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     try:
         report = json.loads(output)
     except json.JSONDecodeError as error:
@@ -570,23 +582,25 @@ def _reject_active_eunis_jobs(output: str) -> None:
         raise TypeError("cannot verify active EUNIS jobs across Grid'5000 sites")
     matches = report.get("active_jobs")
     errors = report.get("errors")
-    if (
-        not isinstance(matches, list)
-        or any(not isinstance(item, dict) for item in matches)
-        or not isinstance(errors, list)
-        or any(not isinstance(item, dict) for item in errors)
-    ):
+    if not _is_eunis_report_entries(matches) or not _is_eunis_report_entries(errors):
         raise TypeError("cannot verify active EUNIS jobs across Grid'5000 sites")
-    if matches:
-        summary = ", ".join(
-            f"{item.get('site', 'unknown')}:{item.get('job_id', 'unknown')}"
-            f" ({item.get('state', 'unknown')})"
-            for item in matches
-        )
-        raise RuntimeError(f"active EUNIS Grid'5000 job(s) already exist: {summary}")
-    if errors:
-        sites = ", ".join(str(item.get("site", "unknown")) for item in errors)
-        raise RuntimeError(f"cannot verify active EUNIS jobs on Grid'5000 site(s): {sites}")
+    return matches, errors
+
+
+def _is_eunis_report_entries(value: object) -> TypeGuard[list[dict[str, object]]]:
+    return isinstance(value, list) and all(isinstance(item, dict) for item in value)
+
+
+def _active_eunis_job_summary(matches: list[dict[str, object]]) -> str:
+    return ", ".join(
+        f"{item.get('site', 'unknown')}:{item.get('job_id', 'unknown')}"
+        f" ({item.get('state', 'unknown')})"
+        for item in matches
+    )
+
+
+def _unreachable_eunis_site_summary(errors: list[dict[str, object]]) -> str:
+    return ", ".join(str(item.get("site", "unknown")) for item in errors)
 
 
 def _write_optional_state(path: Path | None, job: Grid5000Job) -> None:
