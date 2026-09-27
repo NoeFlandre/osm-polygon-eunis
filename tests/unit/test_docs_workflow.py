@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -100,3 +101,15 @@ def test_docker_ci_checks_non_root_user_and_secret_free_image_history() -> None:
     assert "HF_TOKEN" in commands
     assert "HUGGINGFACE_HUB_TOKEN" in commands
     assert "hf_[A-Za-z0-9]" in commands
+
+
+def test_declared_python_support_matches_the_ci_matrix() -> None:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "qa.yml").read_text())
+
+    assert project["requires-python"] == ">=3.12,<3.15"
+    assert workflow["jobs"]["deterministic-quality"]["strategy"]["matrix"]["python-version"] == [
+        "3.12",
+        "3.13",
+        "3.14",
+    ]

@@ -21,6 +21,7 @@ _TOKEN_PATTERN: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 _PERSISTENT_PREFIXES: Final = ("/home/", "/groups/", "/srv/")
 DEFAULT_DATASETS: Final = ("website", "wikidata", "description")
 _ACTIVE_EUNIS_JOBS_SCRIPT: Final = r"""import json
+import sys
 import subprocess
 import urllib.parse
 import urllib.request
@@ -96,8 +97,14 @@ for site in sites:
                 })
     except Exception as error:
         errors.append({"site": site_id, "error": f"{type(error).__name__}: {error}"})
-print(json.dumps({"active_jobs": active_jobs, "errors": errors},
-                 sort_keys=True, separators=(",", ":")))
+sys.stdout.write(
+    json.dumps(
+        {"active_jobs": active_jobs, "errors": errors},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    + "\n"
+)
 """
 
 

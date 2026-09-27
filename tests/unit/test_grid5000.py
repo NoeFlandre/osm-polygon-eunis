@@ -137,6 +137,12 @@ def test_job_id_parser_accepts_oar_output_and_rejects_ambiguous_text() -> None:
         parse_job_id("Adding job 1\nAdding job 2\n")
 
 
+def test_all_site_inventory_script_writes_json_without_print() -> None:
+    assert "sys.stdout.write(" in grid5000._ACTIVE_EUNIS_JOBS_SCRIPT
+    assert "json.dumps(" in grid5000._ACTIVE_EUNIS_JOBS_SCRIPT
+    assert "print(" not in grid5000._ACTIVE_EUNIS_JOBS_SCRIPT
+
+
 @pytest.mark.parametrize(
     ("output", "state"),
     [
