@@ -29,6 +29,17 @@ jobs:
           enable-cache: true
           python-version: ${{ matrix.python-version }}
       - run: uv sync --locked --group dev
+      - name: Keep the default pytest run under five seconds
+        if: matrix.python-version == '3.12'
+        run: |
+          start_ns="$(date +%s%N)"
+          uv run --frozen pytest
+          elapsed_ms="$(( ($(date +%s%N) - start_ns) / 1000000 ))"
+          echo "Default pytest runtime: ${elapsed_ms} ms (limit: 5000 ms)"
+          if [ "$elapsed_ms" -ge 5000 ]; then
+            echo "Default pytest exceeded the five-second limit" >&2
+            exit 1
+          fi
       - run: make quality
 
   build:
