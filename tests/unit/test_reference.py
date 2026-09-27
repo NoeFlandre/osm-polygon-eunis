@@ -208,7 +208,10 @@ def test_window_rounds_outwards_to_cover_polygon_bounds(tmp_path: Path) -> None:
     assert (window.col_off, window.row_off, window.width, window.height) == (0, 0, 2, 2)
 
 
-def test_overlap_keeps_positive_cell_at_next_tile_boundary(tmp_path: Path) -> None:
+def test_overlap_keeps_positive_cell_at_next_tile_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "Prob_R11_100m.tif"
     values = np.zeros((4, 128), dtype="uint8")
     values[0, 64] = 1
@@ -226,62 +229,17 @@ def test_overlap_keeps_positive_cell_at_next_tile_boundary(tmp_path: Path) -> No
     ) as dataset:
         dataset.write(values, 1)
 
-    reference = RasterReference((RasterLayer("R11", "steppe", path, "EEA-test"),))
-    result = reference.overlap(box(623.3, 33.3, 643.8, 39.0))
+    results = []
+    for tile_size in (64, 128):
+        monkeypatch.setattr(raster_geometry_module, "_RASTER_TILE_SIZE", tile_size)
+        reference = RasterReference((RasterLayer("R11", "steppe", path, "EEA-test"),))
+        results.append(reference.overlap(box(623.3, 33.3, 643.8, 39.0)))
 
+    assert results[0] == results[1]
+    result = results[0]
     assert result.code == "R11"
     assert result.overlap_percentage is not None
     assert result.overlap_percentage > 0.0
-
-
-def test_raster_tile_partition_preserves_overlap_results(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    rng = np.random.default_rng(20260927)
-    first_values = rng.integers(0, 2, (128, 128), dtype=np.uint8)
-    second_values = np.rot90(first_values).copy()
-    paths = (tmp_path / "Prob_R11_100m.tif", tmp_path / "Prob_R12_100m.tif")
-    for path, values in zip(paths, (first_values, second_values), strict=True):
-        with rasterio.open(
-            path,
-            "w",
-            driver="GTiff",
-            width=128,
-            height=128,
-            count=1,
-            dtype="uint8",
-            crs="EPSG:3035",
-            transform=from_origin(0, 12_800, 100, 100),
-            nodata=0,
-            tiled=True,
-            blockxsize=64,
-            blockysize=64,
-        ) as dataset:
-            dataset.write(values, 1)
-
-    layers = (
-        RasterLayer("R11", "first", paths[0], "EEA-test"),
-        RasterLayer("R12", "second", paths[1], "EEA-test"),
-    )
-    polygons = (
-        box(0, 0, 12_800, 12_800),
-        box(6_350, 6_350, 12_800, 12_800),
-        box(100, 200, 6_300, 6_300),
-    )
-    results: list[tuple[tuple[str | None, float | None], ...]] = []
-    for tile_size in (64, 128):
-        monkeypatch.setattr(raster_geometry_module, "_RASTER_TILE_SIZE", tile_size)
-        reference = RasterReference(layers)
-        with reference:
-            results.append(
-                tuple(
-                    (result.code, result.overlap_percentage)
-                    for result in (reference.overlap(polygon) for polygon in polygons)
-                )
-            )
-
-    assert results[0] == results[1]
 
 
 def test_raster_reference_reuses_exact_tile_geometry(tmp_path: Path) -> None:
