@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import AbstractContextManager
-from pathlib import Path
-from typing import Any, BinaryIO, Protocol
+from typing import Any, Protocol
 
 
 class HttpResponse(Protocol):
+    @property
+    def status_code(self) -> int: ...
+
     @property
     def content(self) -> bytes: ...
 
@@ -78,15 +80,4 @@ class InventoryApi(Protocol):
 class HubApi(InventoryApi, Protocol):
     endpoint: str
     token: str | bool | None
-
-    def upload_file(
-        self,
-        *,
-        path_or_fileobj: str | Path | bytes | BinaryIO,
-        path_in_repo: str,
-        repo_id: str,
-        repo_type: str | None = None,
-        revision: str | None = None,
-        commit_message: str | None = None,
-        parent_commit: str | None = None,
-    ) -> Any: ...
+    upload_file: Callable[..., Any]

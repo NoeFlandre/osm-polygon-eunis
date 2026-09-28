@@ -1,9 +1,11 @@
 [project]
 name = "osm-polygon-eunis"
 version = "0.1.0"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 description = "Enrich OSM polygon Hugging Face datasets with exact-overlap EUNIS labels."
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.15"
 dependencies = [
   "defusedxml>=0.7,<1",
   "httpx>=0.27,<1",
@@ -30,6 +32,7 @@ dev = [
   "radon>=6,<7",
   "ruff>=0.9,<1",
   "ty>=0.0.1a20,<0.1",
+  "vulture==2.16",
 ]
 
 [build-system]
@@ -39,11 +42,16 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/osm_polygon_eunis"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"config/eea-2021-reference.json" = "osm_polygon_eunis/eea-2021-reference.json"
+
 [tool.pytest.ini_options]
-addopts = "--strict-config --strict-markers"
+addopts = "--strict-config --strict-markers -m 'not slow'"
 testpaths = ["tests"]
+pythonpath = [".", "src"]
 markers = [
   "property: deterministic property-based tests",
+  "slow: computational tests run separately by the full quality target",
 ]
 
 [tool.coverage.run]
@@ -56,41 +64,45 @@ fail_under = 90
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-src = ["src", "tests", "scripts"]
+src = ["src", "tests", "scripts", "benchmarks"]
 
 [tool.ruff.lint]
 select = [
   "E", "F", "I", "B", "UP", "SIM", "C4", "RUF",
-  # Anti-pattern guardrails (#30).
+  "D",
+  # Anti-pattern guardrails.
   "C90", "PTH", "DTZ", "BLE", "ERA", "PIE", "RET", "N", "TID", "PGH",
   "PERF", "S", "ARG", "T20", "PL",
-  # Exception hygiene and annotations (#31). EM/D are intentionally not enabled.
+  # Exception hygiene and annotations. EM/D are intentionally not enabled.
   "TRY", "ANN",
+  # Logging and gettext-style string formatting guardrails.
+  "LOG", "G",
 ]
 ignore = [
   "TRY003",  # long messages in raise are the house style
   "ANN401",  # Any is deliberate at third-party protocol boundaries
+  "D202",  # Keep the repository's blank line after docstrings.
 ]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
 
 [tool.ruff.lint.mccabe]
 max-complexity = 10
 
 [tool.ruff.lint.pylint]
 # Ratchet: start at 8, lower toward 6 as parameter lists become dataclasses.
-max-args = 8
+max-args = 6
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "S106", "ARG005", "PLR2004", "PLC0415", "ANN"]
+# Assertions are appropriate for test and benchmark invariants, not input validation.
+"tests/**" = ["S101", "S106", "ARG005", "PLR2004", "PLC0415", "ANN", "D"]
+"benchmarks/**" = ["S101", "D"]
+# These test fixtures assert that ephemeral local paths are rejected.
+"tests/unit/test_grid5000.py" = ["S108"]
 # Internal type-narrowing invariants, not input validation.
 "src/osm_polygon_eunis/matching.py" = ["S101"]
-"src/osm_polygon_eunis/reference.py" = ["S101"]
-"src/osm_polygon_eunis/references.py" = ["S101"]
-# PLR0913 ratchet (#30): these modules still take long parameter lists; remove
-# an entry once its functions move to parameter dataclasses.
-"src/osm_polygon_eunis/geometry_jobs.py" = ["PLR0913"]
-"src/osm_polygon_eunis/manifest_state.py" = ["PLR0913"]
-"src/osm_polygon_eunis/publish.py" = ["PLR0913"]
-"src/osm_polygon_eunis/runner.py" = ["PLR0913"]
+# Keep parameter-list limits enabled for all production modules.
 "scripts/**" = ["T201"]
 "src/osm_polygon_eunis/cli.py" = ["T201"]
 
@@ -110,6 +122,10 @@ possibly-missing-attribute = "error"
 possibly-missing-import = "error"
 
 [tool.mutmut]
-source_paths = ["src/osm_polygon_eunis/matching.py"]
-also_copy = ["src/osm_polygon_eunis/domain.py", "src/osm_polygon_eunis/geometry.py", "src/osm_polygon_eunis/__init__.py"]
-pytest_add_cli_args_test_selection = ["tests/unit/test_matching.py"]
+source_paths = ["src/osm_polygon_eunis/matching.py", "src/osm_polygon_eunis/geometry.py"]
+also_copy = ["src/osm_polygon_eunis/domain.py", "src/osm_polygon_eunis/__init__.py"]
+pytest_add_cli_args_test_selection = [
+  "tests/unit/test_matching.py",
+  "tests/unit/test_geometry.py",
+  "tests/property/test_geometry_properties.py",
+]

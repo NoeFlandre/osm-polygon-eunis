@@ -1,0 +1,27 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: check-added-large-files
+  - repo: local
+    hooks:
+      - id: ruff
+        name: Ruff lint
+        entry: uv run ruff check src tests scripts benchmarks
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: ruff-format
+        name: Ruff format check
+        entry: uv run ruff format --check src tests scripts benchmarks
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: ty
+        name: ty type check
+        entry: uv run ty check src tests scripts benchmarks
+        language: system
+        pass_filenames: false
+        always_run: true

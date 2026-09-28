@@ -21,6 +21,7 @@ from osm_polygon_eunis.transform import enrich_parquet_shard
 
 
 def main() -> int:
+    """Run a small end-to-end geometry enrichment without external data."""
     with tempfile.TemporaryDirectory(prefix="osm-polygon-eunis-smoke-") as raw:
         root = Path(raw)
         source = root / "source.parquet"

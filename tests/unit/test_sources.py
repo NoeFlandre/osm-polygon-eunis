@@ -1,10 +1,12 @@
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import httpx
 import pytest
 from huggingface_hub import HfApi
 
+from osm_polygon_eunis._protocols import HubApi
 from osm_polygon_eunis.sources import (
     capture_revision,
     dataset_spec,
@@ -109,7 +111,7 @@ def test_download_to_temp_streams_and_verifies_length(tmp_path: Path, monkeypatc
 
     monkeypatch.setattr(httpx, "stream", lambda *_args, **_kwargs: FakeResponse())
     local_path = download_to_temp(
-        HfApi(token="hf-test"),
+        cast(HubApi, HfApi(token="hf-test")),
         "org/source",
         "polygons/france-latest.parquet",
         "source-sha",
@@ -142,7 +144,7 @@ def test_download_to_temp_rejects_wrong_length(tmp_path: Path, monkeypatch) -> N
 
     with pytest.raises(ValueError, match="byte count"):
         download_to_temp(
-            HfApi(token="hf-test"),
+            cast(HubApi, HfApi(token="hf-test")),
             "org/source",
             "polygons/france-latest.parquet",
             "source-sha",
@@ -184,7 +186,7 @@ def test_download_to_temp_reuses_supplied_http_client(tmp_path: Path, monkeypatc
     client = FakeClient()
 
     local_path = download_to_temp(
-        HfApi(token="hf-test"),
+        cast(HubApi, HfApi(token="hf-test")),
         "org/source",
         "polygons/france-latest.parquet",
         "source-sha",

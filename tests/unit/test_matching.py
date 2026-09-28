@@ -1,10 +1,18 @@
+import logging
+
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 from shapely.geometry import GeometryCollection, Polygon, box
 
 from osm_polygon_eunis.domain import EunisResult, OverlapCandidate
-from osm_polygon_eunis.matching import choose_winner, prefer_result
+from osm_polygon_eunis.matching import (
+    _exact_intersection_area,
+    _percentage,
+    _usable_polygon,
+    choose_winner,
+    prefer_result,
+)
 
 
 def test_largest_actual_intersection_and_percentage() -> None:
@@ -58,6 +66,37 @@ def test_empty_disjoint_cell_collection_has_no_overlap() -> None:
     )
 
     assert result.is_empty
+
+
+def test_exact_intersection_area_preserves_union_semantics_for_overlapping_parts() -> None:
+    polygon = box(0, 0, 3, 2)
+    candidate = OverlapCandidate(
+        "R11",
+        "steppe",
+        GeometryCollection((box(0, 0, 2, 2), box(1, 0, 3, 2))),
+        components_are_disjoint=False,
+    )
+
+    assert _exact_intersection_area(polygon, candidate) == 6.0
+
+
+def test_exact_intersection_area_of_empty_disjoint_parts_is_zero() -> None:
+    candidate = OverlapCandidate(
+        "R11", "steppe", GeometryCollection(), components_are_disjoint=True
+    )
+
+    assert _exact_intersection_area(box(0, 0, 1, 1), candidate) == 0.0
+
+
+@pytest.mark.parametrize("area", [0.0, 200.0])
+def test_percentage_is_clamped_at_both_bounds(area: float) -> None:
+    expected = 0.0 if area == 0.0 else 100.0
+
+    assert _percentage(area, 100.0) == expected
+
+
+def test_zero_area_geometry_is_not_usable() -> None:
+    assert not _usable_polygon(box(0, 0, 0, 0))
 
 
 def test_overlapping_generic_collection_keeps_union_semantics() -> None:
@@ -114,6 +153,10 @@ def test_unusable_polygon_returns_all_null_fields(polygon) -> None:
     assert result.name is None
     assert result.overlap_percentage is None
     assert result.source_version is None
+
+
+def test_nonempty_zero_area_line_is_not_usable() -> None:
+    assert not _usable_polygon(box(0, 0, 1, 1).boundary)
 
 
 def test_small_and_full_intersections_are_retained_and_capped() -> None:
@@ -184,6 +227,7 @@ def _rectangles(draw: st.DrawFn):
 
 
 @pytest.mark.property
+@pytest.mark.slow
 @given(_rectangles(), st.lists(_rectangles(), min_size=1, max_size=5))
 def test_overlap_percentage_is_bounded(polygon, geometries) -> None:
     candidates = tuple(
@@ -197,6 +241,7 @@ def test_overlap_percentage_is_bounded(polygon, geometries) -> None:
 
 
 @pytest.mark.property
+@pytest.mark.slow
 @given(_rectangles(), st.lists(_rectangles(), min_size=1, max_size=5))
 def test_candidate_permutation_does_not_change_result(polygon, geometries) -> None:
     candidates = tuple(
@@ -209,7 +254,7 @@ def test_candidate_permutation_does_not_change_result(polygon, geometries) -> No
     )
 
 
-def test_intersection_error_is_reported_and_leaves_result_unchanged(monkeypatch) -> None:
+def test_intersection_error_is_reported_and_leaves_result_unchanged(monkeypatch, caplog) -> None:
     from osm_polygon_eunis import matching
 
     polygon = box(0, 0, 10, 10)
@@ -224,13 +269,21 @@ def test_intersection_error_is_reported_and_leaves_result_unchanged(monkeypatch)
 
     monkeypatch.setattr(matching, "_exact_intersection_area", flaky)
     errors: list[None] = []
-    counted = choose_winner(
-        polygon, [bad, good, bad], source_version="test", on_error=lambda: errors.append(None)
-    )
+    with caplog.at_level(logging.WARNING, logger=matching.__name__):
+        counted = choose_winner(
+            polygon, [bad, good, bad], source_version="test", on_error=lambda: errors.append(None)
+        )
+    counted_log_count = sum("skipping" in record.getMessage().lower() for record in caplog.records)
     silent = choose_winner(polygon, [bad, good, bad], source_version="test")
 
     assert len(errors) == 2
     assert counted == silent == EunisResult("A1", "good", 40.0, "test")
+    assert counted_log_count == 2
+    assert all("B1" in record.getMessage() for record in caplog.records)
+    assert all("GEOS TopologyException" in record.getMessage() for record in caplog.records)
+    assert all(
+        record.getMessage().startswith("skipping EUNIS candidate") for record in caplog.records
+    )
 
 
 def test_value_error_intersection_is_counted_and_no_error_is_not(monkeypatch) -> None:

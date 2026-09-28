@@ -1,25 +1,39 @@
+import logging
 import sqlite3
 import struct
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 import rasterio
-from pyproj import CRS
+from hypothesis import given
+from hypothesis import strategies as st
+from pyproj import CRS, Transformer
+from rasterio.features import shapes as raster_shapes
 from rasterio.io import MemoryFile
 from rasterio.transform import from_origin
-from shapely.geometry import box
+from shapely.geometry import GeometryCollection, box, shape
 from shapely.geometry.base import BaseGeometry
+from shapely.ops import transform as transform_geometry
 from shapely.wkb import dumps
 
-import osm_polygon_eunis.reference as reference_module
-from osm_polygon_eunis.reference import (
-    GeoPackageReference,
+import osm_polygon_eunis.geopackage_reference as geopackage_module
+import osm_polygon_eunis.geopackage_tiles as tiles_module
+import osm_polygon_eunis.raster_geometry as raster_geometry_module
+import osm_polygon_eunis.raster_reference as raster_module
+import osm_polygon_eunis.reference_geometry as geometry_module
+from osm_polygon_eunis.geopackage_reference import GeoPackageReference
+from osm_polygon_eunis.raster_reference import (
     RasterLayer,
     RasterReference,
+    _wgs84_dataset_extent,
     parse_layer_code,
 )
+from osm_polygon_eunis.transform import SidecarUpdateOptions, update_label_sidecar
 
 
 def _write_geopackage(path: Path, rows: tuple[tuple[str, BaseGeometry], ...]) -> None:
@@ -183,6 +197,51 @@ def test_largest_actual_overlap_wins_across_raster_layers(tmp_path: Path) -> Non
     assert result.overlap_percentage == pytest.approx(9 * 8 / (17 * 8) * 100)
 
 
+def test_window_rounds_outwards_to_cover_polygon_bounds(tmp_path: Path) -> None:
+    raster = _write_raster(tmp_path / "Prob_R11_100m.tif", [[1, 1], [1, 1]])
+    reference = RasterReference((RasterLayer("R11", "steppe", raster, "EEA-test"),))
+    with reference as opened:
+        _, dataset = opened._datasets[0]
+        window = opened._window(dataset, box(4.5, 4.5, 15.5, 15.5))
+
+    assert window is not None
+    assert (window.col_off, window.row_off, window.width, window.height) == (0, 0, 2, 2)
+
+
+def test_overlap_keeps_positive_cell_at_next_tile_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "Prob_R11_100m.tif"
+    values = np.zeros((4, 128), dtype="uint8")
+    values[0, 64] = 1
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        width=128,
+        height=4,
+        count=1,
+        dtype="uint8",
+        crs="EPSG:3035",
+        transform=from_origin(0, 40, 10, 10),
+        nodata=0,
+    ) as dataset:
+        dataset.write(values, 1)
+
+    results = []
+    for tile_size in (64, 128):
+        monkeypatch.setattr(raster_geometry_module, "_RASTER_TILE_SIZE", tile_size)
+        reference = RasterReference((RasterLayer("R11", "steppe", path, "EEA-test"),))
+        results.append(reference.overlap(box(623.3, 33.3, 643.8, 39.0)))
+
+    assert results[0] == results[1]
+    result = results[0]
+    assert result.code == "R11"
+    assert result.overlap_percentage is not None
+    assert result.overlap_percentage > 0.0
+
+
 def test_raster_reference_reuses_exact_tile_geometry(tmp_path: Path) -> None:
     raster = _write_raster(tmp_path / "Prob_R11_100m.tif", [[1, 1], [0, 0]])
     reference = RasterReference((RasterLayer("R11", "steppe", raster, "EEA-test"),))
@@ -196,6 +255,142 @@ def test_raster_reference_reuses_exact_tile_geometry(tmp_path: Path) -> None:
     assert len(reference._tile_cache) == 0
 
 
+def test_raster_tile_cache_byte_budget_preserves_sidecar_bytes_and_reports_misses(
+    tmp_path: Path,
+) -> None:
+    raster = _write_raster(tmp_path / "Prob_R11_100m.tif", [[1, 1], [0, 0]])
+    polygon = box(1, 11, 19, 19)
+    inverse = Transformer.from_crs(3035, 4326, always_xy=True)
+    geographic = transform_geometry(inverse.transform, polygon)
+    source = tmp_path / "source.parquet"
+    pq.write_table(pa.table({"geometry": [dumps(geographic), dumps(geographic)]}), source)
+    references = (
+        RasterReference((RasterLayer("R11", "steppe", raster, "EEA-test"),)),
+        RasterReference(
+            (RasterLayer("R11", "steppe", raster, "EEA-test"),),
+            tile_cache_bytes=1,
+        ),
+    )
+    sidecars = (tmp_path / "default.parquet", tmp_path / "small.parquet")
+
+    for reference, sidecar in zip(references, sidecars, strict=True):
+        with reference:
+            update_label_sidecar(source, sidecar, SidecarUpdateOptions(reference=reference))
+            assert reference.tile_cache_bytes <= reference.tile_cache_byte_budget
+            if reference.tile_cache_byte_budget == 1:
+                assert reference.tile_cache_bytes == 0
+            else:
+                assert reference.tile_cache_bytes > 0
+
+    assert sidecars[0].read_bytes() == sidecars[1].read_bytes()
+    assert references[0].tile_cache_hits == 1
+    assert references[0].tile_cache_misses == 1
+    assert references[0].tile_cache_miss_rate == 0.5
+    assert references[1].tile_cache_hits == 0
+    assert references[1].tile_cache_misses == 2
+    assert references[1].tile_cache_miss_rate == 1.0
+
+
+def test_raster_tile_cache_evicts_oldest_geometry_at_its_byte_budget() -> None:
+    geometry = box(0, 0, 1, 1)
+    byte_budget = raster_geometry_module._tile_geometry_cache_size(geometry)
+    reference = RasterReference((), tile_cache_bytes=byte_budget)
+
+    reference._cache_tile_geometry(("R11", 0, 0), geometry)
+    reference._cache_tile_geometry(("R11", 0, 1), geometry)
+
+    assert list(reference._tile_cache) == [("R11", 0, 1)]
+    assert reference.tile_cache_bytes == byte_budget
+
+
+def test_raster_overlap_returns_no_result_for_invalid_and_outside_polygons(
+    tmp_path: Path,
+) -> None:
+    raster = _write_raster(tmp_path / "Prob_R11_100m.tif", [[1, 1], [0, 0]])
+    reference = RasterReference((RasterLayer("R11", "steppe", raster, "EEA-test"),))
+
+    invalid = reference.overlap(None)
+    with reference:
+        outside = reference.overlap(box(100, 100, 110, 110))
+        touching = reference.overlap(box(20, 5, 25, 10))
+
+    assert invalid.code is None
+    assert outside.code is None
+    assert touching.code is None
+
+
+def test_raster_reference_rejects_a_nonpositive_tile_cache_budget(tmp_path: Path) -> None:
+    raster = _write_raster(tmp_path / "Prob_R11_100m.tif", [[1, 1], [0, 0]])
+
+    with pytest.raises(ValueError, match="byte budget must be positive"):
+        RasterReference(
+            (RasterLayer("R11", "steppe", raster, "EEA-test"),),
+            tile_cache_bytes=0,
+        )
+
+
+@pytest.mark.filterwarnings(
+    "ignore:Use `@` matmul instead of `*` mul operator for matrix multiplication:"
+    "PendingDeprecationWarning"
+)
+def test_mask_geometry_uses_polygon_constructor_and_zero_copy_mask(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    valid = np.array([[True, True], [True, True]], dtype=bool)
+    captured: dict[str, np.ndarray] = {}
+    coordinates = (((0, 2), (2, 2), (2, 0), (0, 0), (0, 2)),)
+
+    def fake_shapes(image, *, mask, transform):
+        captured["image"] = image
+        assert mask is valid
+        assert transform == from_origin(0, 2, 1, 1)
+        return [({"type": "Polygon", "coordinates": coordinates}, 1)]
+
+    polygon_calls: list[tuple[object, ...]] = []
+    real_polygon = raster_geometry_module.Polygon
+
+    def fake_polygon(shell, holes):
+        polygon_calls.append((shell, holes))
+        return real_polygon(shell, holes)
+
+    monkeypatch.setattr(raster_geometry_module, "shapes", fake_shapes)
+    monkeypatch.setattr(raster_geometry_module, "Polygon", fake_polygon)
+
+    actual = raster_geometry_module._mask_geometry(valid, from_origin(0, 2, 1, 1))
+
+    assert actual is not None
+    assert actual.area == 4.0
+    assert len(polygon_calls) == 1
+    assert captured["image"].dtype == np.uint8
+    assert np.shares_memory(valid, captured["image"])
+
+
+@pytest.mark.property
+@pytest.mark.slow
+@pytest.mark.filterwarnings(
+    "ignore:Use `@` matmul instead of `*` mul operator for matrix multiplication:"
+    "PendingDeprecationWarning"
+)
+@given(st.lists(st.lists(st.booleans(), min_size=8, max_size=8), min_size=8, max_size=8))
+def test_mask_geometry_matches_geojson_reference(mask_rows: list[list[bool]]) -> None:
+    valid = np.asarray(mask_rows, dtype=bool)
+    transform = from_origin(0, valid.shape[0], 1, 1)
+    expected_parts = [
+        shape(geometry)
+        for geometry, _ in raster_shapes(valid.astype("uint8"), mask=valid, transform=transform)
+    ]
+    expected = GeometryCollection(expected_parts) if expected_parts else None
+
+    actual = raster_geometry_module._mask_geometry(valid, transform)
+
+    if expected is None:
+        assert actual is None
+    else:
+        assert actual is not None
+        assert actual.equals(expected)
+        assert actual.area == expected.area
+
+
 def test_reference_rejects_mixed_source_versions(tmp_path: Path) -> None:
     first = _write_raster(tmp_path / "Prob_R11_100m.tif", [[1, 0], [0, 0]])
     second = _write_raster(tmp_path / "Prob_R12_100m.tif", [[0, 1], [0, 0]])
@@ -207,6 +402,54 @@ def test_reference_rejects_mixed_source_versions(tmp_path: Path) -> None:
                 RasterLayer("R12", "second", second, "two"),
             ),
         )
+
+
+def test_raster_reference_exposes_cached_wgs84_extent_while_open(tmp_path: Path) -> None:
+    first = _write_raster(tmp_path / "Prob_R11_100m.tif", [[1, 0], [0, 0]])
+    second = _write_raster(tmp_path / "Prob_R12_100m.tif", [[0, 1], [0, 0]])
+    reference = RasterReference(
+        (
+            RasterLayer("R11", "first", first, "EEA-test"),
+            RasterLayer("R12", "second", second, "EEA-test"),
+        )
+    )
+
+    assert reference.source_extent_wgs84 is None
+    with reference:
+        extent = reference.source_extent_wgs84
+        assert extent is not None
+        assert extent[0] < extent[2]
+        assert extent[1] < extent[3]
+        assert reference.source_extent_wgs84 == extent
+
+    assert reference.source_extent_wgs84 is None
+
+
+def test_wgs84_dataset_extent_combines_bounds_before_projection() -> None:
+    first_bounds = SimpleNamespace(left=10.0, bottom=20.0, right=30.0, top=40.0)
+    second_bounds = SimpleNamespace(left=-5.0, bottom=15.0, right=25.0, top=35.0)
+    first = cast(rasterio.DatasetReader, SimpleNamespace(bounds=first_bounds))
+    second = cast(rasterio.DatasetReader, SimpleNamespace(bounds=second_bounds))
+    datasets = (
+        (RasterLayer("R11", "first", Path("first.tif"), "EEA-test"), first),
+        (RasterLayer("R12", "second", Path("second.tif"), "EEA-test"), second),
+    )
+
+    extent = _wgs84_dataset_extent(datasets)
+
+    assert extent == raster_module.wgs84_envelope((-5.0, 15.0, 30.0, 40.0))
+
+
+def test_wgs84_dataset_extent_returns_none_for_no_datasets() -> None:
+    assert _wgs84_dataset_extent(()) is None
+
+
+def test_wgs84_dataset_extent_projects_one_dataset() -> None:
+    bounds = SimpleNamespace(left=10.0, bottom=20.0, right=30.0, top=40.0)
+    dataset = cast(rasterio.DatasetReader, SimpleNamespace(bounds=bounds))
+    item = (RasterLayer("R11", "first", Path("first.tif"), "EEA-test"), dataset)
+
+    assert _wgs84_dataset_extent((item,)) == raster_module.wgs84_envelope((10.0, 20.0, 30.0, 40.0))
 
 
 def test_raster_accepts_catalog_equivalent_epsg_3035_wkt() -> None:
@@ -264,8 +507,33 @@ def test_geopackage_tile_reference_uses_exact_positive_pixels(tmp_path: Path) ->
     assert result.overlap_percentage == 50.0
 
 
+def test_geopackage_candidate_lookup_skips_tiles_outside_the_matrix() -> None:
+    layer = tiles_module._TileLayer(
+        "R11",
+        0.0,
+        0.0,
+        20.0,
+        20.0,
+        1,
+        1,
+        2,
+        2,
+        10.0,
+        10.0,
+        0,
+    )
+
+    rows = GeoPackageReference._candidate_tile_rows(
+        sqlite3.connect(":memory:"),
+        layer,
+        box(100, 100, 110, 110),
+    )
+
+    assert rows == []
+
+
 def test_raster_cell_collection_preserves_exact_intersection_area() -> None:
-    cells = reference_module._geometry_collection([box(0, 0, 1, 1), box(1, 0, 2, 1)])
+    cells = geometry_module._geometry_collection([box(0, 0, 1, 1), box(1, 0, 2, 1)])
 
     assert cells is not None
     assert box(0.5, 0.5, 1.5, 1.5).intersection(cells).area == 0.5
@@ -314,25 +582,25 @@ def test_geopackage_validation_and_geometry_headers() -> None:
     with pytest.raises(ValueError, match="envelope"):
         GeoPackageReference.decode_geometry(b"GP" + bytes((1, 15)) + struct.pack("<i", 3035) + b"")
     with pytest.raises(ValueError, match="identifier"):
-        reference_module._sql_identifier("")
+        geopackage_module._sql_identifier("")
     with pytest.raises(ValueError, match="identifier"):
-        reference_module._sql_identifier("bad\x00name")
+        geopackage_module._sql_identifier("bad\x00name")
     with pytest.raises(ValueError, match="EPSG:3035"):
-        reference_module._validate_vector_header("habitats", "geom", 4326)
+        geopackage_module._validate_vector_header("habitats", "geom", 4326)
     with pytest.raises(ValueError, match="metadata"):
-        reference_module._validate_vector_header(1, "geom", 3035)
+        geopackage_module._validate_vector_header(1, "geom", 3035)
     with pytest.raises(ValueError, match="binary"):
-        reference_module._vector_blob("not-binary")
+        geopackage_module._vector_blob("not-binary")
     with pytest.raises(ValueError, match="unknown EUNIS"):
-        reference_module._vector_code("R12", {"R11": "steppe"})
+        geopackage_module._vector_code("R12", {"R11": "steppe"})
     with pytest.raises(ValueError, match="no RTree"):
-        reference_module._require_rtree(
+        geopackage_module._require_rtree(
             sqlite3.connect(":memory:"), "habitats", "rtree_habitats_geom"
         )
     with pytest.raises(ValueError, match="unexpected shape"):
-        reference_module._tile_values(("R11",))
+        tiles_module._tile_values(("R11",))
     with pytest.raises(ValueError, match="unsupported"):
-        reference_module._envelope_size(5)
+        geopackage_module._envelope_size(5)
 
 
 def test_geopackage_empty_and_vector_metadata_errors(tmp_path: Path) -> None:
@@ -374,15 +642,15 @@ def test_geopackage_tile_cache_and_metadata_guards(tmp_path: Path) -> None:
     assert outside.is_empty
 
     with pytest.raises(ValueError, match="not EPSG"):
-        reference_module._validate_tile_header("R11", 4326, {"R11": "steppe"})
+        tiles_module._validate_tile_header("R11", 4326, {"R11": "steppe"})
     with pytest.raises(ValueError, match="unknown EUNIS"):
-        reference_module._validate_tile_header("R12", 3035, {"R11": "steppe"})
+        tiles_module._validate_tile_header("R12", 3035, {"R11": "steppe"})
     with pytest.raises(ValueError, match="invalid matrix"):
-        reference_module._validate_tile_types("R11", (1.0,), cast(tuple[int, ...], (1, "bad")))
+        tiles_module._validate_tile_types("R11", (1.0,), cast(tuple[int, ...], (1, "bad")))
     with pytest.raises(ValueError, match="invalid dimensions"):
-        reference_module._validate_tile_dimensions("R11", 0, 1, 1, 1)
+        tiles_module._validate_tile_dimensions("R11", 0, 1, 1, 1)
 
-    layer = reference_module._TileLayer("R11", 0, 0, 20, 20, 1, 1, 2, 2, 10.0, 10.0, 0)
+    layer = tiles_module._TileLayer("R11", 0, 0, 20, 20, 1, 1, 2, 2, 10.0, 10.0, 0)
     with sqlite3.connect(":memory:") as connection:
         connection.execute(
             "CREATE TABLE R11 (zoom_level INTEGER, tile_column INTEGER, "
@@ -390,9 +658,7 @@ def test_geopackage_tile_cache_and_metadata_guards(tmp_path: Path) -> None:
         )
         connection.execute("INSERT INTO R11 VALUES (0, 0, 0, 'not-binary')")
         with pytest.raises(ValueError, match="binary tile"):
-            reference_module.GeoPackageReference._candidate_tile_rows(
-                connection, layer, box(1, 1, 19, 19)
-            )
+            GeoPackageReference._candidate_tile_rows(connection, layer, box(1, 1, 19, 19))
 
 
 def test_geopackage_tile_discovery_fails_closed_on_corrupt_database(tmp_path: Path) -> None:
@@ -444,3 +710,21 @@ def test_references_count_intersection_errors(tmp_path: Path, monkeypatch) -> No
     assert raster.overlap(box(1, 11, 19, 19)).code is None
     assert vector.intersection_errors == 2
     assert raster.intersection_errors == 1
+
+
+def test_raster_window_error_fallback_is_logged(monkeypatch, caplog) -> None:
+    def broken(*_args, **_kwargs):
+        raise raster_module.WindowError("invalid bounds")
+
+    monkeypatch.setattr(raster_module, "from_bounds", broken)
+    dataset = SimpleNamespace(transform=from_origin(0, 10, 1, 1), width=10, height=10)
+
+    with caplog.at_level(logging.WARNING, logger=raster_module.__name__):
+        assert (
+            RasterReference._window(cast(rasterio.DatasetReader, dataset), box(0, 0, 1, 1)) is None
+        )
+
+    assert any(
+        record.levelno == logging.WARNING and "window" in record.getMessage().lower()
+        for record in caplog.records
+    )

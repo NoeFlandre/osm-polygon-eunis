@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import zipfile
 from pathlib import Path
 from typing import cast
@@ -10,12 +11,14 @@ import httpx
 import pytest
 
 from osm_polygon_eunis import eea
+from osm_polygon_eunis._protocols import HttpClient
 from osm_polygon_eunis.eea import (
     RemoteAsset,
     WebDavEntry,
     _classification_catalog_links,
     _discover_entries,
     _fetch_arcgis_labels,
+    _get_with_retry,
     _select_classification_entry,
     _vector_asset,
     _webdav_folder_url,
@@ -215,10 +218,11 @@ def test_webdav_folder_url_requires_public_path() -> None:
 
 
 class _FakeResponse:
-    def __init__(self, *, payload=None, text="", content=b"") -> None:
+    def __init__(self, *, payload=None, text="", content=b"", status_code=200) -> None:
         self._payload = payload
         self.text = text
         self.content = content
+        self.status_code = status_code
 
     def json(self):
         return self._payload
@@ -238,6 +242,77 @@ class _FakeHttpClient:
     def request(self, method, url, **kwargs):
         del method, kwargs
         return self.responses[url]
+
+
+def test_metadata_get_retries_timeout_and_server_error(monkeypatch) -> None:
+    monkeypatch.setattr(eea.time, "sleep", lambda delay: None)
+
+    class FlakyClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get(self, url, **kwargs):
+            del url, kwargs
+            self.calls += 1
+            if self.calls == 1:
+                raise httpx.ReadTimeout("temporary timeout")
+            if self.calls == 2:
+                return _FakeResponse(status_code=503)
+            return _FakeResponse(payload={"ok": True})
+
+        def request(self, method, url, **kwargs):
+            del method, url, kwargs
+            raise AssertionError("the retry test should use GET")
+
+    client = FlakyClient()
+    response = _get_with_retry(client, "https://example.test/metadata")
+
+    assert response.json() == {"ok": True}
+    assert client.calls == 3
+
+
+def test_metadata_get_retry_is_logged(caplog, monkeypatch) -> None:
+    monkeypatch.setattr(eea.time, "sleep", lambda delay: None)
+
+    class Client:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get(self, url, **kwargs):
+            del url, kwargs
+            self.calls += 1
+            if self.calls == 1:
+                return _FakeResponse(status_code=503)
+            return _FakeResponse(payload={"ok": True})
+
+        def request(self, method, url, **kwargs):
+            del method, url, kwargs
+            raise AssertionError("the retry test should use GET")
+
+    with caplog.at_level(logging.WARNING, logger=eea.__name__):
+        assert _get_with_retry(Client(), "https://example.test/metadata").json() == {"ok": True}
+
+    assert any(
+        record.levelno == logging.WARNING
+        and "retry" in record.getMessage().lower()
+        and "metadata" in record.getMessage().lower()
+        for record in caplog.records
+    )
+
+
+def test_metadata_get_attempt_returns_immediate_response() -> None:
+    response = _FakeResponse(payload={"ok": True})
+
+    class Client:
+        def get(self, url, **kwargs):
+            assert url == "https://example.test/metadata"
+            assert kwargs == {}
+            return response
+
+    assert (
+        eea._get_attempt(cast(HttpClient, Client()), "https://example.test/metadata", {}, 0)
+        is response
+    )
 
 
 def _catalog_record(folder: str, service: str) -> dict[str, object]:
@@ -546,6 +621,101 @@ def test_arcgis_pagination_and_non_mapping_pages() -> None:
         _fetch_arcgis_labels(BadClient(), "https://example.test/service")
 
 
+def test_group_uses_complete_official_fallback_without_arcgis_fetch(monkeypatch) -> None:
+    entry = WebDavEntry(
+        "/Prob_N11_100m.tif", "https://example.test/Prob_N11_100m.tif", 1, None, False
+    )
+    monkeypatch.setattr(
+        eea,
+        "catalog_links",
+        lambda record: (
+            "title",
+            "https://sdi.eea.europa.eu/webdav/public/folder",
+            "https://example.test/service",
+        ),
+    )
+    monkeypatch.setattr(eea, "extract_share_token", lambda html: "token")
+    monkeypatch.setattr(eea, "_discover_entries", lambda *args, **kwargs: (entry,))
+    monkeypatch.setattr(
+        eea,
+        "_fetch_arcgis_labels",
+        lambda *args, **kwargs: pytest.fail("complete official labels should avoid ArcGIS"),
+    )
+
+    class Client:
+        def get(self, url, **kwargs):
+            del url, kwargs
+            return _FakeResponse(payload={})
+
+        def request(self, method, url, **kwargs):
+            del method, url, kwargs
+            raise AssertionError("WebDAV discovery should be stubbed")
+
+    group = resolve_group(
+        Client(),
+        "record",
+        source_version="EEA-test",
+        fallback_labels={"N11": "Atlantic sand beach"},
+    )
+
+    assert group.labels == {"N11": "Atlantic sand beach"}
+    assert [asset.code for asset in group.raster_assets] == ["N11"]
+
+
+def test_download_asset_retries_an_interrupted_stream(monkeypatch, tmp_path: Path, caplog) -> None:
+    monkeypatch.setattr(eea.time, "sleep", lambda delay: None)
+
+    class Response:
+        def __init__(self, attempt: int) -> None:
+            self.attempt = attempt
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def iter_bytes(self, *, chunk_size: int):
+            del chunk_size
+            yield b"ab"
+            if self.attempt == 1:
+                raise httpx.RemoteProtocolError("interrupted stream")
+            yield b"c"
+
+    class FlakyStreamClient:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        def stream(self, method, url):
+            assert method == "GET"
+            assert url.endswith("asset.bin")
+            self.attempts += 1
+            return Response(self.attempts)
+
+    destination = tmp_path / "asset.bin"
+    asset = RemoteAsset(
+        "/asset.bin",
+        "https://example.test/asset.bin",
+        3,
+        None,
+        None,
+        None,
+        "record",
+        "EEA-test",
+    )
+
+    client = FlakyStreamClient()
+    with caplog.at_level(logging.WARNING, logger=eea.__name__):
+        download_asset(cast(httpx.Client, client), asset, destination)
+
+    assert client.attempts == 2
+    assert destination.read_bytes() == b"abc"
+    assert any("retry" in record.getMessage().lower() for record in caplog.records)
+
+
 def test_vector_asset_and_group_resolution_fail_closed(monkeypatch) -> None:
     first = WebDavEntry("/one.gpkg", "https://example.test/one", 1, None, False)
     second = WebDavEntry("/two.gpkg", "https://example.test/two", 1, None, False)
@@ -585,6 +755,7 @@ def test_vector_asset_and_group_resolution_fail_closed(monkeypatch) -> None:
 
 
 def test_config_resolution_and_asset_download(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(eea.time, "sleep", lambda _delay: None)
     config_path = tmp_path / "reference.json"
     config_path.write_text(
         json.dumps(
@@ -643,10 +814,13 @@ def test_config_resolution_and_asset_download(monkeypatch, tmp_path: Path) -> No
             assert chunk_size > 0
             yield b"abc"
 
+    calls: list[str] = []
+
     class StreamClient:
         def stream(self, method, url):
             assert method == "GET"
             assert url.endswith("asset.bin")
+            calls.append(method)
             return Response()
 
     asset = RemoteAsset(
@@ -661,6 +835,7 @@ def test_config_resolution_and_asset_download(monkeypatch, tmp_path: Path) -> No
     )
     destination = tmp_path / "nested" / "asset.bin"
     assert download_asset(cast(httpx.Client, StreamClient()), asset, destination)
+    calls.clear()
     with pytest.raises(ValueError, match="byte count"):
         download_asset(
             cast(httpx.Client, StreamClient()),
@@ -676,6 +851,7 @@ def test_config_resolution_and_asset_download(monkeypatch, tmp_path: Path) -> No
             ),
             tmp_path / "bad.bin",
         )
+    assert calls == ["GET"] * eea._HTTP_RETRY_ATTEMPTS
 
 
 def test_webdav_listing_rejects_xml_entity_declarations() -> None:

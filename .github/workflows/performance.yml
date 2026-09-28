@@ -1,0 +1,67 @@
+name: Synthetic performance
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "benchmarks/**"
+      - "scripts/compare_benchmark_results.py"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/performance.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          path: baseline
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: head
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - name: Install the locked benchmark environment
+        working-directory: head
+        run: uv sync --locked --group dev
+      - name: Use one benchmark suite against both source revisions
+        run: cp -R head/benchmarks baseline/benchmarks
+      - name: Measure the base revision
+        working-directory: baseline
+        env:
+          EUNIS_BENCHMARK_RESULT: ${{ runner.temp }}/eunis-baseline.json
+          EUNIS_BENCHMARK_SCALE: "1"
+          PYTHONPATH: src
+        run: ${{ github.workspace }}/head/.venv/bin/pytest -q -p no:cacheprovider benchmarks/
+      - name: Measure the candidate revision
+        working-directory: head
+        env:
+          EUNIS_BENCHMARK_RESULT: ${{ runner.temp }}/eunis-candidate.json
+          EUNIS_BENCHMARK_SCALE: "1"
+          PYTHONPATH: src
+        run: .venv/bin/pytest -q -p no:cacheprovider benchmarks/
+      - name: Fail on regressions above 15 percent
+        working-directory: head
+        run: >-
+          .venv/bin/python scripts/compare_benchmark_results.py
+          --baseline "${{ runner.temp }}/eunis-baseline.json"
+          --candidate "${{ runner.temp }}/eunis-candidate.json"
+          --max-slowdown 0.15
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: synthetic-performance-${{ github.run_id }}
+          path: ${{ runner.temp }}/eunis-*.json
+          if-no-files-found: warn
+          retention-days: 14

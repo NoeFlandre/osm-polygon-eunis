@@ -13,3 +13,17 @@ Feature: EUNIS enrichment
     Then only polygon tables are changed
     And document tables remain shared
 
+  Scenario: A polygon outside the EUNIS reference extent stays unlabeled
+    Given a polygon shard outside the EUNIS reference extent
+    When I enrich the shard through the public API
+    Then its EUNIS labels are null
+
+  Scenario: Equal overlap ties use a stable EUNIS code
+    Given a polygon shard with equal overlap from two EUNIS references
+    When I enrich the shard through the public API
+    Then the lower EUNIS code wins the tie
+
+  Scenario: Invalid geometry is rejected during shard enrichment
+    Given a source shard with a point geometry
+    When I enrich the shard through the public API
+    Then its EUNIS labels are null

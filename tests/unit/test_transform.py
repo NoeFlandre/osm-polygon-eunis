@@ -6,6 +6,8 @@ import pyarrow.parquet as pq
 
 from osm_polygon_eunis.domain import EUNIS_FIELDS, EunisResult
 from osm_polygon_eunis.transform import (
+    SidecarAppendOptions,
+    SidecarUpdateOptions,
     append_label_sidecar,
     build_label_map,
     enrich_link_shard,
@@ -111,22 +113,30 @@ def test_label_sidecar_merges_groups_and_appends_without_geometry_loss(tmp_path:
             del polygon
             return EunisResult("R11", "first", 50.0, "EEA-test")
 
-    update_label_sidecar(source, first_sidecar, reference=FirstReference(), batch_size=1)
+    update_label_sidecar(
+        source,
+        first_sidecar,
+        SidecarUpdateOptions(reference=FirstReference(), batch_size=1),
+    )
     update_label_sidecar(
         source,
         second_sidecar,
-        reference=SecondReference(),
-        current=first_sidecar,
-        batch_size=1,
+        SidecarUpdateOptions(
+            reference=SecondReference(),
+            current=first_sidecar,
+            batch_size=1,
+        ),
     )
-    append_label_sidecar(source, second_sidecar, output, batch_size=1)
+    append_label_sidecar(source, second_sidecar, output, SidecarAppendOptions(batch_size=1))
     observed: list[tuple[EunisResult, object]] = []
     append_label_sidecar(
         source,
         second_sidecar,
         tmp_path / "observed-output.parquet",
-        batch_size=1,
-        observe=lambda result, value: observed.append((result, value)),
+        SidecarAppendOptions(
+            batch_size=1,
+            observe=lambda result, value: observed.append((result, value)),
+        ),
     )
 
     result = pq.read_table(output)
@@ -158,8 +168,10 @@ def test_label_sidecar_streams_one_geometry_through_all_references(tmp_path: Pat
     update_label_sidecar(
         source,
         output,
-        references=(Reference("R11"), Reference("R12")),
-        batch_size=2,
+        SidecarUpdateOptions(
+            references=(Reference("R11"), Reference("R12")),
+            batch_size=2,
+        ),
     )
 
     assert seen[0] is seen[1]
@@ -233,24 +245,36 @@ def test_sidecar_carries_intersection_errors_across_passes(tmp_path: Path) -> No
     update_label_sidecar(
         source,
         first,
-        references=(_ErroringReference("R12", [0, 2, 0]), _ErroringReference("R13", [1, 0, 0])),
-        current=legacy,
-        batch_size=2,
+        SidecarUpdateOptions(
+            references=(
+                _ErroringReference("R12", [0, 2, 0]),
+                _ErroringReference("R13", [1, 0, 0]),
+            ),
+            current=legacy,
+            batch_size=2,
+        ),
     )
     assert pq.read_table(first)[INTERSECTION_ERRORS_FIELD].to_pylist() == [1, 2, 0]
     update_label_sidecar(
         source,
         second,
-        reference=_ErroringReference("R14", [3, 0, 1]),
-        current=first,
-        batch_size=2,
+        SidecarUpdateOptions(
+            reference=_ErroringReference("R14", [3, 0, 1]),
+            current=first,
+            batch_size=2,
+        ),
     )
     assert pq.read_table(second)[INTERSECTION_ERRORS_FIELD].to_pylist() == [4, 2, 1]
     assert pq.read_table(second)["eunis_code"].to_pylist() == ["R11", "R12", "R12"]
 
     counts: list[int] = []
     output = tmp_path / "output.parquet"
-    append_label_sidecar(source, second, output, batch_size=2, count_errors=counts.append)
+    append_label_sidecar(
+        source,
+        second,
+        output,
+        SidecarAppendOptions(batch_size=2, count_errors=counts.append),
+    )
     assert counts == [6, 1]
     assert pq.read_table(output).column_names == ["polygon_id", "geometry", *EUNIS_FIELDS]
     labels = build_label_map(source, second, batch_size=2)
@@ -259,7 +283,10 @@ def test_sidecar_carries_intersection_errors_across_passes(tmp_path: Path) -> No
     legacy_counts: list[int] = []
     legacy_output = tmp_path / "legacy-output.parquet"
     append_label_sidecar(
-        source, legacy, legacy_output, batch_size=2, count_errors=legacy_counts.append
+        source,
+        legacy,
+        legacy_output,
+        SidecarAppendOptions(batch_size=2, count_errors=legacy_counts.append),
     )
     assert legacy_counts == [0, 0]
     assert pq.read_table(legacy_output).column_names == pq.read_table(output).column_names
@@ -278,11 +305,18 @@ def test_sidecar_without_counter_on_reference_counts_zero_and_bad_schema_fails(
     update_label_sidecar(
         source,
         sidecar,
-        reference=_FakeReference([EunisResult("R11", "a", 5.0, "v")]),
-        batch_size=1,
+        SidecarUpdateOptions(
+            reference=_FakeReference([EunisResult("R11", "a", 5.0, "v")]),
+            batch_size=1,
+        ),
     )
     assert pq.read_table(sidecar)[INTERSECTION_ERRORS_FIELD].to_pylist() == [0]
     wrong = tmp_path / "wrong.parquet"
     pq.write_table(pq.read_table(sidecar).append_column("extra", pa.array([1])), wrong)
     with pytest.raises(ValueError, match="unexpected schema"):
-        append_label_sidecar(source, wrong, tmp_path / "out.parquet", batch_size=1)
+        append_label_sidecar(
+            source,
+            wrong,
+            tmp_path / "out.parquet",
+            SidecarAppendOptions(batch_size=1),
+        )

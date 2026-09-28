@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
+import shutil
+import subprocess
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from importlib.metadata import version
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -18,7 +23,7 @@ from ._protocols import HubApi, StreamClient
 from .fileio import sha256_file
 from .sources import capture_revision, download_to_temp
 
-MANIFEST_VERSION = 3
+MANIFEST_VERSION = 5
 
 
 class VerificationError(ValueError):
@@ -43,6 +48,35 @@ class VerificationReceipt:
     rows_by_path: Mapping[str, int]
     shared_paths: tuple[str, ...]
     manifest: Mapping[str, Any] | None
+
+
+@dataclass(frozen=True, slots=True)
+class ManifestBuildOptions:
+    """Inputs used to build a deterministic dataset manifest."""
+
+    source_repo: str
+    target_repo: str
+    source_revision: str
+    source_paths: Iterable[str]
+    changed_paths: Iterable[str]
+    reference_manifest: Mapping[str, Any]
+    rows_by_path: Mapping[str, int]
+    schema_by_path: Mapping[str, str] | None = None
+    added_paths: Iterable[str] = ()
+    card_manifest: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DatasetVerificationOptions:
+    """Expected remote state used for independent dataset verification."""
+
+    expectations: Iterable[ShardExpectation]
+    expected_tree_paths: Iterable[str]
+    expected_shared_blobs: Mapping[str, str] | None = None
+    expected_manifest: Mapping[str, Any] | None = None
+    expected_artifacts: Mapping[str, str] | None = None
+    temp_dir: Path | None = None
+    http_client: StreamClient | None = None
 
 
 def target_exists(api: HubApi, target_repo: str) -> bool:
@@ -134,39 +168,84 @@ def parquet_signature(path: Path) -> tuple[int, str]:
     return parquet.metadata.num_rows, hashlib.sha256(serialized).hexdigest()
 
 
-def build_manifest(
-    *,
-    source_repo: str,
-    target_repo: str,
-    source_revision: str,
-    source_paths: Iterable[str],
-    changed_paths: Iterable[str],
-    reference_manifest: Mapping[str, Any],
-    rows_by_path: Mapping[str, int],
-    schema_by_path: Mapping[str, str] | None = None,
-    added_paths: Iterable[str] = (),
-    card_manifest: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
+def _manifest_geometry_policy(
+    card_manifest: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if card_manifest is None:
+        return None
+    policy = card_manifest.get("geometry_policy")
+    return dict(policy) if isinstance(policy, Mapping) else None
+
+
+def _software_provenance() -> dict[str, str]:
+    """Return the installed package version and the best available source commit."""
+
+    commit = _environment_source_commit() or _git_source_commit()
+    return {
+        "name": "osm-polygon-eunis",
+        "version": version("osm-polygon-eunis"),
+        "commit": _validated_source_commit(commit),
+    }
+
+
+def _environment_source_commit() -> str | None:
+    for name in ("EUNIS_SOURCE_COMMIT", "GRID5000_SOURCE_REVISION", "GITHUB_SHA"):
+        commit = os.environ.get(name)
+        if commit:
+            return commit
+    return None
+
+
+def _git_source_commit() -> str | None:
+    git = shutil.which("git")
+    if git is None:
+        return None
+    try:
+        result = subprocess.run(  # noqa: S603 - resolved Git executable and fixed arguments
+            (git, "rev-parse", "HEAD"),
+            cwd=Path(__file__).resolve().parents[2],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def _validated_source_commit(commit: str | None) -> str:
+    if commit is None:
+        raise ValueError("source commit unavailable; set EUNIS_SOURCE_COMMIT to a full commit SHA")
+    if re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", commit) is None:
+        raise ValueError("source commit must be a 40- or 64-character hexadecimal SHA")
+    return commit.lower()
+
+
+def build_manifest(options: ManifestBuildOptions) -> dict[str, Any]:
     """Build a stable manifest that makes source conservation explicit."""
 
-    source = sorted(set(source_paths))
-    changed = sorted(set(changed_paths))
-    added = sorted(set(added_paths))
-    schemas = schema_by_path or {}
+    source = sorted(set(options.source_paths))
+    changed = sorted(set(options.changed_paths))
+    added = sorted(set(options.added_paths))
+    schemas = options.schema_by_path or {}
     _validate_manifest_paths(source, changed, added)
     return {
         "manifest_version": MANIFEST_VERSION,
-        "source_repo": source_repo,
-        "target_repo": target_repo,
-        "source_revision": source_revision,
+        "source_repo": options.source_repo,
+        "target_repo": options.target_repo,
+        "source_revision": options.source_revision,
         "source_paths": source,
         "changed_paths": changed,
         "added_paths": added,
         "shared_paths": sorted(set(source) - set(changed)),
-        "rows_by_path": {path: rows_by_path[path] for path in sorted(rows_by_path)},
+        "rows_by_path": {path: options.rows_by_path[path] for path in sorted(options.rows_by_path)},
         "schema_by_path": {path: schemas[path] for path in sorted(schemas)},
-        "reference": dict(reference_manifest),
-        "card": dict(card_manifest) if card_manifest is not None else None,
+        "software": _software_provenance(),
+        "reference": dict(options.reference_manifest),
+        "geometry_policy": _manifest_geometry_policy(options.card_manifest),
+        "card": dict(options.card_manifest) if options.card_manifest is not None else None,
     }
 
 
@@ -204,55 +283,48 @@ def _remote_files(api: HubApi, repo_id: str, revision: str) -> dict[str, Any]:
 def verify_dataset(
     api: HubApi,
     target_repo: str,
-    *,
-    expectations: Iterable[ShardExpectation],
-    expected_tree_paths: Iterable[str],
-    expected_shared_blobs: Mapping[str, str] | None = None,
-    expected_manifest: Mapping[str, Any] | None = None,
-    expected_artifacts: Mapping[str, str] | None = None,
-    temp_dir: Path | None = None,
-    http_client: StreamClient | None = None,
+    options: DatasetVerificationOptions,
 ) -> VerificationReceipt:
     """Verify target tree, unchanged blob identities, Parquet schemas, and manifest."""
 
     revision = capture_revision(api, target_repo)
     remote = _remote_files(api, target_repo, revision)
-    _validate_tree(remote, expected_tree_paths)
-    _verify_shared_blobs(remote, expected_shared_blobs)
+    _validate_tree(remote, options.expected_tree_paths)
+    _verify_shared_blobs(remote, options.expected_shared_blobs)
 
-    if temp_dir is None:
+    if options.temp_dir is None:
         temporary = TemporaryDirectory(prefix="osm-polygon-eunis-verify-")
         directory = Path(temporary.name)
     else:
         temporary = None
-        directory = temp_dir
+        directory = options.temp_dir
     rows_by_path: dict[str, int] = {}
     try:
         rows_by_path = _verify_expectations(
             api,
             target_repo,
             revision,
-            expectations,
+            options.expectations,
             directory,
-            http_client,
+            options.http_client,
         )
         manifest = _verify_manifest(
             api,
             target_repo,
             revision,
-            expected_manifest,
+            options.expected_manifest,
             directory,
-            http_client,
+            options.http_client,
         )
         _verify_artifacts(
             api,
             target_repo,
             revision,
-            expected_artifacts,
+            options.expected_artifacts,
             directory,
-            http_client,
+            options.http_client,
         )
-        shared_paths = tuple(sorted(expected_shared_blobs or {}))
+        shared_paths = tuple(sorted(options.expected_shared_blobs or {}))
         return VerificationReceipt(target_repo, revision, rows_by_path, shared_paths, manifest)
     finally:
         if temporary is not None:

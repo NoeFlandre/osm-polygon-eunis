@@ -1,0 +1,24 @@
+name: Feature request
+description: Propose a change to the EUNIS enrichment or release workflow.
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance checks
+      description: State how a user can verify the change.
+    validations:
+      required: true
