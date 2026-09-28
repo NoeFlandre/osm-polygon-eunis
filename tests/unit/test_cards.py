@@ -96,33 +96,20 @@ dataset_info:
     assert "# Source card body must not replace the EUNIS card." not in readme
     assert "# Wikidata" in readme
     assert artifacts.hashes["README.md"] == artifacts.manifest["readme_sha256"]
-
-
-@pytest.mark.parametrize(
-    ("source_readme", "expected"),
-    [
-        pytest.param(None, None, id="missing-readme"),
-        pytest.param("", None, id="empty-readme"),
-        pytest.param("not frontmatter", None, id="missing-frontmatter"),
-        pytest.param("---\nconfigs:\n", None, id="unclosed-frontmatter"),
-        pytest.param("---\nlicense: odbl\n---", None, id="missing-configs"),
-        pytest.param(
-            "---\nmetadata:\n  configs:\n    - name: nested\n---",
-            None,
-            id="nested-configs",
-        ),
-        pytest.param(
+    boundary_cases = (
+        (None, None),
+        ("", None),
+        ("not frontmatter", None),
+        ("---\nconfigs:\n", None),
+        ("---\nlicense: odbl\n---", None),
+        ("---\nmetadata:\n  configs:\n    - name: nested\n---", None),
+        (
             "---\nlicense: odbl\nconfigs:\n  - config_name: polygons\n---",
             "configs:\n  - config_name: polygons",
-            id="configs-at-end-of-frontmatter",
         ),
-    ],
-)
-def test_extract_source_configs_handles_frontmatter_boundaries(
-    source_readme: str | None,
-    expected: str | None,
-) -> None:
-    assert _extract_source_configs(source_readme) == expected
+    )
+    for source, expected_configs in boundary_cases:
+        assert _extract_source_configs(source) == expected_configs
 
 
 def test_card_accumulator_rejects_invalid_cell_size_and_conflicting_names() -> None:
