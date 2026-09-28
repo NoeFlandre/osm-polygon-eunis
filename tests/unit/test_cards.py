@@ -58,6 +58,42 @@ def test_card_artifacts_have_distribution_table_and_static_world_map(tmp_path: P
     }
 
 
+def test_card_preserves_source_viewer_configs_without_source_card_body(tmp_path: Path) -> None:
+    source_readme = """---
+license: odbl
+configs:
+  - config_name: polygon_document_links_by_language__lang_ab
+    data_files:
+      - split: train
+        path: language_splits/polygon_document_links_by_language/lang-ab/part-*.parquet
+dataset_info:
+  features: []
+---
+# Source card body must not replace the EUNIS card.
+"""
+    card = DatasetCardAccumulator(source_readme=source_readme)
+    card.observe(EunisResult("R11", "Steppe", 80.0, "EEA-test"), _geometry(2.0, 48.0))
+
+    artifacts = card.write_artifacts(
+        tmp_path,
+        dataset_name="wikidata",
+        source_repo="org/source",
+        target_repo="org/target",
+        source_revision="source-revision",
+        reference_version="EEA-test",
+    )
+
+    readme = artifacts.files["README.md"].read_text(encoding="utf-8")
+    assert "config_name: polygon_document_links_by_language__lang_ab" in readme
+    assert "split: train" in readme
+    assert (
+        "path: language_splits/polygon_document_links_by_language/lang-ab/part-*.parquet" in readme
+    )
+    assert "# Source card body must not replace the EUNIS card." not in readme
+    assert "# Wikidata" in readme
+    assert artifacts.hashes["README.md"] == artifacts.manifest["readme_sha256"]
+
+
 def test_card_accumulator_rejects_invalid_cell_size_and_conflicting_names() -> None:
     with pytest.raises(ValueError, match="cell_size"):
         DatasetCardAccumulator(cell_size=0.0)

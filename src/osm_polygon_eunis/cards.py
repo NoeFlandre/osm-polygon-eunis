@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import math
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -146,11 +147,17 @@ _LAYOUT = _MapLayout()
 class DatasetCardAccumulator:
     """Collect label counts and bounded map bins while shards stream past."""
 
-    def __init__(self, *, cell_size: float = _CELL_SIZE) -> None:
+    def __init__(
+        self,
+        *,
+        cell_size: float = _CELL_SIZE,
+        source_readme: str | None = None,
+    ) -> None:
         """Create a card accumulator with the requested map-bin size.
 
         Args:
             cell_size: Maximum longitude/latitude width of each map bin in degrees.
+            source_readme: Pinned source card used to retain Dataset Viewer configs.
 
         Raises:
             ValueError: If the size is not in the supported range.
@@ -158,6 +165,7 @@ class DatasetCardAccumulator:
         if cell_size <= 0.0 or cell_size > _MAX_CELL_SIZE:
             raise ValueError("cell_size must be in (0, 180]")
         self.cell_size = cell_size
+        self._source_configs = _extract_source_configs(source_readme)
         self._counts: dict[str | None, int] = {}
         self._names: dict[str | None, str] = {}
         self._bins: dict[tuple[str | None, int, int], int] = {}
@@ -259,6 +267,7 @@ class DatasetCardAccumulator:
                 target_repo=target_repo,
                 source_revision=source_revision,
                 reference_version=reference_version,
+                source_configs=self._source_configs,
             ),
             encoding="utf-8",
         )
@@ -293,6 +302,7 @@ class DatasetCardAccumulator:
         target_repo: str,
         source_revision: str,
         reference_version: str,
+        source_configs: str | None,
     ) -> str:
         title = _title(dataset_name)
         lines = [
@@ -303,25 +313,31 @@ class DatasetCardAccumulator:
             "- osm",
             "- eunis",
             "- ecology",
-            "---",
-            "",
-            f"# {title}",
-            "",
-            "This dataset preserves the source rows and adds four nullable EUNIS fields "
-            "to each polygon-bearing Parquet shard.",
-            "",
-            "![Static world map of EUNIS label distribution](./eunis/world-map.svg)",
-            "",
-            "The map uses a representative point for each polygon and "
-            f"{self.cell_size:g}-degree geographic "
-            "bins to keep the static artifact small. Colors identify EUNIS codes; the "
-            "complete distribution is listed below. Unlabeled polygons are shown in gray.",
-            "",
-            "## Label distribution",
-            "",
-            "| EUNIS code | Label | Polygons | Share |",
-            "|:--|:--|--:|--:|",
         ]
+        if source_configs:
+            lines.extend(("", *source_configs.splitlines()))
+        lines.extend(
+            (
+                "---",
+                "",
+                f"# {title}",
+                "",
+                "This dataset preserves the source rows and adds four nullable EUNIS fields "
+                "to each polygon-bearing Parquet shard.",
+                "",
+                "![Static world map of EUNIS label distribution](./eunis/world-map.svg)",
+                "",
+                "The map uses a representative point for each polygon and "
+                f"{self.cell_size:g}-degree geographic "
+                "bins to keep the static artifact small. Colors identify EUNIS codes; the "
+                "complete distribution is listed below. Unlabeled polygons are shown in gray.",
+                "",
+                "## Label distribution",
+                "",
+                "| EUNIS code | Label | Polygons | Share |",
+                "|:--|:--|--:|--:|",
+            )
+        )
         lines.extend(
             f"| {_markdown_code(summary.code)} | {_markdown_cell(summary.name)} | "
             f"{summary.rows:,} | {summary.percentage:.2f}% |"
@@ -521,6 +537,42 @@ def _label_text(code: str | None, name: str) -> str:
 
 def _truncate(value: str, length: int) -> str:
     return value if len(value) <= length else f"{value[: length - 1]}…"
+
+
+def _extract_source_configs(source_readme: str | None) -> str | None:
+    """Return only the source README's top-level Dataset Viewer configs block."""
+
+    if not source_readme:
+        return None
+    lines = source_readme.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
+    frontmatter_end = next(
+        (index for index, line in enumerate(lines[1:], start=1) if line.strip() == "---"),
+        None,
+    )
+    if frontmatter_end is None:
+        return None
+    config_start = next(
+        (
+            index
+            for index, line in enumerate(lines[1:frontmatter_end], start=1)
+            if line == "configs:"
+        ),
+        None,
+    )
+    if config_start is None:
+        return None
+    config_end = next(
+        (
+            index
+            for index in range(config_start + 1, frontmatter_end)
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*\s*:.*", lines[index])
+        ),
+        frontmatter_end,
+    )
+    block = "\n".join(lines[config_start:config_end]).rstrip()
+    return block or None
 
 
 def _title(dataset_name: str) -> str:

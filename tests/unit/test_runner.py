@@ -357,7 +357,13 @@ def test_finalize_plan_builds_manifest_and_verifies_target(monkeypatch, tmp_path
         "target", "verified", {expectation.path: 2}, ("README.md",), None
     )
     calls = []
+    source_readmes = []
     monkeypatch.setattr(card_publishing, "capture_revision", lambda api, repo: "target-base")
+    monkeypatch.setattr(
+        card_publishing,
+        "_download_source_readme",
+        lambda *args: "pinned source card",
+    )
     monkeypatch.setattr(
         card_publishing,
         "finalize_dataset",
@@ -371,6 +377,9 @@ def test_finalize_plan_builds_manifest_and_verifies_target(monkeypatch, tmp_path
     monkeypatch.setattr(manifest_state, "verify_dataset", lambda *args, **kwargs: verification)
 
     class FakeCard:
+        def __init__(self, *, source_readme: str | None = None) -> None:
+            source_readmes.append(source_readme)
+
         def write_artifacts(self, directory: Path, **kwargs) -> CardArtifacts:
             del kwargs
             directory.mkdir(parents=True, exist_ok=True)
@@ -414,6 +423,7 @@ def test_finalize_plan_builds_manifest_and_verifies_target(monkeypatch, tmp_path
     )
 
     assert result.verification is verification
+    assert source_readmes == ["pinned source card"]
     assert calls[0].changed_paths == ("polygons/a.parquet", "README.md")
     assert calls[0].added_paths == ("eunis/world-map.svg",)
 

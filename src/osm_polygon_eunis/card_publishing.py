@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from ._protocols import HubApi, StreamClient
@@ -17,7 +18,7 @@ from .manifest_state import (
 from .publish import ManifestBuildOptions, ShardExpectation, build_manifest, upload_manifest
 from .release_plan import DatasetPlan, DatasetReceipt, Progress
 from .shard_processing import FinalizeOptions, _advance_commit, _upload_file, finalize_dataset
-from .sources import capture_revision
+from .sources import capture_revision, download_to_temp
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,7 +40,8 @@ def _finalize_plan(
     options: _PlanOptions,
 ) -> DatasetReceipt:
     target_revision = capture_revision(api, plan.spec.output_repo)
-    card = DatasetCardAccumulator()
+    source_readme = _download_source_readme(api, plan, options)
+    card = DatasetCardAccumulator(source_readme=source_readme)
     expectations, current_commit = finalize_dataset(
         api,
         plan,
@@ -119,6 +121,28 @@ def _write_card_artifacts(
         source_revision=plan.source_revision,
         reference_version=str(reference_info["source_version"]),
     )
+
+
+def _download_source_readme(
+    api: HubApi,
+    plan: DatasetPlan,
+    options: _PlanOptions,
+) -> str | None:
+    """Fetch the small pinned source card so its Viewer config is preserved."""
+
+    if "README.md" not in plan.source_files:
+        return None
+    options.workdir.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(prefix="eunis-source-card-", dir=options.workdir) as temporary:
+        path = download_to_temp(
+            api,
+            plan.spec.source_repo,
+            "README.md",
+            plan.source_revision,
+            Path(temporary),
+            client=options.http_client,
+        )
+        return path.read_text(encoding="utf-8")
 
 
 def _publish_dataset_manifest(
