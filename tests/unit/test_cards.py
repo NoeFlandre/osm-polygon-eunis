@@ -8,7 +8,11 @@ import pytest
 from shapely.geometry import GeometryCollection, LineString, Point, Polygon, box, mapping
 from shapely.geometry.base import BaseGeometry
 
-from osm_polygon_eunis.cards import DatasetCardAccumulator, _map_cell_coordinates
+from osm_polygon_eunis.cards import (
+    DatasetCardAccumulator,
+    _extract_source_configs,
+    _map_cell_coordinates,
+)
 from osm_polygon_eunis.domain import EunisResult
 from osm_polygon_eunis.geometry import GEOMETRY_POLICY
 
@@ -92,6 +96,33 @@ dataset_info:
     assert "# Source card body must not replace the EUNIS card." not in readme
     assert "# Wikidata" in readme
     assert artifacts.hashes["README.md"] == artifacts.manifest["readme_sha256"]
+
+
+@pytest.mark.parametrize(
+    ("source_readme", "expected"),
+    [
+        pytest.param(None, None, id="missing-readme"),
+        pytest.param("", None, id="empty-readme"),
+        pytest.param("not frontmatter", None, id="missing-frontmatter"),
+        pytest.param("---\nconfigs:\n", None, id="unclosed-frontmatter"),
+        pytest.param("---\nlicense: odbl\n---", None, id="missing-configs"),
+        pytest.param(
+            "---\nmetadata:\n  configs:\n    - name: nested\n---",
+            None,
+            id="nested-configs",
+        ),
+        pytest.param(
+            "---\nlicense: odbl\nconfigs:\n  - config_name: polygons\n---",
+            "configs:\n  - config_name: polygons",
+            id="configs-at-end-of-frontmatter",
+        ),
+    ],
+)
+def test_extract_source_configs_handles_frontmatter_boundaries(
+    source_readme: str | None,
+    expected: str | None,
+) -> None:
+    assert _extract_source_configs(source_readme) == expected
 
 
 def test_card_accumulator_rejects_invalid_cell_size_and_conflicting_names() -> None:

@@ -542,18 +542,34 @@ def _truncate(value: str, length: int) -> str:
 def _extract_source_configs(source_readme: str | None) -> str | None:
     """Return only the source README's top-level Dataset Viewer configs block."""
 
-    if not source_readme:
+    if source_readme is None:
         return None
     lines = source_readme.splitlines()
-    if not lines or lines[0].strip() != "---":
+    if not _has_frontmatter(lines):
         return None
-    frontmatter_end = next(
+    frontmatter_end = _frontmatter_end(lines)
+    if frontmatter_end is None:
+        return None
+    config_start = _config_start(lines, frontmatter_end)
+    if config_start is None:
+        return None
+    config_end = _config_end(lines, config_start, frontmatter_end)
+    return _config_block(lines, config_start, config_end)
+
+
+def _has_frontmatter(lines: list[str]) -> bool:
+    return bool(lines) and lines[0].strip() == "---"
+
+
+def _frontmatter_end(lines: list[str]) -> int | None:
+    return next(
         (index for index, line in enumerate(lines[1:], start=1) if line.strip() == "---"),
         None,
     )
-    if frontmatter_end is None:
-        return None
-    config_start = next(
+
+
+def _config_start(lines: list[str], frontmatter_end: int) -> int | None:
+    return next(
         (
             index
             for index, line in enumerate(lines[1:frontmatter_end], start=1)
@@ -561,9 +577,10 @@ def _extract_source_configs(source_readme: str | None) -> str | None:
         ),
         None,
     )
-    if config_start is None:
-        return None
-    config_end = next(
+
+
+def _config_end(lines: list[str], config_start: int, frontmatter_end: int) -> int:
+    return next(
         (
             index
             for index in range(config_start + 1, frontmatter_end)
@@ -571,8 +588,10 @@ def _extract_source_configs(source_readme: str | None) -> str | None:
         ),
         frontmatter_end,
     )
-    block = "\n".join(lines[config_start:config_end]).rstrip()
-    return block or None
+
+
+def _config_block(lines: list[str], config_start: int, config_end: int) -> str:
+    return "\n".join(lines[config_start:config_end]).rstrip()
 
 
 def _title(dataset_name: str) -> str:
