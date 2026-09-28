@@ -329,9 +329,10 @@ def _raise(error: Exception):
 
 def _hub_error() -> Exception:
     from huggingface_hub.errors import HfHubHTTPError
+    from huggingface_hub.utils import httpx as hub_httpx
 
-    request = httpx.Request("GET", "https://example.test")
-    return HfHubHTTPError("401 unauthorized", response=httpx.Response(401, request=request))
+    request = hub_httpx.Request("GET", "https://example.test")
+    return HfHubHTTPError("401 unauthorized", response=hub_httpx.Response(401, request=request))
 
 
 @pytest.mark.parametrize(

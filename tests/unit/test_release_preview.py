@@ -7,9 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
-import httpx
 import pytest
-from huggingface_hub.utils import RepositoryNotFoundError
+from huggingface_hub.utils import RepositoryNotFoundError, httpx
 
 from osm_polygon_eunis import (
     card_publishing,
