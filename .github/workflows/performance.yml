@@ -36,7 +36,7 @@ jobs:
         working-directory: head
         run: uv sync --locked --group dev
       - name: Use one benchmark suite against both source revisions
-        run: cp -R head/benchmarks baseline/benchmarks
+        run: cp -R head/benchmarks/. baseline/benchmarks/
       - name: Measure the base revision
         working-directory: baseline
         env:

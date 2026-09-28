@@ -6,10 +6,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
-import httpx
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from huggingface_hub.utils import httpx
 
 from osm_polygon_eunis import publish
 from osm_polygon_eunis._protocols import HubApi
