@@ -15,6 +15,8 @@ case "$GRID5000_PERSISTENT_ROOT" in
 esac
 
 source_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$source_root/scripts/grid5000/load_hf_token.sh"
+eunis_load_hf_token "$hf_token_file"
 persistent_root="$GRID5000_PERSISTENT_ROOT"
 scratch="${TMPDIR:-/tmp}/osm-polygon-eunis-${OAR_JOB_ID}"
 workdir="$persistent_root/runs/eunis"
