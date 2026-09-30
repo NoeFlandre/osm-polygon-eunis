@@ -112,6 +112,45 @@ dataset_info:
         assert _extract_source_configs(source) == expected_configs
 
 
+def test_card_preserves_source_data_license_metadata(tmp_path: Path) -> None:
+    card = DatasetCardAccumulator(source_readme="---\nlicense: odbl\n---\n")
+    card.observe(EunisResult("R11", "Steppe", 80.0, "EEA-test"), _geometry(2.0, 48.0))
+
+    artifacts = card.write_artifacts(
+        tmp_path,
+        dataset_name="description",
+        source_repo="org/source",
+        target_repo="org/target",
+        source_revision="source-revision",
+        reference_version="EEA-test",
+    )
+
+    readme = artifacts.files["README.md"].read_text(encoding="utf-8")
+    frontmatter = readme.split("---", 2)[1]
+    assert "license: odbl" in frontmatter
+    assert "license: apache-2.0" not in frontmatter
+
+
+def test_card_separates_code_license_from_dataset_data_terms(tmp_path: Path) -> None:
+    card = DatasetCardAccumulator(source_readme="---\nlicense: odbl\n---\n")
+    card.observe(EunisResult("R11", "Steppe", 80.0, "EEA-test"), _geometry(2.0, 48.0))
+
+    artifacts = card.write_artifacts(
+        tmp_path,
+        dataset_name="description",
+        source_repo="org/source",
+        target_repo="org/target",
+        source_revision="source-revision",
+        reference_version="EEA-test",
+    )
+
+    readme = artifacts.files["README.md"].read_text(encoding="utf-8")
+    assert "## Data terms" in readme
+    assert "OpenStreetMap data is available under the [Open Database License]" in readme
+    assert "EEA reference assets can carry item-specific reuse terms" in readme
+    assert "The Apache-2.0 license applies to project code only" in readme
+
+
 def test_card_accumulator_rejects_invalid_cell_size_and_conflicting_names() -> None:
     with pytest.raises(ValueError, match="cell_size"):
         DatasetCardAccumulator(cell_size=0.0)
@@ -223,7 +262,7 @@ def test_default_card_artifacts_are_byte_identical_to_golden_hashes(tmp_path: Pa
         print(json.dumps(dict(artifacts.hashes), indent=2, sort_keys=True))  # noqa: T201
 
     assert dict(artifacts.hashes) == {
-        "README.md": "b6d3caf3702fba491bd8093452baec1e3b58ad2495047b3bbbfc88c7f2f3fd5a",
+        "README.md": "0ae2d67b0d5d2a85c7bbee1aaaef918c3d27c7ad78b009ad5fbf321dbbd56848",
         "eunis/world-map.svg": "adb1d18e0876692cb71143402828c0aaa5a2df98762e9b43bcb6353d8fdbf731",
     }
 
