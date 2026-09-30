@@ -7,9 +7,11 @@ every submission, the controller runs `usagepolicycheck -t`, then queries the
 site inventory via the Grid'5000 API, then queries each site's OAR job list over
 SSH from the selected frontend using the authenticated account. It fails closed
 if either check is incomplete, if any EUNIS job is active, or if any site cannot
-be queried. Select a reachable
-non-Bordeaux site when Bordeaux access is unavailable; the all-site checks are
-still required even when the selected compute site differs.
+be queried. If a site's exclusion has been approved, pass `--exclude-site SITE`;
+the controller dynamically checks every site in the current Grid'5000 API
+inventory except those explicit exclusions. It refuses an exclusion that is
+absent from the API inventory or is also the compute site. The policy scope and
+exclusions are recorded in the local job state and run receipt.
 
 The controller syncs only source code and submits all three sources together:
 `website`, `wikidata`, and `description`. The site, frontend, and cluster must
@@ -32,11 +34,13 @@ uv run osm-polygon-eunis grid5000 submit \
   --frontend FRONTEND \
   --cluster CLUSTER \
   --persistent-root /home/USER/osm-polygon-eunis \
+  --exclude-site bordeaux \
   --state /path/on/external-HDD/eunis-grid5000-state.json
 ```
 
-The controller checks `usagepolicycheck -t` before syncing and again after
-submission, and refuses a job found in the all-site inventory. It streams only
+The controller runs `usagepolicycheck -t --sites` over the current API site list
+minus explicit exclusions before syncing and again after submission, and refuses
+a job found in the same all-site inventory. It streams only
 the exact Git commit into a clean remote source directory; untracked files,
 local caches, secrets, and run data are not part of that archive. Its OAR
 request is `oarsub -q default -p "cluster='CLUSTER'" -l
