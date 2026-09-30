@@ -157,7 +157,7 @@ class DatasetCardAccumulator:
 
         Args:
             cell_size: Maximum longitude/latitude width of each map bin in degrees.
-            source_readme: Pinned source card used to retain Dataset Viewer configs.
+            source_readme: Pinned source card used to retain Viewer configs and license.
 
         Raises:
             ValueError: If the size is not in the supported range.
@@ -166,6 +166,7 @@ class DatasetCardAccumulator:
             raise ValueError("cell_size must be in (0, 180]")
         self.cell_size = cell_size
         self._source_configs = _extract_source_configs(source_readme)
+        self._source_license = _extract_source_license(source_readme)
         self._counts: dict[str | None, int] = {}
         self._names: dict[str | None, str] = {}
         self._bins: dict[tuple[str | None, int, int], int] = {}
@@ -308,12 +309,18 @@ class DatasetCardAccumulator:
         lines = [
             "---",
             f"pretty_name: {title}",
-            "tags:",
-            "- geospatial",
-            "- osm",
-            "- eunis",
-            "- ecology",
         ]
+        if self._source_license:
+            lines.append(f"license: {self._source_license}")
+        lines.extend(
+            [
+                "tags:",
+                "- geospatial",
+                "- osm",
+                "- eunis",
+                "- ecology",
+            ]
+        )
         if source_configs:
             lines.extend(("", *source_configs.splitlines()))
         lines.extend(
@@ -361,6 +368,17 @@ class DatasetCardAccumulator:
                 f"Source: `{source_repo}` at `{source_revision}`.",
                 f"Output: `{target_repo}`.",
                 f"Reference: official EEA EUNIS assets pinned as `{reference_version}`.",
+                "",
+                "## Data terms",
+                "",
+                "The Apache-2.0 license applies to project code only and does not change "
+                "the terms for source or derived data.",
+                "OpenStreetMap data is available under the [Open Database License]"
+                "(https://www.openstreetmap.org/copyright), with attribution and "
+                "share-alike requirements.",
+                "EEA reference assets can carry item-specific reuse terms; check the "
+                "notice attached to each exact asset and the [EEA legal notice]"
+                "(https://www.eea.europa.eu/en/legal-notice).",
             )
         )
         return "\n".join(lines) + "\n"
@@ -555,6 +573,31 @@ def _extract_source_configs(source_readme: str | None) -> str | None:
         return None
     config_end = _config_end(lines, config_start, frontmatter_end)
     return _config_block(lines, config_start, config_end)
+
+
+def _extract_source_license(source_readme: str | None) -> str | None:
+    """Return a simple top-level license identifier from the source card."""
+
+    lines = _source_frontmatter_lines(source_readme)
+    if lines is None:
+        return None
+    match = re.search(
+        r"(?m)^license:[ \t]*([A-Za-z0-9][A-Za-z0-9.+_-]*)[ \t]*$",
+        "\n".join(lines),
+    )
+    return None if match is None else match.group(1)
+
+
+def _source_frontmatter_lines(source_readme: str | None) -> list[str] | None:
+    if source_readme is None:
+        return None
+    lines = source_readme.splitlines()
+    if not _has_frontmatter(lines):
+        return None
+    frontmatter_end = _frontmatter_end(lines)
+    if frontmatter_end is None:
+        return None
+    return lines[1:frontmatter_end]
 
 
 def _has_frontmatter(lines: list[str]) -> bool:
