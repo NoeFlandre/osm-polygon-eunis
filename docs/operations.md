@@ -22,8 +22,11 @@ checkpoints rather than extending a reservation beyond policy.
 Keep the controller state file on the external HDD. The worker stores resumable
 run data at `GRID5000_PERSISTENT_ROOT/runs/eunis`, sidecars at
 `GRID5000_PERSISTENT_ROOT/sidecars/eunis`, logs under `logs`, and receipts under
-`receipts`. Source/reference staging and the UV cache use node-local scratch;
-that scratch is not backed up and must be recreated by a resumed job.
+`receipts`. Source staging and the UV cache use node-local scratch; that scratch
+is not backed up, and source bytes and the UV cache are recreated by a resumed
+job. Validated EEA assets are cached at
+`GRID5000_PERSISTENT_ROOT/cache/reference`, so later short jobs can reuse them
+after checking metadata identity, size and recorded SHA-256.
 
 Example after the all-site checks pass (replace the site-specific values and
 keep the state file on persistent local storage):
@@ -50,9 +53,10 @@ into the worker environment and written into the receipt. The release CLI
 supports `--receipt PATH`; the worker adds the job ID, config hash, attempt and
 retry counts, error count and log path before atomically saving the final
 receipt under `receipts/`.
-`EUNIS_SOURCE_DIR` and `EUNIS_REFERENCE_DIR` point to node-local scratch, while
-`EUNIS_SIDECAR_DIR` points to persistent storage. The staged reference cache is
-reused only after its size, metadata identity and recorded SHA-256 are checked.
+`EUNIS_SOURCE_DIR` and `UV_CACHE_DIR` point to node-local scratch, while
+`EUNIS_REFERENCE_DIR`, `EUNIS_SIDECAR_DIR` and the release work directory point
+to persistent storage. The staged reference cache is reused only after its
+size, metadata identity and recorded SHA-256 are checked.
 Do not submit again until the prior job is verified terminal and no active
 EUNIS job exists on any site.
 

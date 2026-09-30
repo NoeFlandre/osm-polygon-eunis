@@ -196,10 +196,19 @@ def _reference_staging_root(workdir: Path, first_record: str) -> Iterator[Path]:
     if configured:
         root = Path(configured)
         root.mkdir(parents=True, exist_ok=True)
+        _remove_stale_partial_downloads(root)
         yield root
         return
     with TemporaryDirectory(dir=workdir, prefix=f"reference-{first_record}-") as directory:
         yield Path(directory)
+
+
+def _remove_stale_partial_downloads(root: Path) -> None:
+    """Remove interrupted asset downloads before reusing a persistent cache."""
+
+    for path in root.rglob(".*.part"):
+        if path.is_file():
+            path.unlink(missing_ok=True)
 
 
 def _worker_reference_batch(

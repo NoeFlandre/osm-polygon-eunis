@@ -96,8 +96,9 @@ sources in one resumable job: `website`, `wikidata`, and `description`. The Mac
 performs tests and the submission/monitoring commands; it does not compute
 Parquet or raster enrichment. The controller accepts any Grid'5000
 site/frontend/cluster explicitly, requests one CPU host, and never submits
-duplicate jobs across sites. The worker uses persistent sidecars and node-local
-scratch for large files. Follow [the operations runbook](docs/operations.md)
+duplicate jobs across sites. The worker keeps validated EEA references and
+sidecars on persistent Grid storage, and uses node-local scratch for transient
+source and build files. Follow [the operations runbook](docs/operations.md)
 for the policy check, submission, receipt, verification, and no-op rerun.
 
 After the all-site duplicate and policy checks pass, submit the resumable job
