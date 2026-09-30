@@ -34,6 +34,7 @@ class _ConfigOverrides(TypedDict):
     workers: NotRequired[int]
     walltime: NotRequired[str]
     batch_size: NotRequired[int]
+    excluded_sites: NotRequired[tuple[str, ...]]
 
 
 def _config(**overrides: Unpack[_ConfigOverrides]) -> Grid5000Config:
@@ -46,6 +47,7 @@ def _config(**overrides: Unpack[_ConfigOverrides]) -> Grid5000Config:
         workers=overrides.get("workers", 16),
         walltime=overrides.get("walltime", "1:00:00"),
         batch_size=overrides.get("batch_size", 256),
+        excluded_sites=overrides.get("excluded_sites", ()),
     )
 
 
@@ -80,7 +82,7 @@ def test_profile_requests_one_cpu_host_on_any_explicit_site() -> None:
             "GRID5000_PERSISTENT_ROOT=/home/u/eunis GRID5000_FRONTEND=fgrenoble "
             "GRID5000_SITE=grenoble GRID5000_CLUSTER=dahu GRID5000_QUEUE=default "
             "GRID5000_CORES=16 GRID5000_WORKERS=16 GRID5000_WALLTIME=1:00:00 "
-            "GRID5000_BATCH_SIZE=256 "
+            "GRID5000_BATCH_SIZE=256 GRID5000_EXCLUDED_SITES='[]' "
             "/home/u/eunis/source/scripts/grid5000/release.sh"
         ),
     )
@@ -112,6 +114,16 @@ def test_config_rejects_invalid_resource_values() -> None:
         _config(walltime="forever")
     with pytest.raises(ValueError, match="persistent"):
         _config(persistent_root="relative/eunis")
+
+
+def test_unreachable_site_exclusion_is_explicit_and_cannot_hide_compute_site() -> None:
+    assert _config(excluded_sites=("bordeaux",)).excluded_sites == ("bordeaux",)
+    with pytest.raises(ValueError, match="selected compute site"):
+        _config(excluded_sites=("grenoble",))
+    with pytest.raises(ValueError, match="unique"):
+        _config(excluded_sites=("bordeaux", "bordeaux"))
+    with pytest.raises(ValueError, match="excluded_sites"):
+        _config(excluded_sites=("bordeaux;false",))
 
 
 def test_persistent_root_rejects_ephemeral_or_mac_paths() -> None:
@@ -174,6 +186,17 @@ def test_policy_status_and_ssh_commands() -> None:
         build_status_command("not-a-job")
 
 
+def test_policy_command_checks_every_api_site_except_explicit_exclusions() -> None:
+    command = build_policy_command(("bordeaux",))
+
+    assert command[:2] == ("python3", "-c")
+    assert '"--sites"' in command[2]
+    assert '"bordeaux"' in command[2]
+    assert 'items(BASE + "/sites")' in command[2]
+    assert "usagepolicycheck" in command[2]
+    compile(command[2], "<Grid5000 usage policy check>", "exec")
+
+
 def test_ssh_command_preserves_oar_expression_quotes_for_remote_shell() -> None:
     remote_command = ("oarsub", "-p", "cluster='grappe'")
 
@@ -211,6 +234,17 @@ def test_all_site_job_check_uses_oarstat_on_api_discovered_sites() -> None:
     assert "oarstat" in command[2]
     assert "osm-polygon-eunis" in command[2]
     compile(remote_args[-1], "<Grid5000 active-job check>", "exec")
+
+
+def test_all_site_job_check_skips_only_explicitly_excluded_sites() -> None:
+    command = build_active_eunis_jobs_command("fgrenoble", ("bordeaux",))
+    script = shlex.split(command[2])[-1]
+
+    assert '"bordeaux"' in script
+    assert "if site_id in EXCLUDED_SITE_IDS" in script
+    assert 'items(BASE + "/sites")' in script
+    assert '"excluded_sites": sorted(EXCLUDED_SITE_IDS)' in script
+    compile(script, "<Grid5000 active-job check>", "exec")
 
 
 def test_grid_job_is_immutable() -> None:
@@ -261,12 +295,49 @@ def test_submit_runs_policy_sync_oar_and_post_policy_without_secrets(tmp_path: P
         "GRID5000_PERSISTENT_ROOT=/home/u/eunis GRID5000_FRONTEND=fgrenoble "
         "GRID5000_SITE=grenoble GRID5000_CLUSTER=dahu GRID5000_QUEUE=default "
         "GRID5000_CORES=16 GRID5000_WORKERS=16 GRID5000_WALLTIME=1:00:00 "
-        "GRID5000_BATCH_SIZE=256 GRID5000_SOURCE_REVISION=abc123 "
+        "GRID5000_BATCH_SIZE=256 GRID5000_EXCLUDED_SITES='[]' "
+        "GRID5000_SOURCE_REVISION=abc123 "
         "/home/u/eunis/source/scripts/grid5000/release.sh"
     )
     assert calls[5] == ("ssh", "fgrenoble", "usagepolicycheck -t")
     assert all("HF_TOKEN" not in " ".join(command) for command in calls)
     assert json.loads(state.read_text(encoding="utf-8"))["job_id"] == "123456"
+
+
+def test_submission_persists_explicit_site_exclusions_in_its_receipt(tmp_path: Path) -> None:
+    config = _config(excluded_sites=("bordeaux",))
+    state = tmp_path / "job.json"
+    calls: list[tuple[str, ...]] = []
+
+    def fake_runner(command: tuple[str, ...]) -> str:
+        calls.append(command)
+        if command == grid5000.build_active_eunis_jobs_command("fgrenoble", ("bordeaux",)):
+            return json.dumps({"active_jobs": [], "errors": [], "excluded_sites": ["bordeaux"]})
+        if command[:2] == ("ssh", "fgrenoble") and shlex.split(command[2])[0] == "oarsub":
+            return "Adding job 123456"
+        return ""
+
+    submit_grid5000(
+        config,
+        tmp_path,
+        source_revision="abc123",
+        state_path=state,
+        runner=fake_runner,
+    )
+
+    assert json.loads(state.read_text(encoding="utf-8"))["excluded_sites"] == ["bordeaux"]
+    submission = next(
+        command
+        for command in calls
+        if command[:2] == ("ssh", "fgrenoble") and "oarsub" in command[2]
+    )
+    worker_command = shlex.split(submission[2])[-1]
+    excluded_setting = next(
+        token
+        for token in shlex.split(worker_command)
+        if token.startswith("GRID5000_EXCLUDED_SITES=")
+    )
+    assert json.loads(excluded_setting.split("=", maxsplit=1)[1]) == ["bordeaux"]
 
 
 def test_live_submission_requires_a_persistent_state_path(tmp_path: Path) -> None:
@@ -404,6 +475,28 @@ def test_submit_fails_closed_when_any_site_inventory_failed(tmp_path: Path) -> N
     with pytest.raises(RuntimeError, match="bordeaux"):
         submit_grid5000(
             _config(),
+            tmp_path,
+            source_revision="abc123",
+            state_path=tmp_path / "state.json",
+            runner=fake_runner,
+        )
+
+    assert len(calls) == 2
+
+
+def test_submit_fails_closed_when_exclusion_scope_does_not_match_request(tmp_path: Path) -> None:
+    config = _config(excluded_sites=("bordeaux",))
+    calls: list[tuple[str, ...]] = []
+
+    def fake_runner(command: tuple[str, ...]) -> str:
+        calls.append(command)
+        if command == grid5000.build_active_eunis_jobs_command("fgrenoble", ("bordeaux",)):
+            return _EMPTY_ALL_SITE_REPORT
+        return ""
+
+    with pytest.raises(RuntimeError, match="exclusion scope does not match"):
+        submit_grid5000(
+            config,
             tmp_path,
             source_revision="abc123",
             state_path=tmp_path / "state.json",

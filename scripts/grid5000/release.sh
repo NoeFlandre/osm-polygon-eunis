@@ -34,6 +34,7 @@ cores="${GRID5000_CORES:-0}"
 workers="${GRID5000_WORKERS:-16}"
 walltime="${GRID5000_WALLTIME:-unknown}"
 batch_size="${GRID5000_BATCH_SIZE:-256}"
+excluded_sites_json="${GRID5000_EXCLUDED_SITES:-[]}"
 config_sha256="$(sha256sum "$reference_config" | cut -d ' ' -f 1)"
 attempt=0
 status=0
@@ -46,7 +47,8 @@ write_failure_receipt() {
   if [[ "$status" -ne 0 && ! -e "$receipt" ]]; then
     python3 - "$receipt" "$OAR_JOB_ID" "$source_commit" "$config_sha256" \
       "$reference_config" "$site" "$frontend" "$cluster" "$queue" "$cores" \
-      "$workers" "$walltime" "$batch_size" "$attempt" "$error_count" "$status" \
+      "$workers" "$walltime" "$batch_size" "$excluded_sites_json" \
+      "$attempt" "$error_count" "$status" \
       "$logs/job-${OAR_JOB_ID}.log" <<'PY'
 import json
 import os
@@ -54,7 +56,7 @@ import sys
 
 (
     path, job_id, source_commit, config_sha256, config_path, site, frontend,
-    cluster, queue, cores, workers, walltime, batch_size, attempts, errors,
+    cluster, queue, cores, workers, walltime, batch_size, excluded_sites, attempts, errors,
     exit_status, log_path,
 ) = sys.argv[1:]
 payload = {
@@ -71,6 +73,7 @@ payload = {
         "workers": int(workers),
         "walltime": walltime,
         "batch_size": int(batch_size),
+        "excluded_sites": json.loads(excluded_sites),
         "config": {"path": config_path, "sha256": config_sha256},
         "attempts": int(attempts),
         "retries": max(0, int(attempts) - 1),
@@ -109,6 +112,7 @@ echo "grid5000_cores=$cores"
 echo "grid5000_workers=$workers"
 echo "grid5000_walltime=$walltime"
 echo "grid5000_batch_size=$batch_size"
+echo "grid5000_excluded_sites=$excluded_sites_json"
 echo "reference_config=$reference_config"
 echo "reference_config_sha256=$config_sha256"
 if [[ "$site" == "unknown" || "$frontend" == "unknown" || "$cluster" == "unknown" \
@@ -135,8 +139,8 @@ while (( attempt <= max_attempts )); do
     --receipt "$release_receipt"; then
     python3 - "$release_receipt" "$receipt" "$OAR_JOB_ID" "$source_commit" \
       "$config_sha256" "$reference_config" "$site" "$frontend" "$cluster" \
-      "$queue" "$cores" "$workers" "$walltime" "$batch_size" "$attempt" \
-      "$error_count" \
+      "$queue" "$cores" "$workers" "$walltime" "$batch_size" \
+      "$excluded_sites_json" "$attempt" "$error_count" \
       "$logs/job-${OAR_JOB_ID}.log" <<'PY'
 import json
 import os
@@ -144,8 +148,8 @@ import sys
 
 (
     source, destination, job_id, source_commit, config_sha256, config_path, site,
-    frontend, cluster, queue, cores, workers, walltime, batch_size, attempts,
-    errors, log_path,
+    frontend, cluster, queue, cores, workers, walltime, batch_size, excluded_sites,
+    attempts, errors, log_path,
 ) = sys.argv[1:]
 with open(source, encoding="utf-8") as input_file:
     payload = json.load(input_file)
@@ -160,6 +164,7 @@ payload["grid5000"] = {
     "workers": int(workers),
     "walltime": walltime,
     "batch_size": int(batch_size),
+    "excluded_sites": json.loads(excluded_sites),
     "config": {"path": config_path, "sha256": config_sha256},
     "attempts": int(attempts),
     "retries": max(0, int(attempts) - 1),

@@ -258,6 +258,12 @@ def _parser() -> argparse.ArgumentParser:
         help="remote persistent project directory under /home, /groups or /srv",
     )
     grid_submit.add_argument(
+        "--exclude-site",
+        action="append",
+        default=[],
+        help="explicitly omit one unreachable site from policy and duplicate-job checks",
+    )
+    grid_submit.add_argument(
         "--state",
         required=True,
         type=Path,
@@ -510,6 +516,7 @@ def _run_grid5000_submit(args: argparse.Namespace, services: CliDependencies) ->
         workers=args.workers,
         walltime=args.walltime,
         batch_size=args.batch_size,
+        excluded_sites=tuple(args.exclude_site),
     )
     source_revision = services.resolve_source_revision(
         Path.cwd(),
@@ -527,6 +534,7 @@ def _run_grid5000_submit(args: argparse.Namespace, services: CliDependencies) ->
             "job_id": None if submission.job is None else submission.job.job_id,
             "site": config.site,
             "cluster": config.cluster,
+            "excluded_sites": list(config.excluded_sites),
             "source_revision": submission.source_revision,
             "datasets": list(submission.datasets),
             "commands": [list(command) for command in submission.commands]

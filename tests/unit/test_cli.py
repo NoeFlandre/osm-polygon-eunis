@@ -193,6 +193,8 @@ def test_grid5000_submit_accepts_an_explicit_site_and_defaults_to_a_short_job(
                 "dahu",
                 "--persistent-root",
                 "/home/nflandre/osm-polygon-eunis",
+                "--exclude-site",
+                "bordeaux",
                 "--state",
                 str(state),
                 "--dry-run",
@@ -206,6 +208,7 @@ def test_grid5000_submit_accepts_an_explicit_site_and_defaults_to_a_short_job(
     assert config.site == "grenoble"
     assert config.cluster == "dahu"
     assert config.walltime == "1:00:00"
+    assert config.excluded_sites == ("bordeaux",)
     assert calls["state_path"] == state
     assert calls["dry_run"] is True
     assert json.loads(capsys.readouterr().out)["source_revision"] == "abc123"

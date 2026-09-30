@@ -20,6 +20,64 @@ _WALLTIME_PATTERN: Final = re.compile(r"\d+:[0-5]\d:[0-5]\d")
 _TOKEN_PATTERN: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 _PERSISTENT_PREFIXES: Final = ("/home/", "/groups/", "/srv/")
 DEFAULT_DATASETS: Final = ("website", "wikidata", "description")
+_POLICY_CHECK_SCRIPT: Final = r"""import json
+import subprocess
+import sys
+import urllib.parse
+import urllib.request
+
+BASE = "https://api.grid5000.fr/stable"
+EXCLUDED_SITE_IDS = set(__EXCLUDED_SITE_IDS__)
+
+def items(url):
+    visited = set()
+    while url:
+        if url in visited:
+            raise RuntimeError("Grid5000 API pagination loop")
+        visited.add(url)
+        request = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(request, timeout=20) as response:
+            payload = json.load(response)
+        if isinstance(payload, list):
+            yield from payload
+            return
+        if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+            raise RuntimeError("unexpected Grid5000 API collection response")
+        yield from payload["items"]
+        next_link = next(
+            (link.get("href") for link in payload.get("links", [])
+             if isinstance(link, dict) and link.get("rel") == "next"),
+            None,
+        )
+        url = urllib.parse.urljoin(BASE + "/", next_link) if next_link else None
+
+sites = list(items(BASE + "/sites"))
+site_ids = set()
+for site in sites:
+    if not isinstance(site, dict):
+        raise RuntimeError("unexpected Grid5000 site entry")
+    site_id = site.get("uid") or site.get("id")
+    if not isinstance(site_id, str) or not site_id:
+        raise RuntimeError("Grid5000 site entry has no identifier")
+    site_ids.add(site_id)
+unknown_exclusions = sorted(EXCLUDED_SITE_IDS - site_ids)
+if unknown_exclusions:
+    raise RuntimeError("excluded site is absent from the current API inventory: "
+                       + ",".join(unknown_exclusions))
+included_site_ids = sorted(site_ids - EXCLUDED_SITE_IDS)
+if not included_site_ids:
+    raise RuntimeError("no Grid5000 sites remain in the policy check")
+sys.stderr.write("Grid'5000 policy sites: " + ",".join(included_site_ids) + "\n")
+result = subprocess.run(
+    ["usagepolicycheck", "-t", "--sites", ",".join(included_site_ids)],
+    check=False,
+    capture_output=True,
+    text=True,
+)
+sys.stdout.write(result.stdout)
+sys.stderr.write(result.stderr)
+sys.exit(result.returncode)
+"""
 _ACTIVE_EUNIS_JOBS_SCRIPT: Final = r"""import json
 import sys
 import subprocess
@@ -29,6 +87,7 @@ import urllib.request
 BASE = "https://api.grid5000.fr/stable"
 TERMINAL = {"terminated", "error", "killed", "deleted", "finished", "completed"}
 MARKERS = ("osm-polygon-eunis", "/scripts/grid5000/release.sh", "grid5000_source_revision")
+EXCLUDED_SITE_IDS = set(__EXCLUDED_SITE_IDS__)
 
 def get_json(url):
     request = urllib.request.Request(url, headers={"Accept": "application/json"})
@@ -62,12 +121,23 @@ def items(url):
 sites = list(items(BASE + "/sites"))
 active_jobs = []
 errors = []
+site_ids = {
+    site.get("uid") or site.get("id")
+    for site in sites
+    if isinstance(site, dict) and isinstance(site.get("uid") or site.get("id"), str)
+}
+for site_id in sorted(EXCLUDED_SITE_IDS - site_ids):
+    errors.append(
+        {"site": site_id, "error": "excluded site is absent from the current API inventory"}
+    )
 for site in sites:
     if not isinstance(site, dict):
         raise RuntimeError("unexpected Grid5000 site entry")
     site_id = site.get("uid") or site.get("id")
     if not isinstance(site_id, str) or not site_id:
         raise RuntimeError("Grid5000 site entry has no identifier")
+    if site_id in EXCLUDED_SITE_IDS:
+        continue
     try:
         result = subprocess.run(
             ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", site_id,
@@ -99,7 +169,11 @@ for site in sites:
         errors.append({"site": site_id, "error": f"{type(error).__name__}: {error}"})
 sys.stdout.write(
     json.dumps(
-        {"active_jobs": active_jobs, "errors": errors},
+        {
+            "active_jobs": active_jobs,
+            "errors": errors,
+            "excluded_sites": sorted(EXCLUDED_SITE_IDS),
+        },
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -122,6 +196,7 @@ class Grid5000Config:
     workers: int = 16
     walltime: str = "1:00:00"
     batch_size: int = 256
+    excluded_sites: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         """Validate the requested resources and persistent paths."""
@@ -174,6 +249,23 @@ def _validate_config_values(config: Grid5000Config) -> None:
         _validate_host(getattr(config, field_name), field_name)
     if config.job_type is not None:
         _validate_host(config.job_type, "job_type")
+    _validate_config_exclusions(config)
+
+
+def _validate_config_exclusions(config: Grid5000Config) -> None:
+    excluded_sites = _validate_excluded_sites(config.excluded_sites)
+    if config.site in excluded_sites:
+        raise ValueError("selected compute site cannot be in excluded_sites")
+
+
+def _validate_excluded_sites(excluded_sites: tuple[str, ...]) -> tuple[str, ...]:
+    if not isinstance(excluded_sites, tuple):
+        raise TypeError("excluded_sites must be a tuple of site identifiers")
+    for site_id in excluded_sites:
+        _validate_host(site_id, "excluded_sites")
+    if len(set(excluded_sites)) != len(excluded_sites):
+        raise ValueError("excluded_sites must be unique")
+    return tuple(sorted(excluded_sites))
 
 
 def _validate_host(value: str, field_name: str) -> None:
@@ -209,16 +301,25 @@ def _validate_project_root(path: str) -> None:
         raise ValueError("persistent root must name a project directory")
 
 
-def build_policy_command() -> Command:
-    """Build the required usage-policy check command."""
+def build_policy_command(excluded_sites: tuple[str, ...] = ()) -> Command:
+    """Build a usage-policy check, explicitly omitting only approved sites."""
 
-    return ("usagepolicycheck", "-t")
+    exclusions = _validate_excluded_sites(excluded_sites)
+    if not exclusions:
+        return ("usagepolicycheck", "-t")
+    script = _POLICY_CHECK_SCRIPT.replace("__EXCLUDED_SITE_IDS__", json.dumps(exclusions))
+    return ("python3", "-c", script)
 
 
-def build_active_eunis_jobs_command(frontend: str) -> Command:
-    """Query active project jobs on every site through authenticated OAR SSH."""
+def build_active_eunis_jobs_command(
+    frontend: str,
+    excluded_sites: tuple[str, ...] = (),
+) -> Command:
+    """Query all API sites over OAR SSH except explicitly excluded sites."""
 
-    return build_ssh_command(frontend, ("python3", "-c", _ACTIVE_EUNIS_JOBS_SCRIPT))
+    exclusions = _validate_excluded_sites(excluded_sites)
+    script = _ACTIVE_EUNIS_JOBS_SCRIPT.replace("__EXCLUDED_SITE_IDS__", json.dumps(exclusions))
+    return build_ssh_command(frontend, ("python3", "-c", script))
 
 
 def build_oarsub_command(
@@ -264,6 +365,7 @@ def _submission_environment(
         f"GRID5000_WORKERS={config.workers}",
         f"GRID5000_WALLTIME={shlex.quote(config.walltime)}",
         f"GRID5000_BATCH_SIZE={config.batch_size}",
+        f"GRID5000_EXCLUDED_SITES={shlex.quote(json.dumps(config.excluded_sites))}",
     ]
     if config.job_type is not None:
         environment.append(f"GRID5000_JOB_TYPE={shlex.quote(config.job_type)}")
@@ -437,12 +539,19 @@ def _write_job_state(path: Path, job: Grid5000Job) -> None:
     payload = {
         "cluster": job.config.cluster,
         "datasets": list(DEFAULT_DATASETS),
+        "excluded_sites": list(job.config.excluded_sites),
         "frontend": job.config.frontend,
         "job_id": job.job_id,
+        "batch_size": job.config.batch_size,
+        "cores": job.config.cores,
+        "job_type": job.config.job_type,
         "persistent_root": job.config.persistent_root,
+        "queue": job.config.queue,
         "site": job.config.site,
         "source_revision": job.source_revision,
         "submitted_at": job.submitted_at,
+        "walltime": job.config.walltime,
+        "workers": job.config.workers,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp")
@@ -507,7 +616,7 @@ def submit_grid5000(
         return Grid5000Submission(None, DEFAULT_DATASETS, source_revision, commands)
 
     command_runner(commands[0])
-    _reject_active_eunis_jobs(command_runner(commands[1]))
+    _reject_active_eunis_jobs(command_runner(commands[1]), config.excluded_sites)
     _reject_existing_state(config, state_path, command_runner)
     command_runner(commands[2])
     command_runner(commands[3])
@@ -547,8 +656,8 @@ def _submission_commands(
     source_revision: str,
 ) -> tuple[Command, ...]:
     return (
-        build_ssh_command(config.frontend, build_policy_command()),
-        build_active_eunis_jobs_command(config.frontend),
+        build_ssh_command(config.frontend, build_policy_command(config.excluded_sites)),
+        build_active_eunis_jobs_command(config.frontend, config.excluded_sites),
         build_ssh_command(config.frontend, ("mkdir", "-p", config.persistent_root)),
         build_source_sync_command(
             local_root,
@@ -564,12 +673,12 @@ def _submission_commands(
                 source_revision=source_revision,
             ),
         ),
-        build_ssh_command(config.frontend, build_policy_command()),
+        build_ssh_command(config.frontend, build_policy_command(config.excluded_sites)),
     )
 
 
-def _reject_active_eunis_jobs(output: str) -> None:
-    matches, errors = _parse_active_eunis_jobs_report(output)
+def _reject_active_eunis_jobs(output: str, excluded_sites: tuple[str, ...] = ()) -> None:
+    matches, errors = _parse_active_eunis_jobs_report(output, excluded_sites)
     if matches:
         summary = _active_eunis_job_summary(matches)
         raise RuntimeError(f"active EUNIS Grid'5000 job(s) already exist: {summary}")
@@ -580,6 +689,7 @@ def _reject_active_eunis_jobs(output: str) -> None:
 
 def _parse_active_eunis_jobs_report(
     output: str,
+    excluded_sites: tuple[str, ...] = (),
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     try:
         report = json.loads(output)
@@ -587,11 +697,21 @@ def _parse_active_eunis_jobs_report(
         raise RuntimeError("cannot verify active EUNIS jobs across Grid'5000 sites") from error
     if not isinstance(report, dict):
         raise TypeError("cannot verify active EUNIS jobs across Grid'5000 sites")
+    _validate_report_exclusion_scope(report, excluded_sites)
     matches = report.get("active_jobs")
     errors = report.get("errors")
     if not _is_eunis_report_entries(matches) or not _is_eunis_report_entries(errors):
         raise TypeError("cannot verify active EUNIS jobs across Grid'5000 sites")
     return matches, errors
+
+
+def _validate_report_exclusion_scope(
+    report: dict[str, object], excluded_sites: tuple[str, ...]
+) -> None:
+    if report.get("excluded_sites", []) != list(_validate_excluded_sites(excluded_sites)):
+        raise RuntimeError(
+            "cannot verify active EUNIS jobs: exclusion scope does not match request"
+        )
 
 
 def _is_eunis_report_entries(value: object) -> TypeGuard[list[dict[str, object]]]:
