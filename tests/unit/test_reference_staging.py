@@ -290,6 +290,25 @@ def test_staged_reference_assets_use_grid_scratch_and_reuse_verified_bytes(
     assert staged_asset.read_bytes() == b"asset"
 
 
+def test_reference_staging_removes_only_stale_partial_downloads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reference_root = tmp_path / "persistent" / "cache" / "reference"
+    stale_partial = reference_root / "00-record" / ".R11.tif.abcd.part"
+    stale_partial.parent.mkdir(parents=True)
+    stale_partial.write_bytes(b"incomplete")
+    cached_asset = stale_partial.parent / "R11.tif"
+    cached_asset.write_bytes(b"complete")
+    monkeypatch.setenv("EUNIS_REFERENCE_DIR", str(reference_root))
+
+    with reference_staging._reference_staging_root(tmp_path / "runs", "record"):
+        pass
+
+    assert not stale_partial.exists()
+    assert cached_asset.read_bytes() == b"complete"
+
+
 @pytest.mark.parametrize("kind", ["raster", "vector"])
 def test_open_reference_group_accepts_optional_checksum_collection(
     kind: str,
