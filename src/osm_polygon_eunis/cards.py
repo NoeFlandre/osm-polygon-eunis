@@ -578,6 +578,17 @@ def _extract_source_configs(source_readme: str | None) -> str | None:
 def _extract_source_license(source_readme: str | None) -> str | None:
     """Return a simple top-level license identifier from the source card."""
 
+    lines = _source_frontmatter_lines(source_readme)
+    if lines is None:
+        return None
+    match = re.search(
+        r"(?m)^license:[ \t]*([A-Za-z0-9][A-Za-z0-9.+_-]*)[ \t]*$",
+        "\n".join(lines),
+    )
+    return None if match is None else match.group(1)
+
+
+def _source_frontmatter_lines(source_readme: str | None) -> list[str] | None:
     if source_readme is None:
         return None
     lines = source_readme.splitlines()
@@ -586,11 +597,7 @@ def _extract_source_license(source_readme: str | None) -> str | None:
     frontmatter_end = _frontmatter_end(lines)
     if frontmatter_end is None:
         return None
-    for line in lines[1:frontmatter_end]:
-        match = re.fullmatch(r"license:\s*([A-Za-z0-9][A-Za-z0-9.+_-]*)\s*", line)
-        if match is not None:
-            return match.group(1)
-    return None
+    return lines[1:frontmatter_end]
 
 
 def _has_frontmatter(lines: list[str]) -> bool:

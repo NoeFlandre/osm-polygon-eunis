@@ -11,6 +11,7 @@ from shapely.geometry.base import BaseGeometry
 from osm_polygon_eunis.cards import (
     DatasetCardAccumulator,
     _extract_source_configs,
+    _extract_source_license,
     _map_cell_coordinates,
 )
 from osm_polygon_eunis.domain import EunisResult
@@ -129,6 +130,26 @@ def test_card_preserves_source_data_license_metadata(tmp_path: Path) -> None:
     frontmatter = readme.split("---", 2)[1]
     assert "license: odbl" in frontmatter
     assert "license: apache-2.0" not in frontmatter
+
+
+@pytest.mark.parametrize(
+    ("source_readme", "expected"),
+    [
+        (None, None),
+        ("", None),
+        ("not frontmatter", None),
+        ("---\nlicense: odbl", None),
+        ("---\nlicense: odbl\n---\nlicense: apache-2.0\n", "odbl"),
+        ("---\nlicense: cc-by-4.0\n---", "cc-by-4.0"),
+        ("---\n  license: odbl\n---", None),
+        ("---\nlicense: CC BY 4.0\n---", None),
+        ("---\n---\nlicense: odbl\n", None),
+    ],
+)
+def test_extract_source_license_reads_only_simple_frontmatter(
+    source_readme: str | None, expected: str | None
+) -> None:
+    assert _extract_source_license(source_readme) == expected
 
 
 def test_card_separates_code_license_from_dataset_data_terms(tmp_path: Path) -> None:
