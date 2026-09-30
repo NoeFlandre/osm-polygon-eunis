@@ -20,6 +20,7 @@ eunis_load_hf_token "$hf_token_file"
 persistent_root="$GRID5000_PERSISTENT_ROOT"
 scratch="${TMPDIR:-/tmp}/osm-polygon-eunis-${OAR_JOB_ID}"
 workdir="$persistent_root/runs/eunis"
+reference_cache="$persistent_root/cache/reference"
 sidecars="$persistent_root/sidecars/eunis"
 logs="$persistent_root/logs"
 receipts="$persistent_root/receipts"
@@ -42,7 +43,7 @@ attempt=0
 status=0
 error_count=0
 
-mkdir -p "$scratch" "$workdir" "$sidecars" "$logs" "$receipts"
+mkdir -p "$scratch" "$workdir" "$reference_cache" "$sidecars" "$logs" "$receipts"
 
 write_failure_receipt() {
   status=$?
@@ -95,7 +96,7 @@ PY
 trap write_failure_receipt EXIT
 
 export EUNIS_SOURCE_DIR="$scratch/source"
-export EUNIS_REFERENCE_DIR="$scratch/reference"
+export EUNIS_REFERENCE_DIR="$reference_cache"
 export EUNIS_SIDECAR_DIR="$sidecars"
 export UV_PROJECT_ENVIRONMENT="$scratch/venv"
 export UV_CACHE_DIR="$scratch/uv-cache"

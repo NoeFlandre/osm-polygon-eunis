@@ -19,7 +19,8 @@ def test_release_entrypoint_is_checkpointed_and_all_source_grid5000_only() -> No
     assert "HF_TOKEN or the Hugging Face cache" in script
     assert 'export PATH="$HOME/.local/bin:$PATH"' in script
     assert 'EUNIS_SOURCE_DIR="$scratch/source"' in script
-    assert 'EUNIS_REFERENCE_DIR="$scratch/reference"' in script
+    assert 'reference_cache="$persistent_root/cache/reference"' in script
+    assert 'EUNIS_REFERENCE_DIR="$reference_cache"' in script
     assert 'UV_CACHE_DIR="$scratch/uv-cache"' in script
     assert 'EUNIS_SIDECAR_DIR="$sidecars"' in script
     assert "uv run --frozen --no-dev osm-polygon-eunis release" in script
