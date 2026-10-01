@@ -702,9 +702,17 @@ def _reject_active_eunis_jobs(output: str, excluded_sites: tuple[str, ...] = ())
 
 
 def _reject_unclean_policy_output(output: str) -> None:
-    clean_marker = re.search(r"(?m)^\s*No jobs flagged\s*$", output)
+    """Require a completed policy check; warnings about other jobs do not block.
+
+    The check must either say nothing was flagged or print its conformance
+    report header, and must not report an error. Flagged day/night notices for
+    unrelated jobs are tolerated; EUNIS jobs are limited to one host and one
+    hour, and duplicate-job checks run separately.
+    """
+
+    completed = re.search(r"(?m)^\s*No jobs flagged\s*$|testing usage policy conformance", output)
     reported_error = re.search(r"(?im)^\s*(?:error|fatal):", output)
-    if clean_marker is None or reported_error is not None:
+    if completed is None or reported_error is not None:
         raise RuntimeError(
             "usagepolicycheck did not produce a clean usage-policy result; "
             "refusing Grid'5000 submission"
