@@ -318,6 +318,43 @@ def test_submit_runs_policy_sync_oar_and_post_policy_without_secrets(tmp_path: P
     assert json.loads(state.read_text(encoding="utf-8"))["job_id"] == "123456"
 
 
+@pytest.mark.parametrize(
+    "policy_output",
+    [
+        "in lyon, on cluster taurus, nflandre crossed day/night boundaries\n"
+        "  Job 2071820: 12h (12 cores*1h / Thu.01 - 18:32 => Thu.01 - 19:32)\n",
+        "Error: policy database could not be reached\nNo jobs flagged\n",
+    ],
+)
+def test_submit_rejects_unclean_policy_output_even_when_command_succeeds(
+    tmp_path: Path,
+    policy_output: str,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_runner(command: tuple[str, ...]) -> str:
+        calls.append(command)
+        if command == ("ssh", "fgrenoble", "usagepolicycheck -t"):
+            return policy_output
+        if command == build_active_eunis_jobs_command("fgrenoble"):
+            return _EMPTY_ALL_SITE_REPORT
+        if command[:2] == ("ssh", "fgrenoble") and shlex.split(command[2])[0] == "oarsub":
+            return "[AO] Adding job 123456\n"
+        return ""
+
+    with pytest.raises(RuntimeError, match="clean usage-policy result"):
+        submit_grid5000(
+            _config(),
+            tmp_path,
+            source_revision="abc123",
+            state_path=tmp_path / "job.json",
+            runner=fake_runner,
+        )
+
+    assert calls == [("ssh", "fgrenoble", "usagepolicycheck -t")]
+    assert not (tmp_path / "job.json").exists()
+
+
 def test_submission_persists_explicit_site_exclusions_in_its_receipt(tmp_path: Path) -> None:
     config = _config(excluded_sites=("bordeaux",))
     state = tmp_path / "job.json"

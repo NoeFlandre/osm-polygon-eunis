@@ -628,7 +628,8 @@ def submit_grid5000(
     if dry_run:
         return Grid5000Submission(None, DEFAULT_DATASETS, source_revision, commands)
 
-    command_runner(commands[0])
+    policy_output = command_runner(commands[0])
+    _reject_unclean_policy_output(policy_output)
     _reject_active_eunis_jobs(command_runner(commands[1]), config.excluded_sites)
     _reject_existing_state(config, state_path, command_runner)
     command_runner(commands[2])
@@ -698,6 +699,16 @@ def _reject_active_eunis_jobs(output: str, excluded_sites: tuple[str, ...] = ())
     if errors:
         sites = _unreachable_eunis_site_summary(errors)
         raise RuntimeError(f"cannot verify active EUNIS jobs on Grid'5000 site(s): {sites}")
+
+
+def _reject_unclean_policy_output(output: str) -> None:
+    clean_marker = re.search(r"(?m)^\s*No jobs flagged\s*$", output)
+    reported_error = re.search(r"(?im)^\s*(?:error|fatal):", output)
+    if clean_marker is None or reported_error is not None:
+        raise RuntimeError(
+            "usagepolicycheck did not produce a clean usage-policy result; "
+            "refusing Grid'5000 submission"
+        )
 
 
 def _parse_active_eunis_jobs_report(
