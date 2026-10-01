@@ -19,11 +19,13 @@ be explicit. The one-host request uses the `default` queue, 16 CPU cores and a
 one-hour walltime; after a short job ends, rerun from the signature-checked
 checkpoints rather than extending a reservation beyond policy.
 
-The controller and worker both enforce a positive walltime of at most one hour.
-The worker counts setup time against that limit and stops release work five
-minutes before OAR's hard deadline by default. The stop margin must leave the
-configured TERM-to-KILL grace plus at least 30 seconds to write a receipt; the
-defaults are a 300-second margin and 20-second grace. It sends TERM to the
+The controller and worker enforce a walltime above the default five-minute stop
+margin and no longer than one hour. The worker counts setup time against that
+limit and stops release work five minutes before OAR's hard deadline by default.
+It forwards INT and TERM to the active deadline helper so the helper can stop its
+child process group and write the incomplete receipt promptly. The stop margin
+must leave the configured TERM-to-KILL grace plus at least 30 seconds to write a
+receipt; the defaults are a 300-second margin and 20-second grace. It sends TERM to the
 worker process group, waits the configured grace, then sends KILL if needed.
 Only a helper-confirmed deadline or signal exit is recorded as `incomplete`;
 ordinary child exit codes, including 124, count as worker failures and can be

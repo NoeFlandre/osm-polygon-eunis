@@ -15,6 +15,7 @@ def test_release_entrypoint_is_checkpointed_and_all_source_grid5000_only() -> No
     assert "HF_HOME" in script
     assert '"${HF_HOME:-$HOME/.cache/huggingface}/token"' in script
     assert 'source "$source_root/scripts/grid5000/load_hf_token.sh"' in script
+    assert 'source "$source_root/scripts/grid5000/worker_signals.sh"' in script
     assert 'eunis_load_hf_token "$hf_token_file"' in script
     assert "HF_TOKEN or the Hugging Face cache" in script
     assert 'export PATH="$HOME/.local/bin:$PATH"' in script
@@ -22,7 +23,7 @@ def test_release_entrypoint_is_checkpointed_and_all_source_grid5000_only() -> No
     assert 'reference_cache="$persistent_root/cache/reference"' in script
     assert 'EUNIS_REFERENCE_DIR="$reference_cache"' in script
     assert 'UV_CACHE_DIR="$scratch/uv-cache"' in script
-    assert script.count('python3 "$deadline_helper"') == 3
+    assert script.count('run_deadline_helper "$deadline_helper"') == 3
     assert 'stop_margin_seconds="${GRID5000_STOP_MARGIN_SECONDS:-300}"' in script
     assert 'termination_grace_seconds="${GRID5000_TERMINATION_GRACE_SECONDS:-20}"' in script
     assert 'stop_marker="$scratch/worker-stop-state"' in script
@@ -37,6 +38,7 @@ def test_release_entrypoint_is_checkpointed_and_all_source_grid5000_only() -> No
     assert '--receipt "$release_receipt"' in script
     assert '--workers "${GRID5000_WORKERS:-16}"' in script
     assert "trap write_failure_receipt EXIT" in script
+    assert "install_worker_signal_traps" in script
     assert 'workdir="$persistent_root/runs/eunis"' in script
     assert 'sidecars="$persistent_root/sidecars/eunis"' in script
     assert "description-release.sh" not in script

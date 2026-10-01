@@ -15,6 +15,7 @@ case "$GRID5000_PERSISTENT_ROOT" in
 esac
 
 source_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$source_root/scripts/grid5000/worker_signals.sh"
 source "$source_root/scripts/grid5000/load_hf_token.sh"
 eunis_load_hf_token "$hf_token_file"
 persistent_root="$GRID5000_PERSISTENT_ROOT"
@@ -84,8 +85,7 @@ write_failure_receipt() {
   exit "$exit_status"
 }
 trap write_failure_receipt EXIT
-trap 'external_signal=INT; exit 130' INT
-trap 'external_signal=TERM; exit 143' TERM
+install_worker_signal_traps
 
 export EUNIS_SOURCE_DIR="$scratch/source"
 export EUNIS_REFERENCE_DIR="$reference_cache"
@@ -142,7 +142,7 @@ if [[ -z "${HF_TOKEN:-}" && ! -s "$hf_token_file" ]]; then
   echo "HF_TOKEN or the Hugging Face cache must be available on the reserved node" >&2
   exit 2
 fi
-if python3 "$deadline_helper" \
+if run_deadline_helper "$deadline_helper" \
   --walltime "$walltime" \
   --started-at "$job_started_at" \
   --stop-margin-seconds "$stop_margin_seconds" \
@@ -162,7 +162,7 @@ attempt=1
 status=1
 while (( attempt <= max_attempts )); do
   echo "release attempt $attempt/$max_attempts"
-  if python3 "$deadline_helper" \
+  if run_deadline_helper "$deadline_helper" \
     --walltime "$walltime" \
     --started-at "$job_started_at" \
     --stop-margin-seconds "$stop_margin_seconds" \
@@ -238,7 +238,7 @@ PY
     break
   fi
   echo "release attempt $attempt failed with rc=$status; retrying after checkpoints"
-  if python3 "$deadline_helper" \
+  if run_deadline_helper "$deadline_helper" \
     --walltime "$walltime" \
     --started-at "$job_started_at" \
     --stop-margin-seconds "$stop_margin_seconds" \
