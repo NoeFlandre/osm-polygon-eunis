@@ -22,6 +22,7 @@ from osm_polygon_eunis.grid5000 import (
     validate_persistent_root,
 )
 
+_CLEAN_POLICY_OUTPUT = "No jobs flagged\n"
 _EMPTY_ALL_SITE_REPORT = '{"active_jobs": [], "errors": []}'
 
 
@@ -284,7 +285,7 @@ def test_submit_runs_policy_sync_oar_and_post_policy_without_secrets(tmp_path: P
             return _EMPTY_ALL_SITE_REPORT
         if command[:2] == ("ssh", "fgrenoble") and shlex.split(command[2])[0] == "oarsub":
             return "[AO] Adding job 123456\n"
-        return ""
+        return _CLEAN_POLICY_OUTPUT if "usagepolicycheck" in command[-1] else ""
 
     result = submit_grid5000(
         config,
@@ -340,7 +341,7 @@ def test_submit_rejects_unclean_policy_output_even_when_command_succeeds(
             return _EMPTY_ALL_SITE_REPORT
         if command[:2] == ("ssh", "fgrenoble") and shlex.split(command[2])[0] == "oarsub":
             return "[AO] Adding job 123456\n"
-        return ""
+        return _CLEAN_POLICY_OUTPUT if "usagepolicycheck" in command[-1] else ""
 
     with pytest.raises(RuntimeError, match="clean usage-policy result"):
         submit_grid5000(
@@ -366,7 +367,7 @@ def test_submission_persists_explicit_site_exclusions_in_its_receipt(tmp_path: P
             return json.dumps({"active_jobs": [], "errors": [], "excluded_sites": ["bordeaux"]})
         if command[:2] == ("ssh", "fgrenoble") and shlex.split(command[2])[0] == "oarsub":
             return "Adding job 123456"
-        return ""
+        return _CLEAN_POLICY_OUTPUT if "usagepolicycheck" in command[-1] else ""
 
     submit_grid5000(
         config,
@@ -420,7 +421,7 @@ def test_submit_persists_job_id_before_post_submission_policy_check(tmp_path: Pa
             return _EMPTY_ALL_SITE_REPORT
         if command[:2] == ("ssh", "fgrenoble") and shlex.split(command[2])[0] == "oarsub":
             return "[AO] Adding job 123456\n"
-        return ""
+        return _CLEAN_POLICY_OUTPUT if "usagepolicycheck" in command[-1] else ""
 
     with pytest.raises(subprocess.CalledProcessError, match="returned non-zero"):
         submit_grid5000(
@@ -447,6 +448,8 @@ def test_submit_rejects_an_existing_active_job(tmp_path: Path) -> None:
             return _EMPTY_ALL_SITE_REPORT
         if shlex.split(command[2])[0] == "oarstat":
             return "running"
+        if "usagepolicycheck" in command[-1]:
+            return _CLEAN_POLICY_OUTPUT
         return "running"
 
     with pytest.raises(RuntimeError, match="already active"):
@@ -475,7 +478,7 @@ def test_submit_refuses_active_eunis_job_reported_by_any_site(tmp_path: Path) ->
                 '{"active_jobs": [{"job_id": "6942984", "site": "nancy", '
                 '"state": "running"}], "errors": []}'
             )
-        return ""
+        return _CLEAN_POLICY_OUTPUT if "usagepolicycheck" in command[-1] else ""
 
     with pytest.raises(RuntimeError, match="nancy:6942984"):
         submit_grid5000(
@@ -500,7 +503,7 @@ def test_submit_fails_closed_when_all_site_job_report_is_invalid(tmp_path: Path)
         calls.append(command)
         if command == grid5000.build_active_eunis_jobs_command("fgrenoble"):
             return "permission denied"
-        return ""
+        return _CLEAN_POLICY_OUTPUT if "usagepolicycheck" in command[-1] else ""
 
     with pytest.raises(RuntimeError, match="cannot verify active EUNIS jobs"):
         submit_grid5000(
@@ -521,7 +524,7 @@ def test_submit_fails_closed_when_any_site_inventory_failed(tmp_path: Path) -> N
         calls.append(command)
         if command == grid5000.build_active_eunis_jobs_command("fgrenoble"):
             return '{"active_jobs": [], "errors": [{"site": "bordeaux"}]}'
-        return ""
+        return _CLEAN_POLICY_OUTPUT if "usagepolicycheck" in command[-1] else ""
 
     with pytest.raises(RuntimeError, match="bordeaux"):
         submit_grid5000(
@@ -543,7 +546,7 @@ def test_submit_fails_closed_when_exclusion_scope_does_not_match_request(tmp_pat
         calls.append(command)
         if command == grid5000.build_active_eunis_jobs_command("fgrenoble", ("bordeaux",)):
             return _EMPTY_ALL_SITE_REPORT
-        return ""
+        return _CLEAN_POLICY_OUTPUT if "usagepolicycheck" in command[-1] else ""
 
     with pytest.raises(RuntimeError, match="exclusion scope does not match"):
         submit_grid5000(
@@ -598,7 +601,7 @@ def test_submit_refuses_when_existing_job_status_cannot_be_verified(tmp_path: Pa
             return _EMPTY_ALL_SITE_REPORT
         if command[:2] == ("ssh", "fgrenoble") and shlex.split(command[2])[0] == "oarstat":
             raise subprocess.CalledProcessError(255, command, stderr="Connection timed out")
-        return ""
+        return _CLEAN_POLICY_OUTPUT if "usagepolicycheck" in command[-1] else ""
 
     with pytest.raises(RuntimeError, match="cannot verify"):
         submit_grid5000(
@@ -645,7 +648,7 @@ def test_submit_dry_run_builds_commands_without_contacting_grid5000(tmp_path: Pa
 
     def fake_runner(command: tuple[str, ...]) -> str:
         calls.append(command)
-        return ""
+        return _CLEAN_POLICY_OUTPUT if "usagepolicycheck" in command[-1] else ""
 
     result = submit_grid5000(
         config,
@@ -676,7 +679,7 @@ def test_submit_replaces_state_after_terminal_job_and_writes_safe_state(
             raise subprocess.CalledProcessError(1, command, stderr="ERROR: job not found")
         if command[:2] == ("ssh", "fgrenoble") and shlex.split(command[2])[0] == "oarsub":
             return "Adding job 654321"
-        return ""
+        return _CLEAN_POLICY_OUTPUT if "usagepolicycheck" in command[-1] else ""
 
     first = submit_grid5000(
         config,
@@ -737,7 +740,7 @@ def test_submit_rejects_corrupt_or_incomplete_state(tmp_path: Path) -> None:
             def fake_runner(command: tuple[str, ...]) -> str:
                 if command == grid5000.build_active_eunis_jobs_command("fgrenoble"):
                     return _EMPTY_ALL_SITE_REPORT
-                return ""
+                return _CLEAN_POLICY_OUTPUT if "usagepolicycheck" in command[-1] else ""
 
             submit_grid5000(
                 config,
