@@ -114,6 +114,26 @@ def test_run_command_preserves_child_exit_status() -> None:
     assert result == 17
 
 
+def test_run_command_announces_signal_readiness_before_starting_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ready_file = tmp_path / "worker-ready"
+    monkeypatch.setenv("GRID5000_WORKER_READY_FILE", str(ready_file))
+    child = (
+        "import os; from pathlib import Path; "
+        "assert Path(os.environ['GRID5000_WORKER_READY_FILE']).is_file()"
+    )
+
+    result = run_command(
+        [sys.executable, "-c", child],
+        timeout_seconds=5,
+        termination_grace_seconds=1,
+    )
+
+    assert result == 0
+
+
 def test_run_command_terminates_child_process_group_at_deadline(capfd) -> None:
     child = (
         "import os, signal, time; "

@@ -157,6 +157,9 @@ def _run_with_signal_handlers(
     try:
         for signum in watched_signals:
             signal.signal(signum, handle_signal)
+        ready_file = os.environ.get("GRID5000_WORKER_READY_FILE")
+        if ready_file is not None:
+            Path(ready_file).touch()
         return _spawn_and_wait(
             command,
             timeout_seconds=timeout_seconds,
