@@ -515,7 +515,19 @@ def _status_error_output(error: subprocess.CalledProcessError) -> str:
     return "\n".join(str(value) for value in (error.stdout, error.stderr) if value is not None)
 
 
+_OAR_TABLE_STATE = re.compile(
+    r"^\d+\s.*?\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\s+([A-Za-z])\s", re.MULTILINE
+)
+
+
 def _job_status_state(output: str) -> str:
+    table_state = _OAR_TABLE_STATE.search(output)
+    if table_state is not None:
+        letter = table_state.group(1).upper()
+        if letter in {"T", "E"}:
+            return "terminal"
+        if letter in {"W", "H", "L", "R", "S", "F", "A"}:
+            return "active"
     if _job_status_is_active(output):
         return "active"
     if _job_status_is_missing(output):
