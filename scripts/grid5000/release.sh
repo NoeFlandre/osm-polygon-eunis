@@ -74,8 +74,8 @@ write_failure_receipt() {
       --error-count "$error_count" \
       --exit-status "$exit_status" \
       --job-started-epoch "$job_started_at" \
-      --stop-margin-seconds "$stop_margin_seconds" \
-      --termination-grace-seconds "$termination_grace_seconds" \
+      --stop-margin-seconds="$stop_margin_seconds" \
+      --termination-grace-seconds="$termination_grace_seconds" \
       --log-path "$logs/job-${OAR_JOB_ID}.log" \
       --stop-marker "$stop_marker" \
       --external-signal "$external_signal" \

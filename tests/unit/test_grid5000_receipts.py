@@ -65,10 +65,8 @@ def _write_receipt(
         options.exit_status,
         "--job-started-epoch",
         "1790830000",
-        "--stop-margin-seconds",
-        options.stop_margin,
-        "--termination-grace-seconds",
-        options.termination_grace,
+        f"--stop-margin-seconds={options.stop_margin}",
+        f"--termination-grace-seconds={options.termination_grace}",
         "--log-path",
         "/home/nflandre/osm-polygon-eunis/logs/job-482079.log",
         "--stop-marker",
@@ -122,3 +120,30 @@ def test_invalid_deadline_overrides_do_not_block_failure_receipt(tmp_path: Path)
     assert grid["termination_grace_seconds"] is None
     assert grid["requested_termination_grace_seconds"] == "NaN"
     json.dumps(payload, allow_nan=False)
+
+
+def test_option_like_invalid_deadline_overrides_do_not_block_receipt(tmp_path: Path) -> None:
+    payload = _write_receipt(
+        tmp_path,
+        ReceiptOptions(
+            exit_status="2",
+            attempt="0",
+            error_count="1",
+            stop_margin="--malformed-margin",
+            termination_grace="--malformed-grace",
+            stop_state=None,
+        ),
+    )
+
+    grid = payload["grid5000"]
+    assert payload["status"] == "failed"
+    assert grid["requested_stop_margin_seconds"] == "--malformed-margin"
+    assert grid["requested_termination_grace_seconds"] == "--malformed-grace"
+
+
+def test_release_failure_handler_passes_raw_deadline_values_as_option_assignments() -> None:
+    release_script = Path(__file__).resolve().parents[2] / "scripts/grid5000/release.sh"
+    source = release_script.read_text(encoding="utf-8")
+
+    assert '--stop-margin-seconds="$stop_margin_seconds"' in source
+    assert '--termination-grace-seconds="$termination_grace_seconds"' in source
