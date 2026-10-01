@@ -44,6 +44,20 @@ def test_release_entrypoint_is_checkpointed_and_all_source_grid5000_only() -> No
     assert "description-release.sh" not in script
 
 
+def test_release_deadline_uses_the_actual_oar_job_start_time() -> None:
+    script = (Path(__file__).parents[2] / "scripts" / "grid5000" / "release.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'job_started_at="$(date +%s)"' not in script
+    assert 'job_started_at="$(python3 "$source_root/scripts/grid5000/job_start.py"' in script
+    assert '--job-id "$OAR_JOB_ID"' in script
+    assert '--frontend "$frontend"' in script
+    assert script.index("trap write_failure_receipt EXIT") < script.index(
+        'job_started_at="$(python3 "$source_root/scripts/grid5000/job_start.py"'
+    )
+
+
 def test_grid_token_loader_exports_cached_token_without_printing_it(tmp_path: Path) -> None:
     credential_value = "hf_test_credential_value"
     token_file = tmp_path / "token"

@@ -39,7 +39,7 @@ queue="${GRID5000_QUEUE:-unknown}"
 cores="${GRID5000_CORES:-0}"
 workers="${GRID5000_WORKERS:-16}"
 walltime="${GRID5000_WALLTIME:-unknown}"
-job_started_at="$(date +%s)"
+job_started_at=0
 stop_margin_seconds="${GRID5000_STOP_MARGIN_SECONDS:-300}"
 termination_grace_seconds="${GRID5000_TERMINATION_GRACE_SECONDS:-20}"
 batch_size="${GRID5000_BATCH_SIZE:-256}"
@@ -122,7 +122,6 @@ echo "grid5000_queue=$queue"
 echo "grid5000_cores=$cores"
 echo "grid5000_workers=$workers"
 echo "grid5000_walltime=$walltime"
-echo "grid5000_job_started_epoch=$job_started_at"
 echo "grid5000_stop_margin_seconds=$stop_margin_seconds"
 echo "grid5000_termination_grace_seconds=$termination_grace_seconds"
 echo "grid5000_batch_size=$batch_size"
@@ -141,6 +140,15 @@ fi
 if [[ -z "${HF_TOKEN:-}" && ! -s "$hf_token_file" ]]; then
   echo "HF_TOKEN or the Hugging Face cache must be available on the reserved node" >&2
   exit 2
+fi
+if job_started_at="$(python3 "$source_root/scripts/grid5000/job_start.py" \
+  --job-id "$OAR_JOB_ID" \
+  --frontend "$frontend")"; then
+  echo "grid5000_job_started_epoch=$job_started_at"
+else
+  status=$?
+  error_count=$((error_count + 1))
+  exit "$status"
 fi
 if run_deadline_helper "$deadline_helper" \
   --walltime "$walltime" \
