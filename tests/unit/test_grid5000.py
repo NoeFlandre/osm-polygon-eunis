@@ -62,6 +62,11 @@ def test_grid5000_default_walltime_is_one_hour() -> None:
     assert config.walltime == "1:00:00"
 
 
+def test_grid5000_rejects_walltime_over_one_hour() -> None:
+    with pytest.raises(ValueError, match="one hour"):
+        _config(walltime="1:00:01")
+
+
 def test_profile_requests_one_cpu_host_on_any_explicit_site() -> None:
     config = _config()
 

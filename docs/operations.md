@@ -19,12 +19,17 @@ be explicit. The one-host request uses the `default` queue, 16 CPU cores and a
 one-hour walltime; after a short job ends, rerun from the signature-checked
 checkpoints rather than extending a reservation beyond policy.
 
-The worker counts setup time against the one-hour walltime and stops release
-work five minutes before OAR's hard deadline by default. It sends TERM to the
-worker process group, waits 20 seconds, then sends KILL if needed. Deadline or
-signal exits write an `incomplete` receipt with the exact source commit, run
-config, job ID, error/retry counts and stop reason; a later job resumes from
-valid checkpoints. Retry delays use the same deadline guard.
+The controller and worker both enforce a positive walltime of at most one hour.
+The worker counts setup time against that limit and stops release work five
+minutes before OAR's hard deadline by default. The stop margin must leave the
+configured TERM-to-KILL grace plus at least 30 seconds to write a receipt; the
+defaults are a 300-second margin and 20-second grace. It sends TERM to the
+worker process group, waits the configured grace, then sends KILL if needed.
+Only a helper-confirmed deadline or signal exit is recorded as `incomplete`;
+ordinary child exit codes, including 124, count as worker failures and can be
+retried. Receipts record the exact source commit, run config, job ID,
+error/retry counts and stop reason. A later job resumes from valid checkpoints.
+Retry delays use the same deadline guard.
 
 Keep the controller state file on the external HDD. The worker stores resumable
 run data at `GRID5000_PERSISTENT_ROOT/runs/eunis`, sidecars at

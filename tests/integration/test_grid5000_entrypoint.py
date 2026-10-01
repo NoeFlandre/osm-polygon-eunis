@@ -25,6 +25,10 @@ def test_release_entrypoint_is_checkpointed_and_all_source_grid5000_only() -> No
     assert script.count('python3 "$deadline_helper"') == 3
     assert 'stop_margin_seconds="${GRID5000_STOP_MARGIN_SECONDS:-300}"' in script
     assert 'termination_grace_seconds="${GRID5000_TERMINATION_GRACE_SECONDS:-20}"' in script
+    assert 'stop_marker="$scratch/worker-stop-state"' in script
+    assert script.count('--stop-marker "$stop_marker"') == 4
+    assert 'if (( status == 124 )) && [[ "$stop_state" == "deadline" ]]' in script
+    assert 'python3 "$receipt_writer"' in script
     assert script.index('-- sleep "$retry_delay"') < script.index("attempt=$((attempt + 1))")
     assert 'EUNIS_SIDECAR_DIR="$sidecars"' in script
     assert "uv run --frozen --no-dev osm-polygon-eunis release" in script

@@ -13,19 +13,46 @@ import sys
 import time
 from collections.abc import Callable, Sequence
 from contextlib import suppress
+from pathlib import Path
 
 _WALLTIME = re.compile(r"^(\d+):([0-5]\d):([0-5]\d)$")
 _POLL_INTERVAL_SECONDS = 0.1
+_RECEIPT_WINDOW_SECONDS = 30
+_ONE_HOUR_SECONDS = 60 * 60
 
 
 def parse_walltime_seconds(walltime: str) -> int:
-    """Parse OAR walltime in ``H:MM:SS`` form."""
+    """Parse a positive OAR walltime no longer than one hour."""
 
     match = _WALLTIME.fullmatch(walltime)
     if match is None:
         raise ValueError("walltime must use H:MM:SS with minutes and seconds from 00 to 59")
     hours, minutes, seconds = (int(part) for part in match.groups())
-    return hours * 3600 + minutes * 60 + seconds
+    total_seconds = hours * 3600 + minutes * 60 + seconds
+    if not 0 < total_seconds <= _ONE_HOUR_SECONDS:
+        raise ValueError("walltime must be positive and no longer than one hour")
+    return total_seconds
+
+
+def validate_deadline_settings(
+    walltime: str,
+    *,
+    stop_margin_seconds: int,
+    termination_grace_seconds: int,
+) -> None:
+    """Require shutdown grace and a receipt buffer before the OAR deadline."""
+
+    walltime_seconds = parse_walltime_seconds(walltime)
+    if stop_margin_seconds <= 0:
+        raise ValueError("stop margin must be positive")
+    if termination_grace_seconds < 0:
+        raise ValueError("termination grace must be non-negative")
+    if stop_margin_seconds < termination_grace_seconds + _RECEIPT_WINDOW_SECONDS:
+        raise ValueError(
+            "stop margin must preserve termination grace plus a 30-second receipt window"
+        )
+    if stop_margin_seconds >= walltime_seconds:
+        raise ValueError("stop margin must be less than walltime")
 
 
 def remaining_runtime_seconds(
@@ -39,12 +66,13 @@ def remaining_runtime_seconds(
 
     if not math.isfinite(started_at):
         raise ValueError("job start time must be finite")
-    if stop_margin_seconds < 0:
-        raise ValueError("stop margin must be non-negative")
+    walltime_seconds = parse_walltime_seconds(walltime)
+    if not 0 < stop_margin_seconds < walltime_seconds:
+        raise ValueError("stop margin must be positive and less than walltime")
     current_time = time.time() if now is None else now
     if not math.isfinite(current_time):
         raise ValueError("current time must be finite")
-    remaining = parse_walltime_seconds(walltime) - (current_time - started_at)
+    remaining = walltime_seconds - (current_time - started_at)
     remaining -= stop_margin_seconds
     return max(0, math.floor(remaining))
 
@@ -88,6 +116,7 @@ def run_command(
     *,
     timeout_seconds: float,
     termination_grace_seconds: float,
+    on_stop: Callable[[str], None] | None = None,
 ) -> int:
     """Run a command group, returning 124 on deadline or shell signal status."""
 
@@ -98,12 +127,15 @@ def run_command(
     if not math.isfinite(termination_grace_seconds) or termination_grace_seconds < 0:
         raise ValueError("termination grace must be a finite non-negative number")
     if timeout_seconds == 0:
+        if on_stop is not None:
+            on_stop("deadline")
         return 124
 
     return _run_with_signal_handlers(
         command,
         timeout_seconds=timeout_seconds,
         termination_grace_seconds=termination_grace_seconds,
+        on_stop=on_stop,
     )
 
 
@@ -112,6 +144,7 @@ def _run_with_signal_handlers(
     *,
     timeout_seconds: float,
     termination_grace_seconds: float,
+    on_stop: Callable[[str], None] | None,
 ) -> int:
     received_signal: int | None = None
 
@@ -129,6 +162,7 @@ def _run_with_signal_handlers(
             timeout_seconds=timeout_seconds,
             termination_grace_seconds=termination_grace_seconds,
             received_signal=lambda: received_signal,
+            on_stop=on_stop,
         )
     finally:
         for signum, handler in original_handlers.items():
@@ -141,6 +175,7 @@ def _spawn_and_wait(
     timeout_seconds: float,
     termination_grace_seconds: float,
     received_signal: Callable[[], int | None],
+    on_stop: Callable[[str], None] | None,
 ) -> int:
     process = subprocess.Popen(command, start_new_session=True)  # noqa: S603
     try:
@@ -149,6 +184,7 @@ def _spawn_and_wait(
             timeout_seconds=timeout_seconds,
             termination_grace_seconds=termination_grace_seconds,
             received_signal=received_signal,
+            on_stop=on_stop,
         )
     except BaseException:
         if process.poll() is None:
@@ -166,6 +202,7 @@ def _wait_for_command(
     timeout_seconds: float,
     termination_grace_seconds: float,
     received_signal: Callable[[], int | None],
+    on_stop: Callable[[str], None] | None,
 ) -> int:
     deadline = time.monotonic() + timeout_seconds
     while True:
@@ -176,6 +213,8 @@ def _wait_for_command(
                 termination_signal=signum,
                 grace_seconds=termination_grace_seconds,
             )
+            if on_stop is not None:
+                on_stop(f"signal:{signum}")
             return 128 + signum
 
         return_code = process.poll()
@@ -189,8 +228,17 @@ def _wait_for_command(
                 termination_signal=signal.SIGTERM,
                 grace_seconds=termination_grace_seconds,
             )
+            if on_stop is not None:
+                on_stop("deadline")
             return 124
         time.sleep(min(_POLL_INTERVAL_SECONDS, remaining))
+
+
+def _write_stop_marker(path: Path, state: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    temporary.write_text(f"{state}\n", encoding="utf-8")
+    temporary.replace(path)
 
 
 def _non_negative_integer(value: str) -> int:
@@ -200,16 +248,6 @@ def _non_negative_integer(value: str) -> int:
         raise argparse.ArgumentTypeError("expected a non-negative integer") from error
     if result < 0:
         raise argparse.ArgumentTypeError("expected a non-negative integer")
-    return result
-
-
-def _non_negative_number(value: str) -> float:
-    try:
-        result = float(value)
-    except ValueError as error:
-        raise argparse.ArgumentTypeError("expected a non-negative number") from error
-    if not math.isfinite(result) or result < 0:
-        raise argparse.ArgumentTypeError("expected a finite non-negative number")
     return result
 
 
@@ -225,10 +263,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--termination-grace-seconds",
-        type=_non_negative_number,
-        default=20.0,
+        type=_non_negative_integer,
+        default=20,
         help="seconds between TERM and KILL (default: 20)",
     )
+    parser.add_argument("--stop-marker", type=Path, help="write the reason for a guarded stop")
     parser.add_argument("command", nargs=argparse.REMAINDER, help="worker command after --")
     return parser
 
@@ -241,7 +280,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     command = args.command[1:] if args.command and args.command[0] == "--" else args.command
     if not command:
         parser.error("provide a worker command after --")
+    if args.stop_marker is not None:
+        try:
+            args.stop_marker.unlink(missing_ok=True)
+        except OSError as error:
+            parser.error(f"cannot clear stop marker: {error}")
     try:
+        validate_deadline_settings(
+            args.walltime,
+            stop_margin_seconds=args.stop_margin_seconds,
+            termination_grace_seconds=args.termination_grace_seconds,
+        )
         timeout_seconds = remaining_runtime_seconds(
             args.walltime,
             started_at=args.started_at,
@@ -253,6 +302,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         command,
         timeout_seconds=timeout_seconds,
         termination_grace_seconds=args.termination_grace_seconds,
+        on_stop=(
+            (lambda state: _write_stop_marker(args.stop_marker, state))
+            if args.stop_marker is not None
+            else None
+        ),
     )
 
 
