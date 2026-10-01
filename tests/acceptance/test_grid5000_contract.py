@@ -13,6 +13,7 @@ def test_production_contract_is_grid5000_all_source_and_site_neutral() -> None:
     assert "host=1/core=16" in operations
     assert "--site SITE" in operations
     assert "--exclude-site bordeaux" in operations
+    assert "--exclude-site sophia" in operations
     assert "--cluster CLUSTER" in operations
     assert "cluster='CLUSTER'" in operations
     assert "-q default" in operations

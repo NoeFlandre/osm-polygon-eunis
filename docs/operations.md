@@ -19,6 +19,13 @@ be explicit. The one-host request uses the `default` queue, 16 CPU cores and a
 one-hour walltime; after a short job ends, rerun from the signature-checked
 checkpoints rather than extending a reservation beyond policy.
 
+The worker counts setup time against the one-hour walltime and stops release
+work five minutes before OAR's hard deadline by default. It sends TERM to the
+worker process group, waits 20 seconds, then sends KILL if needed. Deadline or
+signal exits write an `incomplete` receipt with the exact source commit, run
+config, job ID, error/retry counts and stop reason; a later job resumes from
+valid checkpoints. Retry delays use the same deadline guard.
+
 Keep the controller state file on the external HDD. The worker stores resumable
 run data at `GRID5000_PERSISTENT_ROOT/runs/eunis`, sidecars at
 `GRID5000_PERSISTENT_ROOT/sidecars/eunis`, logs under `logs`, and receipts under
@@ -38,6 +45,7 @@ uv run osm-polygon-eunis grid5000 submit \
   --cluster CLUSTER \
   --persistent-root /home/USER/osm-polygon-eunis \
   --exclude-site bordeaux \
+  --exclude-site sophia \
   --state /path/on/external-HDD/eunis-grid5000-state.json
 ```
 
@@ -66,11 +74,12 @@ outside the dataset root. Production commands emit JSON-line progress records
 on stderr (silence them with `-q`, add a start record with `-v`) and print only
 the final JSON result on stdout. They verify row counts and schemas after every upload.
 
-Local checks use a task-scoped cache on the temporary volume:
+Keep the local QA environment and package cache on the external HDD:
 
 ```bash
-UV_PROJECT_ENVIRONMENT="$TMPDIR/osm-polygon-eunis-venv" \
-UV_CACHE_DIR="$TMPDIR/osm-polygon-eunis-uv" \
+QA_ROOT=/path/on/external-HDD/osm-polygon-eunis-qa
+UV_PROJECT_ENVIRONMENT="$QA_ROOT/venv" \
+UV_CACHE_DIR="$QA_ROOT/uv-cache" \
 uv run osm-polygon-eunis plan
 ```
 

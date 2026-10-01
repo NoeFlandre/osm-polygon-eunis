@@ -36,6 +36,9 @@ queue="${GRID5000_QUEUE:-unknown}"
 cores="${GRID5000_CORES:-0}"
 workers="${GRID5000_WORKERS:-16}"
 walltime="${GRID5000_WALLTIME:-unknown}"
+job_started_at="$(date +%s)"
+stop_margin_seconds="${GRID5000_STOP_MARGIN_SECONDS:-300}"
+termination_grace_seconds="${GRID5000_TERMINATION_GRACE_SECONDS:-20}"
 batch_size="${GRID5000_BATCH_SIZE:-256}"
 excluded_sites_json="${GRID5000_EXCLUDED_SITES:-[]}"
 config_sha256="$(sha256sum "$reference_config" | cut -d ' ' -f 1)"
@@ -51,7 +54,8 @@ write_failure_receipt() {
     python3 - "$receipt" "$OAR_JOB_ID" "$source_commit" "$config_sha256" \
       "$reference_config" "$site" "$frontend" "$cluster" "$queue" "$cores" \
       "$workers" "$walltime" "$batch_size" "$excluded_sites_json" \
-      "$attempt" "$error_count" "$status" \
+      "$attempt" "$error_count" "$status" "$job_started_at" \
+      "$stop_margin_seconds" "$termination_grace_seconds" \
       "$logs/job-${OAR_JOB_ID}.log" <<'PY'
 import json
 import os
@@ -59,11 +63,12 @@ import sys
 
 (
     path, job_id, source_commit, config_sha256, config_path, site, frontend,
-    cluster, queue, cores, workers, walltime, batch_size, excluded_sites, attempts, errors,
-    exit_status, log_path,
+    cluster, queue, cores, workers, walltime, batch_size, excluded_sites, attempts,
+    errors, exit_status, job_started_at, stop_margin_seconds,
+    termination_grace_seconds, log_path,
 ) = sys.argv[1:]
 payload = {
-    "status": "failed",
+    "status": "incomplete" if int(exit_status) in {124, 130, 143} else "failed",
     "datasets": ["website", "wikidata", "description"],
     "grid5000": {
         "job_id": job_id,
@@ -80,7 +85,18 @@ payload = {
         "config": {"path": config_path, "sha256": config_sha256},
         "attempts": int(attempts),
         "retries": max(0, int(attempts) - 1),
-        "errors": {"count": int(errors) + 1, "last_exit_status": int(exit_status)},
+        "errors": {
+            "count": int(errors) if int(errors) or int(exit_status) in {124, 130, 143} else 1,
+            "last_exit_status": int(exit_status),
+        },
+        "stop_reason": {
+            124: "graceful_deadline",
+            130: "interrupt",
+            143: "termination_signal",
+        }.get(int(exit_status), "worker_failure"),
+        "job_started_epoch": int(job_started_at),
+        "stop_margin_seconds": int(stop_margin_seconds),
+        "termination_grace_seconds": float(termination_grace_seconds),
         "log_path": log_path,
     },
 }
@@ -94,12 +110,15 @@ PY
   exit "$status"
 }
 trap write_failure_receipt EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 export EUNIS_SOURCE_DIR="$scratch/source"
 export EUNIS_REFERENCE_DIR="$reference_cache"
 export EUNIS_SIDECAR_DIR="$sidecars"
 export UV_PROJECT_ENVIRONMENT="$scratch/venv"
 export UV_CACHE_DIR="$scratch/uv-cache"
+deadline_helper="$source_root/scripts/grid5000/worker_deadline.py"
 max_attempts="${GRID5000_MAX_ATTEMPTS:-20}"
 retry_delay="${GRID5000_RETRY_DELAY:-30}"
 
@@ -114,6 +133,9 @@ echo "grid5000_queue=$queue"
 echo "grid5000_cores=$cores"
 echo "grid5000_workers=$workers"
 echo "grid5000_walltime=$walltime"
+echo "grid5000_job_started_epoch=$job_started_at"
+echo "grid5000_stop_margin_seconds=$stop_margin_seconds"
+echo "grid5000_termination_grace_seconds=$termination_grace_seconds"
 echo "grid5000_batch_size=$batch_size"
 echo "grid5000_excluded_sites=$excluded_sites_json"
 echo "reference_config=$reference_config"
@@ -121,6 +143,8 @@ echo "reference_config_sha256=$config_sha256"
 if [[ "$site" == "unknown" || "$frontend" == "unknown" || "$cluster" == "unknown" \
   || "$queue" == "unknown" || ! "$cores" =~ ^[1-9][0-9]*$ \
   || ! "$workers" =~ ^[1-9][0-9]*$ || ! "$batch_size" =~ ^[1-9][0-9]*$ \
+  || ! "$stop_margin_seconds" =~ ^[0-9]+$ \
+  || ! "$termination_grace_seconds" =~ ^[0-9]+([.][0-9]+)?$ \
   || "$walltime" == "unknown" ]]; then
   echo "Grid'5000 OAR configuration metadata is incomplete" >&2
   exit 2
@@ -129,12 +153,30 @@ if [[ -z "${HF_TOKEN:-}" && ! -s "$hf_token_file" ]]; then
   echo "HF_TOKEN or the Hugging Face cache must be available on the reserved node" >&2
   exit 2
 fi
-uv sync --frozen --no-dev
+if python3 "$deadline_helper" \
+  --walltime "$walltime" \
+  --started-at "$job_started_at" \
+  --stop-margin-seconds "$stop_margin_seconds" \
+  --termination-grace-seconds "$termination_grace_seconds" \
+  -- uv sync --frozen --no-dev; then
+  :
+else
+  status=$?
+  if (( status != 124 && status != 130 && status != 143 )); then
+    error_count=$((error_count + 1))
+  fi
+  exit "$status"
+fi
 attempt=1
 status=1
 while (( attempt <= max_attempts )); do
   echo "release attempt $attempt/$max_attempts"
-  if uv run --frozen --no-dev osm-polygon-eunis release \
+  if python3 "$deadline_helper" \
+    --walltime "$walltime" \
+    --started-at "$job_started_at" \
+    --stop-margin-seconds "$stop_margin_seconds" \
+    --termination-grace-seconds "$termination_grace_seconds" \
+    -- uv run --frozen --no-dev osm-polygon-eunis release \
     --reference-config "$reference_config" \
     --workdir "$workdir" \
     --workers "${GRID5000_WORKERS:-16}" \
@@ -143,7 +185,8 @@ while (( attempt <= max_attempts )); do
     python3 - "$release_receipt" "$receipt" "$OAR_JOB_ID" "$source_commit" \
       "$config_sha256" "$reference_config" "$site" "$frontend" "$cluster" \
       "$queue" "$cores" "$workers" "$walltime" "$batch_size" \
-      "$excluded_sites_json" "$attempt" "$error_count" \
+      "$excluded_sites_json" "$attempt" "$error_count" "$job_started_at" \
+      "$stop_margin_seconds" "$termination_grace_seconds" \
       "$logs/job-${OAR_JOB_ID}.log" <<'PY'
 import json
 import os
@@ -152,7 +195,8 @@ import sys
 (
     source, destination, job_id, source_commit, config_sha256, config_path, site,
     frontend, cluster, queue, cores, workers, walltime, batch_size, excluded_sites,
-    attempts, errors, log_path,
+    attempts, errors, job_started_at, stop_margin_seconds,
+    termination_grace_seconds, log_path,
 ) = sys.argv[1:]
 with open(source, encoding="utf-8") as input_file:
     payload = json.load(input_file)
@@ -172,6 +216,9 @@ payload["grid5000"] = {
     "attempts": int(attempts),
     "retries": max(0, int(attempts) - 1),
     "errors": {"count": int(errors)},
+    "job_started_epoch": int(job_started_at),
+    "stop_margin_seconds": int(stop_margin_seconds),
+    "termination_grace_seconds": float(termination_grace_seconds),
     "log_path": log_path,
 }
 temporary = f"{destination}.tmp"
@@ -184,13 +231,42 @@ PY
     exit 0
   else
     status=$?
-    error_count=$((error_count + 1))
+    if (( status != 124 && status != 130 && status != 143 )); then
+      error_count=$((error_count + 1))
+    fi
+  fi
+  if (( status == 124 )); then
+    echo "graceful worker deadline reached; saved checkpoints are ready to resume"
+    break
   fi
   if (( status == 130 || status == 143 || attempt == max_attempts )); then
     break
   fi
   echo "release attempt $attempt failed with rc=$status; retrying after checkpoints"
-  attempt=$((attempt + 1))
-  sleep "$retry_delay"
+  if python3 "$deadline_helper" \
+    --walltime "$walltime" \
+    --started-at "$job_started_at" \
+    --stop-margin-seconds "$stop_margin_seconds" \
+    --termination-grace-seconds "$termination_grace_seconds" \
+    -- sleep "$retry_delay"; then
+    status=0
+    attempt=$((attempt + 1))
+  else
+    status=$?
+    if (( status != 124 && status != 130 && status != 143 )); then
+      error_count=$((error_count + 1))
+    fi
+  fi
+  if (( status == 124 )); then
+    echo "graceful worker deadline reached during retry delay; saved checkpoints are ready to resume"
+    break
+  fi
+  if (( status == 130 || status == 143 )); then
+    break
+  fi
+  if (( status != 0 )); then
+    echo "retry delay failed with rc=$status; stopping with checkpoints ready to resume"
+    break
+  fi
 done
 exit "$status"

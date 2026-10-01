@@ -22,6 +22,10 @@ def test_release_entrypoint_is_checkpointed_and_all_source_grid5000_only() -> No
     assert 'reference_cache="$persistent_root/cache/reference"' in script
     assert 'EUNIS_REFERENCE_DIR="$reference_cache"' in script
     assert 'UV_CACHE_DIR="$scratch/uv-cache"' in script
+    assert script.count('python3 "$deadline_helper"') == 3
+    assert 'stop_margin_seconds="${GRID5000_STOP_MARGIN_SECONDS:-300}"' in script
+    assert 'termination_grace_seconds="${GRID5000_TERMINATION_GRACE_SECONDS:-20}"' in script
+    assert script.index('-- sleep "$retry_delay"') < script.index("attempt=$((attempt + 1))")
     assert 'EUNIS_SIDECAR_DIR="$sidecars"' in script
     assert "uv run --frozen --no-dev osm-polygon-eunis release" in script
     assert 'max_attempts="${GRID5000_MAX_ATTEMPTS:-20}"' in script
