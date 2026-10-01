@@ -84,15 +84,12 @@ def test_remaining_runtime_accounts_for_elapsed_setup_and_safety_margin() -> Non
 
 
 def test_remaining_runtime_preserves_fractional_execution_window() -> None:
-    assert (
-        remaining_runtime_seconds(
-            "0:05:01",
-            started_at=1_000,
-            now=1_000.1,
-            stop_margin_seconds=300,
-        )
-        == pytest.approx(0.9)
-    )
+    assert remaining_runtime_seconds(
+        "0:05:01",
+        started_at=1_000,
+        now=1_000.1,
+        stop_margin_seconds=300,
+    ) == pytest.approx(0.9)
 
 
 def test_remaining_runtime_never_becomes_negative() -> None:
