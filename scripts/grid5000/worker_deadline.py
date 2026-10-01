@@ -61,7 +61,7 @@ def remaining_runtime_seconds(
     started_at: float,
     stop_margin_seconds: int,
     now: float | None = None,
-) -> int:
+) -> float:
     """Return time left before the internal stop, including prior setup time."""
 
     if not math.isfinite(started_at):
@@ -74,7 +74,7 @@ def remaining_runtime_seconds(
         raise ValueError("current time must be finite")
     remaining = walltime_seconds - (current_time - started_at)
     remaining -= stop_margin_seconds
-    return max(0, math.floor(remaining))
+    return max(0.0, remaining)
 
 
 def _process_group_exists(process_group_id: int) -> bool:
