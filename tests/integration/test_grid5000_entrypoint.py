@@ -15,6 +15,7 @@ def test_release_entrypoint_is_checkpointed_and_all_source_grid5000_only() -> No
     assert "HF_HOME" in script
     assert '"${HF_HOME:-$HOME/.cache/huggingface}/token"' in script
     assert 'source "$source_root/scripts/grid5000/load_hf_token.sh"' in script
+    assert 'source "$source_root/scripts/grid5000/worker_signals.sh"' in script
     assert 'eunis_load_hf_token "$hf_token_file"' in script
     assert "HF_TOKEN or the Hugging Face cache" in script
     assert 'export PATH="$HOME/.local/bin:$PATH"' in script
@@ -22,6 +23,14 @@ def test_release_entrypoint_is_checkpointed_and_all_source_grid5000_only() -> No
     assert 'reference_cache="$persistent_root/cache/reference"' in script
     assert 'EUNIS_REFERENCE_DIR="$reference_cache"' in script
     assert 'UV_CACHE_DIR="$scratch/uv-cache"' in script
+    assert script.count('run_deadline_helper "$deadline_helper"') == 3
+    assert 'stop_margin_seconds="${GRID5000_STOP_MARGIN_SECONDS:-300}"' in script
+    assert 'termination_grace_seconds="${GRID5000_TERMINATION_GRACE_SECONDS:-20}"' in script
+    assert 'stop_marker="$scratch/worker-stop-state"' in script
+    assert script.count('--stop-marker "$stop_marker"') == 4
+    assert 'if (( status == 124 )) && [[ "$stop_state" == "deadline" ]]' in script
+    assert 'python3 "$receipt_writer"' in script
+    assert script.index('-- sleep "$retry_delay"') < script.index("attempt=$((attempt + 1))")
     assert 'EUNIS_SIDECAR_DIR="$sidecars"' in script
     assert "uv run --frozen --no-dev osm-polygon-eunis release" in script
     assert 'max_attempts="${GRID5000_MAX_ATTEMPTS:-20}"' in script
@@ -29,9 +38,24 @@ def test_release_entrypoint_is_checkpointed_and_all_source_grid5000_only() -> No
     assert '--receipt "$release_receipt"' in script
     assert '--workers "${GRID5000_WORKERS:-16}"' in script
     assert "trap write_failure_receipt EXIT" in script
+    assert "install_worker_signal_traps" in script
     assert 'workdir="$persistent_root/runs/eunis"' in script
     assert 'sidecars="$persistent_root/sidecars/eunis"' in script
     assert "description-release.sh" not in script
+
+
+def test_release_deadline_uses_the_actual_oar_job_start_time() -> None:
+    script = (Path(__file__).parents[2] / "scripts" / "grid5000" / "release.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'job_started_at="$(date +%s)"' not in script
+    assert 'job_started_at="$(python3 "$source_root/scripts/grid5000/job_start.py"' in script
+    assert '--job-id "$OAR_JOB_ID"' in script
+    assert '--frontend "$frontend"' in script
+    assert script.index("trap write_failure_receipt EXIT") < script.index(
+        'job_started_at="$(python3 "$source_root/scripts/grid5000/job_start.py"'
+    )
 
 
 def test_grid_token_loader_exports_cached_token_without_printing_it(tmp_path: Path) -> None:

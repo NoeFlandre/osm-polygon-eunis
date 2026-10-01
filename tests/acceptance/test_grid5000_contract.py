@@ -6,6 +6,7 @@ def test_production_contract_is_grid5000_all_source_and_site_neutral() -> None:
     operations = (root / "docs" / "operations.md").read_text(encoding="utf-8")
     readme = (root / "README.md").read_text(encoding="utf-8")
     worker = (root / "scripts" / "grid5000" / "release.sh").read_text(encoding="utf-8")
+    receipt_writer = (root / "scripts" / "grid5000" / "receipts.py").read_text(encoding="utf-8")
 
     assert "Grid'5000" in operations
     assert "grid5000 submit" in operations
@@ -13,6 +14,7 @@ def test_production_contract_is_grid5000_all_source_and_site_neutral() -> None:
     assert "host=1/core=16" in operations
     assert "--site SITE" in operations
     assert "--exclude-site bordeaux" in operations
+    assert "--exclude-site sophia" in operations
     assert "--cluster CLUSTER" in operations
     assert "cluster='CLUSTER'" in operations
     assert "-q default" in operations
@@ -31,6 +33,9 @@ def test_production_contract_is_grid5000_all_source_and_site_neutral() -> None:
     assert "all three" in readme
     assert "--dataset" not in worker
     assert '--receipt "$release_receipt"' in worker
+    assert 'python3 "$receipt_writer"' in worker
+    assert '"status": "incomplete" if stop_reason is not None else "failed"' in receipt_writer
+    assert '"stop_reason": stop_reason or "worker_failure"' in receipt_writer
     assert (
         worker.index('source_commit="$GRID5000_SOURCE_REVISION"')
         < worker.index('export EUNIS_SOURCE_COMMIT="$source_commit"')

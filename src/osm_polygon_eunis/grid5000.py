@@ -16,9 +16,11 @@ Command = tuple[str, ...]
 CommandRunner = Callable[[Command], str]
 
 _JOB_ID_PATTERN: Final = re.compile(r"(?:\bAdding job\s+|\bOAR_JOB_ID=)(\d+)\b")
-_WALLTIME_PATTERN: Final = re.compile(r"\d+:[0-5]\d:[0-5]\d")
+_WALLTIME_PATTERN: Final = re.compile(r"(\d+):([0-5]\d):([0-5]\d)")
 _TOKEN_PATTERN: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 _PERSISTENT_PREFIXES: Final = ("/home/", "/groups/", "/srv/")
+_ONE_HOUR_SECONDS: Final = 60 * 60
+_DEFAULT_STOP_MARGIN_SECONDS: Final = 300
 DEFAULT_DATASETS: Final = ("website", "wikidata", "description")
 _POLICY_CHECK_SCRIPT: Final = r"""import json
 import subprocess
@@ -242,14 +244,25 @@ def _validate_config_values(config: Grid5000Config) -> None:
     _validate_positive("workers", config.workers)
     if config.workers > config.cores:
         raise ValueError("workers must not exceed cores")
-    if not _WALLTIME_PATTERN.fullmatch(config.walltime):
-        raise ValueError("walltime must use HH:MM:SS")
+    _validate_walltime(config.walltime)
     _validate_positive("batch_size", config.batch_size)
     for field_name in ("site", "cluster", "queue"):
         _validate_host(getattr(config, field_name), field_name)
     if config.job_type is not None:
         _validate_host(config.job_type, "job_type")
     _validate_config_exclusions(config)
+
+
+def _validate_walltime(walltime: str) -> None:
+    match = _WALLTIME_PATTERN.fullmatch(walltime)
+    if match is None:
+        raise ValueError("walltime must use HH:MM:SS")
+    hours, minutes, seconds = (int(part) for part in match.groups())
+    walltime_seconds = hours * 3600 + minutes * 60 + seconds
+    if not 0 < walltime_seconds <= _ONE_HOUR_SECONDS:
+        raise ValueError("walltime must be positive and no longer than one hour")
+    if walltime_seconds <= _DEFAULT_STOP_MARGIN_SECONDS:
+        raise ValueError("walltime must exceed the default 300-second stop margin")
 
 
 def _validate_config_exclusions(config: Grid5000Config) -> None:
