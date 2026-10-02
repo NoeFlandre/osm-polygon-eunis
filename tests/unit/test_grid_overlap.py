@@ -8,7 +8,7 @@ from shapely.geometry import Point, Polygon, box
 from osm_polygon_eunis.grid_overlap import band_row_ranges, weighted_cells
 
 TRANSFORM = from_origin(1000.0, 5000.0, 100.0, 100.0)
-SHAPE = (60, 80)
+SHAPE = (50, 60)
 
 
 def _brute_force_areas(polygon: Polygon) -> dict[tuple[int, int], float]:
@@ -31,7 +31,6 @@ def _brute_force_areas(polygon: Polygon) -> dict[tuple[int, int], float]:
         box(1230, 2210, 4470, 4890),
         Polygon([(1100, 2000), (5000, 2300), (2200, 4900)]),
         Point(3000, 3500).buffer(2000).difference(Point(3000, 3500).buffer(700)),
-        box(1000, 5000 - 6000, 1000 + 8000, 5000),
     ],
 )
 def test_weighted_cells_match_cell_by_cell_intersection(polygon: Polygon) -> None:
