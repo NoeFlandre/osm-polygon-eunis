@@ -110,7 +110,7 @@ receipts, resuming checkpoints, and the final no-op check.
 
 ## Production execution
 
-The current production release runs on Grid'5000 only. It processes all three
+The current production release is Grid'5000-only. It processes all three
 sources in one resumable job: `website`, `wikidata`, and `description`.
 
 The Mac runs tests and the submission and monitoring commands. It does not
