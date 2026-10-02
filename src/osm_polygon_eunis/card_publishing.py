@@ -17,7 +17,13 @@ from .manifest_state import (
 )
 from .publish import ManifestBuildOptions, ShardExpectation, build_manifest, upload_manifest
 from .release_plan import DatasetPlan, DatasetReceipt, Progress
-from .shard_processing import FinalizeOptions, _advance_commit, _upload_file, finalize_dataset
+from .shard_processing import (
+    FinalizeOptions,
+    _advance_commit,
+    _upload_file,
+    clear_finalize_progress,
+    finalize_dataset,
+)
 from .sources import capture_revision, download_to_temp
 
 
@@ -42,20 +48,17 @@ def _finalize_plan(
     target_revision = capture_revision(api, plan.spec.output_repo)
     source_readme = _download_source_readme(api, plan, options)
     card = DatasetCardAccumulator(source_readme=source_readme)
-    expectations, current_commit = finalize_dataset(
-        api,
-        plan,
-        FinalizeOptions(
-            sidecar_root=options.sidecar_root,
-            local_root=options.workdir / "final",
-            batch_size=options.batch_size,
-            parent_commit=target_revision,
-            progress=options.progress,
-            card=card,
-            source_cache_root=options.source_cache_root,
-            http_client=options.http_client,
-        ),
+    finalize_options = FinalizeOptions(
+        sidecar_root=options.sidecar_root,
+        local_root=options.workdir / "final",
+        batch_size=options.batch_size,
+        parent_commit=target_revision,
+        progress=options.progress,
+        card=card,
+        source_cache_root=options.source_cache_root,
+        http_client=options.http_client,
     )
+    expectations, current_commit = finalize_dataset(api, plan, finalize_options)
     _enforce_intersection_error_limit(card, plan, options.max_intersection_errors)
     card_artifacts = _write_card_artifacts(card, options.workdir, plan, options.reference_info)
     current_commit = _upload_card_artifacts(
@@ -87,6 +90,7 @@ def _finalize_plan(
         ),
     )
     _cleanup_card_artifacts(card_artifacts)
+    clear_finalize_progress(finalize_options, plan)
     return DatasetReceipt(plan, expectations, verification)
 
 

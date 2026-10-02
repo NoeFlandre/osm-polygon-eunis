@@ -81,3 +81,4 @@ class HubApi(InventoryApi, Protocol):
     endpoint: str
     token: str | bool | None
     upload_file: Callable[..., Any]
+    create_commit: Callable[..., Any]

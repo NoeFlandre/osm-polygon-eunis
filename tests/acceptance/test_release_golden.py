@@ -39,6 +39,7 @@ class _GoldenHub:
     endpoint = "https://hub.example"
     token = None
     upload_file: Callable[..., Any]
+    create_commit: Callable[..., Any]
 
     def __init__(
         self, source_files: Mapping[str, bytes], source_repo: str, target_repo: str
@@ -49,6 +50,7 @@ class _GoldenHub:
         }
         self.source_repo = source_repo
         self.upload_file = self._upload_file_impl
+        self.create_commit = self._create_commit_impl
 
     def repo_info(self, repo_id: str, **_kwargs: object) -> SimpleNamespace:
         revision = "source-revision" if repo_id == self.source_repo else "target-base"
@@ -68,6 +70,21 @@ class _GoldenHub:
             SimpleNamespace(path=path, blob_id=hashlib.sha256(payload).hexdigest())
             for path, payload in sorted(self.repositories[repo_id].items())
         )
+
+    def _create_commit_impl(
+        self,
+        *,
+        operations: list[Any],
+        repo_id: str,
+        **_kwargs: object,
+    ) -> SimpleNamespace:
+        for operation in operations:
+            self._upload_file_impl(
+                path_or_fileobj=Path(operation.path_or_fileobj),
+                path_in_repo=operation.path_in_repo,
+                repo_id=repo_id,
+            )
+        return SimpleNamespace(oid=f"target-commit-{len(self.repositories[repo_id])}")
 
     def _upload_file_impl(
         self,

@@ -4,7 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -364,3 +364,32 @@ def test_build_manifest_rejects_inconsistent_path_sets(
                 rows_by_path={},
             )
         )
+
+
+def test_upload_replacements_groups_several_shards_into_one_commit(tmp_path: Path) -> None:
+    from osm_polygon_eunis.publish import upload_replacements
+
+    first, second = tmp_path / "a.parquet", tmp_path / "b.parquet"
+    first.write_bytes(b"a")
+    second.write_bytes(b"b")
+    calls: list[dict[str, Any]] = []
+
+    class Api:
+        def create_commit(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(oid="grouped")
+
+    result = upload_replacements(
+        cast(HubApi, Api()),
+        "org/target",
+        [("polygons/a.parquet", first), ("polygons/b.parquet", second)],
+        parent_commit="base",
+    )
+
+    assert result.oid == "grouped"
+    assert len(calls) == 1
+    assert calls[0]["parent_commit"] == "base"
+    assert [op.path_in_repo for op in calls[0]["operations"]] == [
+        "polygons/a.parquet",
+        "polygons/b.parquet",
+    ]
