@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import struct
 from collections import OrderedDict
@@ -9,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar, cast
 
+import shapely
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 from shapely.wkb import loads as load_wkb
@@ -18,10 +20,11 @@ from .geometry import is_usable
 from .geopackage_sql import _sql_identifier
 from .geopackage_tiles import _GeoPackageTileMethods, _TileLayer
 from .matching import choose_winner
-from .reference_geometry import _has_disjoint_components
 
 EPSG_LAEA_EUROPE = 3035
 _GPKG_HEADER_SIZE = 8
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,12 +161,12 @@ class GeoPackageReference(_GeoPackageTileMethods):
         if connection is None:
             raise RuntimeError("GeoPackage reference is not open")
         candidates = self._vector_candidates(connection, polygon)
-        candidates.extend(self._tile_candidates(connection, polygon))
         return choose_winner(
             polygon,
             candidates,
             source_version=self._source_version,
             on_error=self._count_intersection_error,
+            extra_areas=self._tile_areas(connection, polygon),
         )
 
     def _vector_candidates(
@@ -194,24 +197,22 @@ class GeoPackageReference(_GeoPackageTileMethods):
         geometry = self.decode_geometry(blob)
         return (code, geometry) if is_usable(geometry) else None
 
-    def _tile_candidates(
+    def _tile_areas(
         self,
         connection: sqlite3.Connection,
         polygon: BaseGeometry,
-    ) -> list[OverlapCandidate]:
-        candidates: list[OverlapCandidate] = []
+    ) -> list[tuple[float, str, str]]:
+        areas: list[tuple[float, str, str]] = []
         for layer in self._tile_layers:
-            geometry = self._positive_tile_geometry(connection, layer, polygon)
-            if geometry is not None:
-                candidates.append(
-                    OverlapCandidate(
-                        layer.table,
-                        self._labels[layer.table],
-                        geometry,
-                        components_are_disjoint=_has_disjoint_components(geometry),
-                    )
-                )
-        return candidates
+            try:
+                area = self._tile_layer_area(connection, layer, polygon)
+            except (ValueError, RuntimeError, shapely.errors.GEOSException) as error:
+                logger.warning("skipping EUNIS tile layer %s: %s", layer.table, error)
+                self._count_intersection_error()
+                continue
+            if area > 0.0:
+                areas.append((area, layer.table, self._labels[layer.table]))
+        return areas
 
     @staticmethod
     def decode_geometry(blob: bytes | memoryview) -> BaseGeometry:
