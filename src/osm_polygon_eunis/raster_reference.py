@@ -95,7 +95,8 @@ class RasterReference:
         self._source_extent_wgs84: tuple[float, float, float, float] | None = None
         self._stack_cache: OrderedDict[tuple[int, int], np.ndarray | None] = OrderedDict()
         self._tile_cache_bytes = 0
-        self._grid_layers: tuple[int, ...] | bool | None = False
+        self._grid_order: tuple[int, ...] | None = None
+        self._grid_checked = False
 
     @property
     def tile_cache_hits(self) -> int:
@@ -165,7 +166,8 @@ class RasterReference:
             self._datasets = ()
             self._stack_cache.clear()
             self._tile_cache_bytes = 0
-            self._grid_layers = False
+            self._grid_order = None
+            self._grid_checked = False
 
     def _count_intersection_error(self) -> None:
         self.intersection_errors += 1
@@ -220,8 +222,8 @@ class RasterReference:
     ) -> tuple[int, ...] | None:
         """Return layer indices sorted by code when every layer shares one grid."""
 
-        if self._grid_layers is not False:
-            return self._grid_layers if self._grid_layers else None  # type: ignore[return-value]
+        if self._grid_checked:
+            return self._grid_order
         order: tuple[int, ...] | None = None
         if datasets:
             keys = {
@@ -233,7 +235,8 @@ class RasterReference:
             codes = [layer.code for layer, _ in datasets]
             if len(keys) == 1 and square and len(set(codes)) == len(codes):
                 order = tuple(sorted(range(len(datasets)), key=codes.__getitem__))
-        self._grid_layers = order if order is not None else None
+        self._grid_order = order
+        self._grid_checked = True
         return order
 
     def _overlap_grid(
@@ -296,11 +299,10 @@ class RasterReference:
         self._tile_cache_misses += 1
         stack = np.zeros((len(datasets), TILE_SIZE, TILE_SIZE), dtype=bool)
         for index, (_, dataset) in enumerate(datasets):
-            window = Window(
-                column * TILE_SIZE,
-                row * TILE_SIZE,
-                min(TILE_SIZE, dataset.width - column * TILE_SIZE),
-                min(TILE_SIZE, dataset.height - row * TILE_SIZE),
+            row_start, col_start = row * TILE_SIZE, column * TILE_SIZE
+            window = Window.from_slices(
+                (row_start, min(row_start + TILE_SIZE, dataset.height)),
+                (col_start, min(col_start + TILE_SIZE, dataset.width)),
             )
             valid = self._positive_mask(dataset, window)
             if valid is not None:

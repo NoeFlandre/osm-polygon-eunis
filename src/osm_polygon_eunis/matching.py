@@ -4,8 +4,6 @@ import logging
 from collections.abc import Callable, Iterable
 from typing import TypeGuard
 
-import numpy as np
-import shapely
 from shapely import area as shapely_area
 from shapely import get_parts
 from shapely import intersection as shapely_intersection
@@ -77,10 +75,7 @@ def _intersection_area(
     candidate: OverlapCandidate,
     on_error: Callable[[], None],
 ) -> float | None:
-    if candidate.components_are_disjoint:
-        if candidate.geometry.is_empty:
-            return None
-    elif not is_usable(candidate.geometry):
+    if not is_usable(candidate.geometry):
         return None
     try:
         area = _exact_intersection_area(polygon, candidate)
@@ -101,23 +96,7 @@ def _exact_intersection_area(polygon: BaseGeometry, candidate: OverlapCandidate)
     components = get_parts(candidate.geometry)
     if not len(components):
         return 0.0
-    # Habitat components are disjoint, so the exact overlap is the sum of the
-    # per-component overlaps. Only components that touch the polygon matter, and
-    # components the polygon fully contains contribute their own area without
-    # an overlay.
-    shapely.prepare(polygon)
-    touching = components[shapely.intersects(polygon, components)]
-    if not len(touching):
-        return 0.0
-    touching = touching[shapely.is_valid(touching)]
-    if not len(touching):
-        return 0.0
-    inside = shapely.contains(polygon, touching)
-    total = float(shapely_area(touching[inside]).sum())
-    partial = touching[~inside]
-    if len(partial):
-        total += float(np.sum(shapely_area(shapely_intersection(polygon, partial))))
-    return total
+    return float(shapely_area(shapely_intersection(polygon, components)).sum())
 
 
 def _percentage(area: float, polygon_area: float) -> float:
