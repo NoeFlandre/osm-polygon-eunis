@@ -322,8 +322,8 @@ def test_submit_runs_policy_sync_oar_and_post_policy_without_secrets(tmp_path: P
 @pytest.mark.parametrize(
     "policy_output",
     [
-        "in lyon, on cluster taurus, nflandre crossed day/night boundaries\n"
-        "  Job 2071820: 12h (12 cores*1h / Thu.01 - 18:32 => Thu.01 - 19:32)\n",
+        "",
+        "Traceback (most recent call last):\n",
         "Error: policy database could not be reached\nNo jobs flagged\n",
     ],
 )
@@ -796,3 +796,42 @@ def test_run_command_returns_combined_output(monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr(grid5000.subprocess, "run", fake_run)
     assert grid5000.run_command(("true",)) == "outerr"
+
+
+def test_submit_tolerates_policy_warnings_about_other_jobs(tmp_path: Path) -> None:
+    report = (
+        "This script is testing usage policy conformance between a and b\n"
+        "in lyon, on cluster taurus, nflandre crossed day/night boundaries\n"
+        "  Job 2071820: 11h\n"
+    )
+
+    def fake_runner(command: tuple[str, ...]) -> str:
+        if command == grid5000.build_active_eunis_jobs_command("fgrenoble"):
+            return _EMPTY_ALL_SITE_REPORT
+        if command[:2] == ("ssh", "fgrenoble") and shlex.split(command[2])[0] == "oarsub":
+            return "[AO] Adding job 123456\n"
+        return report if "usagepolicycheck" in command[-1] else ""
+
+    result = submit_grid5000(
+        _config(),
+        tmp_path,
+        source_revision="abc123",
+        state_path=tmp_path / "job.json",
+        runner=fake_runner,
+    )
+
+    assert result.job is not None
+
+
+@pytest.mark.parametrize(
+    ("letter", "state"),
+    [("R", "active"), ("W", "active"), ("T", "terminal"), ("E", "terminal")],
+)
+def test_job_status_state_reads_oar_table_state_column(letter: str, state: str) -> None:
+    output = (
+        "Job id     Name           User           Submission Date     S Queue\n"
+        "---------- -------------- -------------- ------------------- - ----------\n"
+        f"482097     osm-polygon-eu nflandre       2026-10-01 23:24:32 {letter} default\n"
+    )
+
+    assert grid5000._job_status_state(output) == state
