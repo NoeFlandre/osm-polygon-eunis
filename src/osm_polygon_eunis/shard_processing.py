@@ -62,7 +62,11 @@ def finalize_dataset(
     plan: DatasetPlan,
     options: FinalizeOptions,
 ) -> tuple[tuple[ShardExpectation, ...], str]:
-    """Append labels, upload changed shards, and clean successful staging files."""
+    """Append labels, upload changed shards, and clean successful staging files.
+
+    Label sidecars are the resumable checkpoints, so they are kept: an interrupted
+    pass must be able to re-run every shard.
+    """
 
     with _http_client(options.http_client) as reusable_client:
         return _finalize_dataset_with_client(
@@ -138,7 +142,6 @@ def _finalize_shard(
     _cleanup_shard(
         local_source,
         local_output,
-        sidecar,
         link_output,
         delete_source=not reused_source,
     )
@@ -296,7 +299,6 @@ def _upload_file(
 def _cleanup_shard(
     local_source: Path,
     local_output: Path,
-    sidecar: Path,
     link_output: _LinkOutput | None,
     *,
     delete_source: bool = True,
@@ -304,7 +306,6 @@ def _cleanup_shard(
     if delete_source:
         local_source.unlink(missing_ok=True)
     local_output.unlink(missing_ok=True)
-    sidecar.unlink(missing_ok=True)
     if link_output is not None:
         link_output.source.unlink(missing_ok=True)
         link_output.output.unlink(missing_ok=True)

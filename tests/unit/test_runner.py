@@ -287,7 +287,7 @@ def test_finalize_dataset_enriches_polygon_and_link_shards_and_cleans_staging(
     assert progress == [
         {"event": "shards_uploaded", "dataset": "wikidata", "path": "polygons/region.parquet"}
     ]
-    assert not sidecar.exists()
+    assert sidecar.exists()
     assert list((tmp_path / "final").iterdir()) == []
 
 
