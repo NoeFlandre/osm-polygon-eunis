@@ -1,14 +1,14 @@
 ## Summary
 
-<!-- What changed and which issue(s) does this relate to? -->
+<!-- Describe the change. Name the related issues. -->
 
 ## Verification
 
-- [ ] Added or updated behavior tests
+- [ ] You added or updated behavior tests
 - [ ] `make quality` passes
-- [ ] Remote or release evidence is attached when acceptance depends on it
-- [ ] No credentials, private data, or generated release artifacts are included
+- [ ] You attached remote or release evidence when acceptance depends on it
+- [ ] The change has no credentials, private data, or generated release artifacts
 
 ## Evidence and limitations
 
-<!-- Record source revisions, job IDs, receipt paths, or remaining external blockers. -->
+<!-- Record the source revisions, job IDs, receipt paths, or remaining external blockers. -->

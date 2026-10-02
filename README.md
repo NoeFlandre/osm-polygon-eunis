@@ -2,13 +2,18 @@
 
 ## Purpose and release status
 
-This project enriches three public Hugging Face datasets with EUNIS habitat
-labels selected by the largest actual spatial intersection between each OSM
+This project adds EUNIS habitat labels to three public Hugging Face datasets. It
+selects the label with the largest actual spatial intersection between each OSM
 polygon and the official EEA EUNIS habitat probability-map reference.
 
 The three output repositories are the intended release targets. Treat a dataset
-as published only after its current `eunis/manifest.json`, Hub revision, schema,
-row counts, and artifact hashes have been independently verified.
+as published only after you verify these items independently:
+
+- the current `eunis/manifest.json`
+- the Hub revision
+- the schema
+- the row counts
+- the artifact hashes
 
 Inputs:
 
@@ -22,7 +27,7 @@ Outputs:
 - `NoeFlandre/osm-polygon-wikidata-and-wikipedia-eunis`
 - `NoeFlandre/osm-polygon-description-tag-eunis`
 
-The polygon-bearing tables receive four nullable columns:
+The tables that contain polygons receive four nullable columns:
 
 - `eunis_code`
 - `eunis_name`
@@ -30,26 +35,35 @@ The polygon-bearing tables receive four nullable columns:
 - `eunis_source_version`
 
 The percentage is `100 * area(polygon ∩ EUNIS reference geometry) /
-area(polygon)` after transforming both geometries to EPSG:3035. Bounding boxes
-may prune candidates, but never determine a label. Empty, invalid, or
-out-of-reference polygons receive null EUNIS fields. Equal-area ties use the
-ascending EUNIS code.
+area(polygon)`. The pipeline first transforms both geometries to EPSG:3035.
+Bounding boxes can remove candidates. They never decide a label. Empty, invalid,
+or out-of-reference polygons receive null EUNIS fields. For equal-area ties, the
+pipeline uses the ascending EUNIS code.
 
-The pipeline reads bounded Parquet micro-batches, uses bounded Arrow batches,
-streams temporary files, and deletes source shards after their final reference
-pass. It does not mirror a complete input or output dataset on the local disk.
+The pipeline reads bounded Parquet micro-batches. It uses bounded Arrow batches.
+It streams temporary files. It deletes the source shards after their final
+reference pass. It does not mirror a complete input dataset or output dataset on
+the local disk.
 
-The EEA resolver pins the catalog records, public asset metadata, the official
-2021 classification workbook, and downloaded SHA-256 checksums in each target's
-`eunis/manifest.json`. EEA GeoPackages are read as highest-resolution tiled
-rasters; only tiles intersecting the polygon bbox are decoded, and the final
-label still uses actual cell/polygon intersection area.
+The EEA resolver pins these items in the `eunis/manifest.json` of each target:
 
-Each output dataset card also contains a deterministic static world map at
-`eunis/world-map.svg` and a compact percentage table for every EUNIS label,
-including polygons that received no label. The map is built while the final
-Parquet shards stream through the pipeline, using bounded 2-degree bins rather
-than retaining source geometries.
+- the catalog records
+- the public asset metadata
+- the official 2021 classification workbook
+- the SHA-256 checksums of the downloads
+
+The pipeline reads the EEA GeoPackages as tiled rasters of the highest
+resolution. It decodes only the tiles that intersect the polygon bbox. The final
+label still uses the actual intersection area of the cell and the polygon.
+
+Each output dataset card also contains two items:
+
+- a deterministic static world map at `eunis/world-map.svg`
+- a compact percentage table for every EUNIS label, with the polygons that
+  received no label
+
+The pipeline builds the map while the final Parquet shards stream through it. It
+uses bounded 2-degree bins. It does not keep the source geometries.
 
 ## Install and run
 
@@ -59,15 +73,16 @@ Install the command from GitHub with [uv](https://docs.astral.sh/uv/):
 uv tool install --from git+https://github.com/NoeFlandre/osm-polygon-eunis osm-polygon-eunis
 ```
 
-Plan and preview without writing to Hugging Face:
+Plan and preview. These commands do not write to Hugging Face:
 
 ```bash
 osm-polygon-eunis plan
 osm-polygon-eunis release --dry-run --workdir /path/on/persistent-storage/eunis-run
 ```
 
-Publish requires `HF_TOKEN` with write access to all three target repositories.
-Keep the token in the environment; do not put it in command arguments or files:
+To publish, you need `HF_TOKEN` with write access to all three target
+repositories. Keep the token in the environment. Do not put it in command
+arguments or files:
 
 ```bash
 export HF_TOKEN=your_write_token
@@ -75,34 +90,45 @@ osm-polygon-eunis release --batch-size 256 --workers 8 \
   --workdir /path/on/persistent-storage/eunis-run
 ```
 
-Verify an existing release without writing:
+To verify an existing release without writes, do this:
 
 ```bash
 osm-polygon-eunis verify --workdir /path/on/persistent-storage/eunis-verify
 ```
 
-Run `osm-polygon-eunis --help` or `osm-polygon-eunis <command> --help` for all
-options. The default EEA reference config is bundled with the installed command
-and comes from [`config/eea-2021-reference.json`](config/eea-2021-reference.json)
-in a source checkout. Set `OSM_EUNIS_WORKDIR` to choose the default staging
-directory for `release` and `verify`. See the
-[operations guide](docs/operations.md) for Grid'5000 execution, receipts,
-resuming checkpoints, and the final no-op check.
+Run `osm-polygon-eunis --help` or `osm-polygon-eunis <command> --help` to see
+all options.
+
+The installed command includes the default EEA reference config. In a source
+checkout, it comes from
+[`config/eea-2021-reference.json`](config/eea-2021-reference.json). Set
+`OSM_EUNIS_WORKDIR` to choose the default staging directory for `release` and
+`verify`.
+
+The [operations guide](docs/operations.md) describes Grid'5000 execution,
+receipts, resuming checkpoints, and the final no-op check.
 
 ## Production execution
 
-The current production release is **Grid'5000-only** and processes all three
-sources in one resumable job: `website`, `wikidata`, and `description`. The Mac
-performs tests and the submission/monitoring commands; it does not compute
-Parquet or raster enrichment. The controller accepts any Grid'5000
-site/frontend/cluster explicitly, requests one CPU host, and never submits
-duplicate jobs across sites. The worker keeps validated EEA references and
-sidecars on persistent Grid storage, and uses node-local scratch for transient
-source and build files. Follow [the operations runbook](docs/operations.md)
-for the policy check, submission, receipt, verification, and no-op rerun.
+The current production release runs on Grid'5000 only. It processes all three
+sources in one resumable job: `website`, `wikidata`, and `description`.
 
-After the all-site duplicate and policy checks pass, submit the resumable job
-from the controller:
+The Mac runs tests and the submission and monitoring commands. It does not
+compute the Parquet or raster enrichment.
+
+The controller accepts any Grid'5000 site, frontend, or cluster if you give it
+explicitly. It requests one CPU host. It never submits duplicate jobs across
+sites.
+
+The worker keeps the validated EEA references and sidecars on persistent Grid
+storage. It uses node-local scratch for the transient source files and build
+files.
+
+Follow [the operations runbook](docs/operations.md) for the policy check, the
+submission, the receipt, the verification, and the no-op rerun.
+
+After the all-site duplicate check and the policy check pass, submit the
+resumable job from the controller:
 
 ```bash
 osm-polygon-eunis grid5000 submit \
@@ -121,32 +147,42 @@ uv run osm-polygon-eunis --help
 make quality
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, task targets, and
-change expectations. `make quality` is the same deterministic gate CI runs.
-The matching kernel mutation baseline runs in its own path-filtered and weekly
-workflow; see the [mutation testing guide](docs/mutation-testing.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup, the task
+targets, and the change expectations. `make quality` is the same deterministic
+gate that CI runs.
 
-The complete release procedure is documented in `docs/operations.md`.
+The matching kernel mutation baseline runs in its own workflow. The workflow has
+a path filter and runs every week. See the
+[mutation testing guide](docs/mutation-testing.md).
+
+`docs/operations.md` has the complete release procedure. The
+[glossary](docs/glossary.md) defines the project terms.
 
 ## Data sources and terms
 
-The source code in this repository is licensed under Apache-2.0; see
-[`LICENSE`](LICENSE). That code license does not change the terms for source or
-derived datasets. OpenStreetMap data is available under the
-[Open Database License](https://www.openstreetmap.org/copyright), with its
-attribution and share-alike requirements. EEA datasets can carry item-specific
-reuse terms; check the notice attached to the exact reference asset and the
-[EEA legal notice](https://www.eea.europa.eu/en/legal-notice). The generated
-manifest records the source revisions and EEA asset metadata used for a run.
-It also records the package version and source commit that produced the labels;
-the Grid'5000 runner supplies its submitted commit SHA to this field. Releases
-from an installed artifact must set `EUNIS_SOURCE_COMMIT` to its full Git SHA.
+The source code in this repository has the Apache-2.0 license. See
+[`LICENSE`](LICENSE). This code license does not change the terms for the source
+datasets or the derived datasets.
+
+OpenStreetMap data is available under the
+[Open Database License](https://www.openstreetmap.org/copyright). This license
+has attribution requirements and share-alike requirements.
+
+EEA datasets can have reuse terms for each item. Check the notice of the exact
+reference asset and the
+[EEA legal notice](https://www.eea.europa.eu/en/legal-notice).
+
+The generated manifest records the source revisions and the EEA asset metadata
+that a run used. It also records the package version and the source commit that
+produced the labels. The Grid'5000 runner supplies its submitted commit SHA to
+this field. For releases from an installed artifact, set `EUNIS_SOURCE_COMMIT`
+to its full Git SHA.
 
 ## Citation
 
-Use [`CITATION.cff`](CITATION.cff) to cite this software. The hosted
-documentation and shared Hugging Face collection links will be recorded here
-after their live publication and membership are verified.
+Use [`CITATION.cff`](CITATION.cff) to cite this software. After the live
+publication and the membership are verified, this file will record the links to
+the hosted documentation and the shared Hugging Face collection.
 
 ## Docker
 
@@ -158,7 +194,7 @@ docker run --rm osm-polygon-eunis --help
 docker run --rm osm-polygon-eunis plan --help
 ```
 
-Mount persistent storage at `/work` and pass `--workdir /work/eunis-run` for a
-release. Pass `HF_TOKEN` with `--env-file` or `-e`; the image does not contain
-credentials. The default EEA config is included and can be replaced with
-`--reference-config`.
+For a release, mount persistent storage at `/work`. Pass
+`--workdir /work/eunis-run`. Pass `HF_TOKEN` with `--env-file` or `-e`. The image
+does not contain credentials. The image includes the default EEA config. To
+replace it, use `--reference-config`.
