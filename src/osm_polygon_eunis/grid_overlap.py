@@ -23,6 +23,7 @@ TILE_SIZE = 128
 _CACHE_ENTRY_BYTES = 256
 # A boundary cell block is clipped once so the overlay never sees the whole polygon.
 _BLOCK_CELLS = 16
+_STRIP_CELLS = 64
 # Bands bound the rasterized window (cells) so a continent-sized polygon stays in memory.
 MAX_BAND_CELLS = 16_000_000
 
@@ -132,37 +133,68 @@ def _boundary_areas(
     rows: np.ndarray,
     cols: np.ndarray,
 ) -> np.ndarray:
-    """Exact polygon area inside each listed cell, clipping the polygon per small block."""
+    """Exact polygon area inside each listed cell.
+
+    The polygon is narrowed hierarchically (row strip, then block) so each
+    rectangle clip only sees the vertices near its cells.
+    """
 
     areas = np.zeros(len(rows), dtype=np.float64)
     if not len(rows):
         return areas
-    block_ids = (rows // _BLOCK_CELLS).astype(np.int64) * 1_000_003 + (cols // _BLOCK_CELLS)
-    order = np.argsort(block_ids, kind="stable")
-    sorted_ids = block_ids[order]
-    boundaries = np.flatnonzero(np.diff(sorted_ids)) + 1
-    for group in np.split(order, boundaries):
-        areas[group] = _block_areas(polygon, transform, rows[group], cols[group])
+    for strip in _groups(rows // _STRIP_CELLS):
+        strip_polygon = _clip_to_cells(polygon, transform, rows[strip], cols[strip])
+        if strip_polygon.is_empty:
+            continue
+        strip_blocks = (cols[strip] // _BLOCK_CELLS).astype(np.int64)
+        for block in _groups(strip_blocks):
+            members = strip[block]
+            block_polygon = _clip_to_cells(strip_polygon, transform, rows[members], cols[members])
+            if not block_polygon.is_empty:
+                areas[members] = _cell_areas(block_polygon, transform, rows[members], cols[members])
     return areas
 
 
-def _block_areas(
+def _groups(keys: np.ndarray) -> list[np.ndarray]:
+    """Return index groups of equal keys."""
+
+    order = np.argsort(keys, kind="stable")
+    return np.split(order, np.flatnonzero(np.diff(keys[order])) + 1)
+
+
+def _clip_to_cells(
+    polygon: BaseGeometry,
+    transform: Affine,
+    rows: np.ndarray,
+    cols: np.ndarray,
+) -> BaseGeometry:
+    bounds = shapely.bounds(_cell_boxes(transform, rows, cols))
+    return shapely.clip_by_rect(
+        polygon,
+        float(bounds[:, 0].min()),
+        float(bounds[:, 1].min()),
+        float(bounds[:, 2].max()),
+        float(bounds[:, 3].max()),
+    )
+
+
+def _cell_areas(
     polygon: BaseGeometry,
     transform: Affine,
     rows: np.ndarray,
     cols: np.ndarray,
 ) -> np.ndarray:
+    """Polygon area per cell: whole cells by predicate, crossing cells by rectangle clip."""
+
     boxes = _cell_boxes(transform, rows, cols)
-    x_min, y_min, x_max, y_max = (
-        float(shapely.bounds(boxes)[:, 0].min()),
-        float(shapely.bounds(boxes)[:, 1].min()),
-        float(shapely.bounds(boxes)[:, 2].max()),
-        float(shapely.bounds(boxes)[:, 3].max()),
-    )
-    clipped = shapely.clip_by_rect(polygon, x_min, y_min, x_max, y_max)
-    if clipped.is_empty:
-        return np.zeros(len(rows), dtype=np.float64)
-    return np.asarray(shapely.area(shapely.intersection(clipped, boxes)), dtype=np.float64)
+    bounds = shapely.bounds(boxes)
+    shapely.prepare(polygon)
+    inside = shapely.contains(polygon, boxes)
+    areas = np.where(inside, shapely.area(boxes), 0.0)
+    for index in np.flatnonzero(shapely.intersects(polygon, boxes) & ~inside):
+        x_min, y_min, x_max, y_max = bounds[index]
+        areas[index] = shapely.area(shapely.clip_by_rect(polygon, x_min, y_min, x_max, y_max))
+    return np.asarray(areas, dtype=np.float64)
 
 
 def _cell_boxes(transform: Affine, rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
