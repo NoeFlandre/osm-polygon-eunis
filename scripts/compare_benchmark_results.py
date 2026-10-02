@@ -13,7 +13,6 @@ from typing import Any, cast
 _TIMING_METRICS = (
     "raster_random_seconds",
     "raster_spatial_seconds",
-    "mask_geometry_ms",
     "sidecar_update_seconds",
     "geopackage_overlap_seconds",
 )

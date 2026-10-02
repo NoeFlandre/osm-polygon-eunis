@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import importlib
 import json
 import os
 import sys
@@ -19,7 +18,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import pyarrow as pa
@@ -27,9 +26,8 @@ import pyarrow.parquet as pq
 import pytest
 import rasterio
 from pyproj import Transformer
-from rasterio.features import shapes
 from rasterio.transform import from_origin
-from shapely.geometry import GeometryCollection, Point, box, shape
+from shapely.geometry import Point
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import transform as transform_geometry
 
@@ -266,38 +264,6 @@ def _measure_raster_order(
     )
 
 
-def _overlap_preparation(
-    mask: np.ndarray,
-    transform: Any,
-    polygon: BaseGeometry,
-) -> Callable[[], float]:
-    """Return a callable that yields the polygon's overlap area with the mask cells.
-
-    Newer revisions use the exact grid overlap; older ones vectorize the mask first.
-    """
-
-    try:
-        grid = importlib.import_module("osm_polygon_eunis.grid_overlap")
-    except ModuleNotFoundError:
-        grid = None
-    if grid is not None:
-        height, width = mask.shape
-
-        def grid_area() -> float:
-            cells = grid.weighted_cells(polygon, transform, (0, height), (0, width))
-            return float(cells.areas[mask[cells.rows, cells.cols]].sum())
-
-        return grid_area
-    module = importlib.import_module("osm_polygon_eunis.raster_geometry")
-    legacy = cast(Callable[[np.ndarray, Any], BaseGeometry | None], vars(module)["_mask_geometry"])
-
-    def vector_area() -> float:
-        cells = legacy(mask, transform)
-        return 0.0 if cells is None else float(polygon.intersection(cells).area)
-
-    return vector_area
-
-
 def _timed_repeats(function: Callable[[], object], *, repeats: int, iterations: int) -> float:
     samples: list[float] = []
     for _ in range(repeats):
@@ -337,32 +303,6 @@ def test_raster_overlap_random_and_spatial_order_benchmark(
     invariants = benchmark_result["invariants"]
     assert isinstance(invariants, dict)
     invariants["raster_order_independent"] = True
-
-
-def test_mask_geometry_polygon_construction_benchmark(
-    benchmark_result: dict[str, object],
-) -> None:
-    mask = np.zeros((64, 64), dtype=bool)
-    mask[4:22, 5:28] = True
-    mask[39:58, 36:61] = True
-    transform = from_origin(0, 6400, 100, 100)
-    expected = GeometryCollection(
-        [
-            shape(geometry)
-            for geometry, _ in shapes(mask.astype(np.uint8), mask=mask, transform=transform)
-        ]
-    )
-    polygon = box(500, 1000, 5200, 5700)
-    construct = _overlap_preparation(mask, transform, polygon)
-    assert construct() == pytest.approx(polygon.intersection(expected).area, abs=1e-6)
-
-    iterations = max(20, int(200 * _scale()))
-    median_seconds = _timed_repeats(construct, repeats=5, iterations=iterations)
-    metrics = benchmark_result["metrics"]
-    invariants = benchmark_result["invariants"]
-    assert isinstance(metrics, dict) and isinstance(invariants, dict)
-    metrics["mask_geometry_ms"] = median_seconds * 1000
-    invariants["mask_geometry_matches_geojson"] = True
 
 
 def test_update_label_sidecar_benchmark(

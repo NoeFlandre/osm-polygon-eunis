@@ -140,18 +140,22 @@ def _boundary_areas(
     """
 
     areas = np.zeros(len(rows), dtype=np.float64)
-    if not len(rows):
-        return areas
     for strip in _groups(rows // _STRIP_CELLS):
-        strip_polygon = _clip_to_cells(polygon, transform, rows[strip], cols[strip])
-        if strip_polygon.is_empty:
-            continue
-        strip_blocks = (cols[strip] // _BLOCK_CELLS).astype(np.int64)
-        for block in _groups(strip_blocks):
-            members = strip[block]
-            block_polygon = _clip_to_cells(strip_polygon, transform, rows[members], cols[members])
-            if not block_polygon.is_empty:
-                areas[members] = _cell_areas(block_polygon, transform, rows[members], cols[members])
+        areas[strip] = _strip_areas(polygon, transform, rows[strip], cols[strip])
+    return areas
+
+
+def _strip_areas(
+    polygon: BaseGeometry,
+    transform: Affine,
+    rows: np.ndarray,
+    cols: np.ndarray,
+) -> np.ndarray:
+    areas = np.zeros(len(rows), dtype=np.float64)
+    strip_polygon = _clip_to_cells(polygon, transform, rows, cols)
+    for block in _groups(cols // _BLOCK_CELLS):
+        block_polygon = _clip_to_cells(strip_polygon, transform, rows[block], cols[block])
+        areas[block] = _cell_areas(block_polygon, transform, rows[block], cols[block])
     return areas
 
 
@@ -188,6 +192,8 @@ def _cell_areas(
 
     boxes = _cell_boxes(transform, rows, cols)
     bounds = shapely.bounds(boxes)
+    if polygon.is_empty:
+        return np.zeros(len(rows), dtype=np.float64)
     shapely.prepare(polygon)
     inside = shapely.contains(polygon, boxes)
     areas = np.where(inside, shapely.area(boxes), 0.0)
