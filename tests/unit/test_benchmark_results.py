@@ -16,7 +16,6 @@ def _results(value: float) -> dict[str, Any]:
         "metrics": {
             "raster_random_seconds": value,
             "raster_spatial_seconds": value,
-            "mask_geometry_ms": value,
             "sidecar_update_seconds": value,
             "geopackage_overlap_seconds": value,
             "raster_random_cache_miss_rate": 0.1,
@@ -27,7 +26,6 @@ def _results(value: float) -> dict[str, Any]:
         },
         "invariants": {
             "raster_order_independent": True,
-            "mask_geometry_matches_geojson": True,
             "sidecar_rows_match_input": True,
             "sidecar_sha256": "a" * 64,
             "geopackage_result_count": 1000,
@@ -156,8 +154,8 @@ def test_compare_results_reports_slowdowns_and_failed_output_invariants() -> Non
 
 def test_compare_results_rejects_incomplete_measurements() -> None:
     candidate = _results(10.0)
-    candidate["metrics"].pop("mask_geometry_ms")  # type: ignore[union-attr]
+    candidate["metrics"].pop("geopackage_overlap_seconds")  # type: ignore[union-attr]
 
     errors = compare_results(_results(10.0), candidate)
 
-    assert errors == ["candidate has no positive measurement for mask_geometry_ms"]
+    assert errors == ["candidate has no positive measurement for geopackage_overlap_seconds"]

@@ -29,21 +29,28 @@ def choose_winner(
     *,
     source_version: str | None,
     on_error: Callable[[], None] = _ignore_error,
+    extra_areas: Iterable[tuple[float, str, str]] = (),
 ) -> EunisResult:
     """Select the candidate with the largest actual intersection area.
 
     ``on_error`` is called once per candidate dropped because the exact GEOS
     intersection raised; the selected result is the same either way.
+    ``extra_areas`` are precomputed ``(area, code, name)`` overlaps that compete
+    with the candidates under the same ordering.
     """
 
     if not _usable_polygon(polygon):
         return _empty_result()
 
-    overlaps = _positive_overlaps(polygon, candidates, on_error)
+    overlaps = [
+        (area, candidate.code, candidate.name)
+        for area, candidate in _positive_overlaps(polygon, candidates, on_error)
+    ]
+    overlaps.extend(extra_areas)
     if not overlaps:
         return _empty_result()
-    area, winner = min(overlaps, key=lambda item: (-item[0], item[1].code))
-    return EunisResult(winner.code, winner.name, _percentage(area, polygon.area), source_version)
+    area, code, name = min(overlaps, key=lambda item: (-item[0], item[1]))
+    return EunisResult(code, name, _percentage(area, polygon.area), source_version)
 
 
 def _usable_polygon(polygon: BaseGeometry | None) -> TypeGuard[BaseGeometry]:

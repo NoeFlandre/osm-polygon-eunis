@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import copy
 import html
 import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from shapely.geometry.base import BaseGeometry
 
@@ -190,6 +192,50 @@ class DatasetCardAccumulator:
         """Overlap candidates dropped because the exact GEOS intersection raised."""
 
         return self._intersection_errors
+
+    def spawn(self) -> DatasetCardAccumulator:
+        """Return an empty accumulator sharing this one's settings and source card."""
+
+        child = copy.copy(self)
+        child._counts, child._names, child._bins = {}, {}, {}
+        child._total_rows = child._invalid_geometries = child._intersection_errors = 0
+        return child
+
+    def merge(self, other: DatasetCardAccumulator) -> None:
+        """Add another accumulator's observations (from the same dataset) to this one."""
+
+        for code, name in other._names.items():
+            if self._names.setdefault(code, name) != name:
+                raise ValueError(f"dataset card has conflicting names for {code}")
+        for code, count in other._counts.items():
+            self._counts[code] = self._counts.get(code, 0) + count
+        for key, count in other._bins.items():
+            self._bins[key] = self._bins.get(key, 0) + count
+        self._total_rows += other._total_rows
+        self._invalid_geometries += other._invalid_geometries
+        self._intersection_errors += other._intersection_errors
+
+    def snapshot(self) -> dict[str, Any]:
+        """Return JSON-serializable observations for a resumable release."""
+
+        return {
+            "counts": [[code, count] for code, count in self._counts.items()],
+            "names": [[code, name] for code, name in self._names.items()],
+            "bins": [[code, x, y, count] for (code, x, y), count in self._bins.items()],
+            "total_rows": self._total_rows,
+            "invalid_geometries": self._invalid_geometries,
+            "intersection_errors": self._intersection_errors,
+        }
+
+    def restore(self, state: Mapping[str, Any]) -> None:
+        """Replace the observations with a previous :meth:`snapshot`."""
+
+        self._counts = dict(state["counts"])
+        self._names = dict(state["names"])
+        self._bins = {(code, x, y): count for code, x, y, count in state["bins"]}
+        self._total_rows = int(state["total_rows"])
+        self._invalid_geometries = int(state["invalid_geometries"])
+        self._intersection_errors = int(state["intersection_errors"])
 
     def record_intersection_errors(self, count: int) -> None:
         """Add intersection errors carried in a label sidecar."""

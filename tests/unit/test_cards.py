@@ -326,3 +326,32 @@ def test_card_manifest_records_intersection_errors(tmp_path: Path) -> None:
     )
     assert artifacts.manifest["intersection_errors"] == 5
     assert artifacts.manifest["invalid_geometries"] == 0
+
+
+def test_card_accumulator_snapshot_restore_and_merge_round_trip() -> None:
+    first = DatasetCardAccumulator()
+    first.observe(EunisResult("R11", "steppe", 80.0, "v"), '{"type":"Point","coordinates":[1,1]}')
+    second = first.spawn()
+    second.observe(EunisResult("R11", "steppe", 60.0, "v"), '{"type":"Point","coordinates":[1,1]}')
+    second.observe(EunisResult(None, None, None, None), None)
+    second.record_intersection_errors(2)
+
+    first.merge(second)
+    restored = DatasetCardAccumulator()
+    restored.restore(json.loads(json.dumps(first.snapshot())))
+
+    assert second.total_rows == 2
+    assert first.total_rows == restored.total_rows == 3
+    assert restored.intersection_errors == 2
+    assert restored.summaries() == first.summaries()
+    assert restored.snapshot() == first.snapshot()
+
+
+def test_card_accumulator_merge_rejects_conflicting_names() -> None:
+    first = DatasetCardAccumulator()
+    first.observe(EunisResult("R11", "steppe", 80.0, "v"), None)
+    other = first.spawn()
+    other.observe(EunisResult("R11", "other", 80.0, "v"), None)
+
+    with pytest.raises(ValueError, match="conflicting names"):
+        first.merge(other)

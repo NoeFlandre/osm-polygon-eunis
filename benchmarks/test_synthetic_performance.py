@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import importlib
 import json
 import os
 import sys
@@ -19,7 +18,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import pyarrow as pa
@@ -27,9 +26,8 @@ import pyarrow.parquet as pq
 import pytest
 import rasterio
 from pyproj import Transformer
-from rasterio.features import shapes
 from rasterio.transform import from_origin
-from shapely.geometry import GeometryCollection, Point, shape
+from shapely.geometry import Point
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import transform as transform_geometry
 
@@ -266,15 +264,6 @@ def _measure_raster_order(
     )
 
 
-def _mask_geometry_function() -> Callable[[np.ndarray, Any], BaseGeometry | None]:
-    try:
-        module = importlib.import_module("osm_polygon_eunis.raster_geometry")
-    except ModuleNotFoundError:
-        module = importlib.import_module("osm_polygon_eunis.reference")
-    attribute_name = "_mask_geometry"
-    return cast(Callable[[np.ndarray, Any], BaseGeometry | None], getattr(module, attribute_name))
-
-
 def _timed_repeats(function: Callable[[], object], *, repeats: int, iterations: int) -> float:
     samples: list[float] = []
     for _ in range(repeats):
@@ -314,35 +303,6 @@ def test_raster_overlap_random_and_spatial_order_benchmark(
     invariants = benchmark_result["invariants"]
     assert isinstance(invariants, dict)
     invariants["raster_order_independent"] = True
-
-
-def test_mask_geometry_polygon_construction_benchmark(
-    benchmark_result: dict[str, object],
-) -> None:
-    mask = np.zeros((64, 64), dtype=bool)
-    mask[4:22, 5:28] = True
-    mask[39:58, 36:61] = True
-    transform = from_origin(0, 6400, 100, 100)
-    construct = _mask_geometry_function()
-    expected_parts = [
-        shape(geometry)
-        for geometry, _ in shapes(mask.astype(np.uint8), mask=mask, transform=transform)
-    ]
-    expected = GeometryCollection(expected_parts)
-    actual = construct(mask, transform)
-    assert actual is not None and actual.equals(expected)
-
-    iterations = max(20, int(200 * _scale()))
-    median_seconds = _timed_repeats(
-        lambda: construct(mask, transform),
-        repeats=5,
-        iterations=iterations,
-    )
-    metrics = benchmark_result["metrics"]
-    invariants = benchmark_result["invariants"]
-    assert isinstance(metrics, dict) and isinstance(invariants, dict)
-    metrics["mask_geometry_ms"] = median_seconds * 1000
-    invariants["mask_geometry_matches_geojson"] = True
 
 
 def test_update_label_sidecar_benchmark(

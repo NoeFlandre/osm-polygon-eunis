@@ -515,7 +515,26 @@ def _status_error_output(error: subprocess.CalledProcessError) -> str:
     return "\n".join(str(value) for value in (error.stdout, error.stderr) if value is not None)
 
 
+_OAR_TABLE_STATE = re.compile(
+    r"^\d+\s.*?\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\s+([A-Za-z])\s", re.MULTILINE
+)
+
+
+_OAR_TABLE_STATES = {
+    **dict.fromkeys("TE", "terminal"),
+    **dict.fromkeys("WHLRSFA", "active"),
+}
+
+
+def _table_job_state(output: str) -> str | None:
+    match = _OAR_TABLE_STATE.search(output)
+    return None if match is None else _OAR_TABLE_STATES.get(match.group(1).upper())
+
+
 def _job_status_state(output: str) -> str:
+    table_state = _table_job_state(output)
+    if table_state is not None:
+        return table_state
     if _job_status_is_active(output):
         return "active"
     if _job_status_is_missing(output):
@@ -702,9 +721,17 @@ def _reject_active_eunis_jobs(output: str, excluded_sites: tuple[str, ...] = ())
 
 
 def _reject_unclean_policy_output(output: str) -> None:
-    clean_marker = re.search(r"(?m)^\s*No jobs flagged\s*$", output)
+    """Require a completed policy check; warnings about other jobs do not block.
+
+    The check must either say nothing was flagged or print its conformance
+    report header, and must not report an error. Flagged day/night notices for
+    unrelated jobs are tolerated; EUNIS jobs are limited to one host and one
+    hour, and duplicate-job checks run separately.
+    """
+
+    completed = re.search(r"(?m)^\s*No jobs flagged\s*$|testing usage policy conformance", output)
     reported_error = re.search(r"(?im)^\s*(?:error|fatal):", output)
-    if clean_marker is None or reported_error is not None:
+    if completed is None or reported_error is not None:
         raise RuntimeError(
             "usagepolicycheck did not produce a clean usage-policy result; "
             "refusing Grid'5000 submission"

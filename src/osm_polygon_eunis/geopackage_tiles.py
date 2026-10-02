@@ -11,19 +11,18 @@ from typing import cast
 
 import numpy as np
 from rasterio.errors import NotGeoreferencedWarning
-from rasterio.features import shapes
 from rasterio.io import MemoryFile
 from rasterio.transform import from_origin
-from shapely.geometry import box, shape
+from shapely.geometry import box
 from shapely.geometry.base import BaseGeometry
 
 from .domain import SchemaError
 from .geopackage_sql import _sql_identifier
-from .reference_geometry import _geometry_collection, _merge_tile_cells
+from .grid_overlap import WeightedCells, band_row_ranges, weighted_cells
 
 EPSG_LAEA_EUROPE = 3035
 
-_GEOPACKAGE_TILE_CACHE_SIZE = 256
+_GEOPACKAGE_TILE_CACHE_SIZE = 4096
 _ALPHA_BAND = 4
 _TILE_METADATA_FIELDS = 13
 
@@ -89,7 +88,7 @@ class _GeoPackageTileMethods:
     _labels: dict[str, str]
     _threshold: int
     _tile_layers: tuple[_TileLayer, ...]
-    _tile_cache: OrderedDict[tuple[str, int, int], BaseGeometry | None]
+    _tile_cache: OrderedDict[tuple[str, int, int], np.ndarray | None]
 
     def _discover_tile_layers(self, connection: sqlite3.Connection) -> tuple[_TileLayer, ...]:
         rows = self._tile_rows(connection)
@@ -165,52 +164,104 @@ class _GeoPackageTileMethods:
         _validate_tile_types(table, numeric, dimensions)
         _validate_tile_dimensions(table, pixel_x_size, pixel_y_size, matrix_width, matrix_height)
 
-    def _positive_tile_geometry(
+    def _tile_layer_area(
         self,
         connection: sqlite3.Connection,
         layer: _TileLayer,
         polygon: BaseGeometry,
-    ) -> BaseGeometry | None:
-        extent = box(layer.min_x, layer.min_y, layer.max_x, layer.max_y)
-        if not polygon.intersects(extent):
-            return None
-        cells: list[BaseGeometry] = []
-        for tile_column, tile_row, blob in self._candidate_tile_rows(connection, layer, polygon):
-            tile_geometry = self._cached_tile(
-                layer,
-                tile_column,
-                tile_row,
-                blob,
-            )
-            if tile_geometry is not None:
-                cells.append(tile_geometry)
-        return _merge_tile_cells(cells)
+        bands: dict[tuple[object, ...], list[WeightedCells]],
+    ) -> float:
+        """Return the exact polygon area covered by positive pixels of one tile layer.
 
-    def _cached_tile(
+        ``bands`` memoizes the polygon's weighted cells per grid, so layers that
+        share a tile matrix rasterize the polygon only once.
+        """
+
+        if not polygon.intersects(box(layer.min_x, layer.min_y, layer.max_x, layer.max_y)):
+            return 0.0
+        pixel_x, pixel_y = layer.pixel_x_size, layer.pixel_y_size
+        min_x, min_y, max_x, max_y = polygon.bounds
+        cols = (
+            max(0, math.floor((min_x - layer.min_x) / pixel_x)),
+            min(layer.matrix_width * layer.tile_width, math.ceil((max_x - layer.min_x) / pixel_x)),
+        )
+        rows = (
+            max(0, math.floor((layer.max_y - max_y) / pixel_y)),
+            min(
+                layer.matrix_height * layer.tile_height, math.ceil((layer.max_y - min_y) / pixel_y)
+            ),
+        )
+        grid = (layer.min_x, layer.max_y, pixel_x, pixel_y, cols, rows)
+        if grid not in bands:
+            transform = from_origin(layer.min_x, layer.max_y, pixel_x, pixel_y)
+            bands[grid] = [
+                weighted_cells(polygon, transform, band, cols)
+                for band in band_row_ranges(rows[0], rows[1], cols[0], cols[1])
+            ]
+        return sum(self._valid_cell_area(connection, layer, cells) for cells in bands[grid])
+
+    def _valid_cell_area(
         self,
+        connection: sqlite3.Connection,
+        layer: _TileLayer,
+        cells: WeightedCells,
+    ) -> float:
+        if not len(cells.rows):
+            return 0.0
+        tile_columns = cells.cols // layer.tile_width
+        tile_rows = cells.rows // layer.tile_height
+        tile_ids = tile_rows * 1_000_003 + tile_columns
+        order = np.argsort(tile_ids, kind="stable")
+        cuts = np.flatnonzero(np.diff(tile_ids[order])) + 1
+        total = 0.0
+        for group in np.split(order, cuts):
+            column, row = int(tile_columns[group[0]]), int(tile_rows[group[0]])
+            valid = self._tile_mask(connection, layer, column, row)
+            if valid is not None:
+                local_rows = cells.rows[group] % layer.tile_height
+                local_cols = cells.cols[group] % layer.tile_width
+                total += float(cells.areas[group][valid[local_rows, local_cols]].sum())
+        return total
+
+    def _tile_mask(
+        self,
+        connection: sqlite3.Connection,
         layer: _TileLayer,
         tile_column: int,
         tile_row: int,
-        blob: bytes | memoryview,
-    ) -> BaseGeometry | None:
+    ) -> np.ndarray | None:
         key = (layer.table, tile_column, tile_row)
         if key in self._tile_cache:
-            tile_geometry = self._tile_cache[key]
             self._tile_cache.move_to_end(key)
-            return tile_geometry
-        tile_geometry = self._decode_tile(layer, tile_column, tile_row, blob)
-        self._tile_cache[key] = tile_geometry
+            return self._tile_cache[key]
+        blob = self._tile_blob(connection, layer, tile_column, tile_row)
+        valid = None if blob is None else self._decode_tile(blob)
+        self._tile_cache[key] = valid
         if len(self._tile_cache) > _GEOPACKAGE_TILE_CACHE_SIZE:
             self._tile_cache.popitem(last=False)
-        return tile_geometry
+        return valid
 
-    def _decode_tile(
-        self,
+    @staticmethod
+    def _tile_blob(
+        connection: sqlite3.Connection,
         layer: _TileLayer,
         tile_column: int,
         tile_row: int,
-        blob: bytes | memoryview,
-    ) -> BaseGeometry | None:
+    ) -> bytes | memoryview | None:
+        table = _sql_identifier(layer.table)
+        row = connection.execute(
+            # Identifier escaped by _sql_identifier; all values are bound parameters.
+            f"SELECT tile_data FROM {table} "  # noqa: S608
+            "WHERE zoom_level = ? AND tile_column = ? AND tile_row = ?",
+            (layer.zoom_level, tile_column, tile_row),
+        ).fetchone()
+        if row is None:
+            return None
+        if not isinstance(row[0], (bytes, memoryview)):
+            raise SchemaError(f"GeoPackage tile {layer.table} has no binary tile data")
+        return row[0]
+
+    def _decode_tile(self, blob: bytes | memoryview) -> np.ndarray | None:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", NotGeoreferencedWarning)
             with MemoryFile(bytes(blob)) as memory, memory.open() as dataset:
@@ -219,52 +270,4 @@ class _GeoPackageTileMethods:
                 valid = (~np.ma.getmaskarray(data)) & (values > self._threshold)
                 if dataset.count >= _ALPHA_BAND:
                     valid &= dataset.read(_ALPHA_BAND) > 0
-                if not valid.any():
-                    return None
-                origin_x = layer.min_x + tile_column * layer.tile_width * layer.pixel_x_size
-                origin_y = layer.max_y - tile_row * layer.tile_height * layer.pixel_y_size
-                transform = from_origin(
-                    origin_x,
-                    origin_y,
-                    layer.pixel_x_size,
-                    layer.pixel_y_size,
-                )
-                cells = [
-                    shape(geometry)
-                    for geometry, _ in shapes(
-                        valid.astype("uint8"),
-                        mask=valid,
-                        transform=transform,
-                    )
-                ]
-        return _geometry_collection(cells)
-
-    @staticmethod
-    def _candidate_tile_rows(
-        connection: sqlite3.Connection,
-        layer: _TileLayer,
-        polygon: BaseGeometry,
-    ) -> list[tuple[int, int, bytes | memoryview]]:
-        tile_span_x = layer.tile_width * layer.pixel_x_size
-        tile_span_y = layer.tile_height * layer.pixel_y_size
-        min_x, min_y, max_x, max_y = polygon.bounds
-        min_column = max(0, math.floor((min_x - layer.min_x) / tile_span_x))
-        max_column = min(layer.matrix_width - 1, math.floor((max_x - layer.min_x) / tile_span_x))
-        min_row = max(0, math.floor((layer.max_y - max_y) / tile_span_y))
-        max_row = min(layer.matrix_height - 1, math.floor((layer.max_y - min_y) / tile_span_y))
-        if min_column > max_column or min_row > max_row:
-            return []
-        table = _sql_identifier(layer.table)
-        rows = connection.execute(
-            # Identifier escaped by _sql_identifier; all values are bound parameters.
-            f"SELECT tile_column, tile_row, tile_data FROM {table} "  # noqa: S608
-            "WHERE zoom_level = ? AND tile_column BETWEEN ? AND ? "
-            "AND tile_row BETWEEN ? AND ?",
-            (layer.zoom_level, min_column, max_column, min_row, max_row),
-        ).fetchall()
-        typed_rows: list[tuple[int, int, bytes | memoryview]] = []
-        for tile_column, tile_row, blob in rows:
-            if not isinstance(blob, (bytes, memoryview)):
-                raise SchemaError(f"GeoPackage tile {layer.table} has no binary tile data")
-            typed_rows.append((int(tile_column), int(tile_row), blob))
-        return typed_rows
+        return valid if valid.any() else None

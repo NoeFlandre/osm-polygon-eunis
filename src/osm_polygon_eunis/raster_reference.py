@@ -12,33 +12,33 @@ from pathlib import Path
 
 import numpy as np
 import rasterio
+import shapely
 from rasterio.windows import Window, WindowError, from_bounds
 from shapely.geometry import box
 from shapely.geometry.base import BaseGeometry
 
-from .domain import EunisResult, OverlapCandidate
+from .domain import EunisResult
 from .geometry import is_usable
+from .grid_overlap import (
+    TILE_SIZE,
+    WeightedCells,
+    band_row_ranges,
+    is_square_north_up,
+    stack_bytes,
+    tile_window,
+    weighted_cells,
+)
 from .matching import choose_winner
 from .raster_geometry import EPSG_LAEA_EUROPE as _EPSG_LAEA_EUROPE
 from .raster_geometry import (
     _is_epsg_3035,
-    _mask_geometry,
-    _raster_tile_indices,
-    _raster_tile_window,
-    _tile_geometry_cache_size,
-)
-from .raster_geometry import (
-    wgs84_envelope as _raster_wgs84_envelope,
-)
-from .reference_geometry import (
-    _has_disjoint_components,
-    _merge_tile_cells,
+    wgs84_envelope,
 )
 
 logger = logging.getLogger(__name__)
 
 _LAYER_CODE = re.compile(r"^Prob_(?P<code>[A-Z][A-Z0-9.]+)_\d+m\.tif$")
-_DEFAULT_RASTER_TILE_CACHE_BYTES = 512 * 1024 * 1024
+_DEFAULT_RASTER_TILE_CACHE_BYTES = 1536 * 1024 * 1024
 EPSG_LAEA_EUROPE = _EPSG_LAEA_EUROPE
 
 
@@ -96,12 +96,14 @@ class RasterReference:
         self.intersection_errors = 0
         self._stack: ExitStack | None = None
         self._datasets: tuple[tuple[RasterLayer, rasterio.DatasetReader], ...] = ()
-        self._tile_cache: OrderedDict[tuple[str, int, int], BaseGeometry | None] = OrderedDict()
-        self._tile_cache_sizes: dict[tuple[str, int, int], int] = {}
         self._tile_cache_bytes = 0
         self._tile_cache_hits = 0
         self._tile_cache_misses = 0
         self._source_extent_wgs84: tuple[float, float, float, float] | None = None
+        self._stack_cache: OrderedDict[tuple[int, int], np.ndarray | None] = OrderedDict()
+        self._tile_cache_bytes = 0
+        self._grid_order: tuple[int, ...] | None = None
+        self._grid_checked = False
 
     @property
     def tile_cache_hits(self) -> int:
@@ -169,9 +171,10 @@ class RasterReference:
             self._stack.close()
             self._stack = None
             self._datasets = ()
-            self._tile_cache.clear()
-            self._tile_cache_sizes.clear()
+            self._stack_cache.clear()
             self._tile_cache_bytes = 0
+            self._grid_order = None
+            self._grid_checked = False
 
     def _count_intersection_error(self) -> None:
         self.intersection_errors += 1
@@ -208,45 +211,105 @@ class RasterReference:
         polygon: BaseGeometry,
         datasets: tuple[tuple[RasterLayer, rasterio.DatasetReader], ...],
     ) -> EunisResult:
-        candidates: list[OverlapCandidate] = []
-        # Every EEA layer in a group shares one grid, so the covering window and
-        # the raster-bounds test depend on the grid, not the layer. Resolving
-        # them once per grid keeps identical windows while avoiding tens of
-        # repeated coordinate computations for each polygon.
-        windows: dict[tuple[object, ...], Window | None] = {}
-        for layer, dataset in datasets:
-            window = self._shared_window(windows, dataset, polygon)
-            if window is None:
-                continue
-            cell_geometry = _merge_tile_cells(self._raster_tile_cells(layer, dataset, window))
-            if cell_geometry is not None:
-                candidates.append(
-                    OverlapCandidate(
-                        layer.code,
-                        layer.name,
-                        cell_geometry,
-                        components_are_disjoint=_has_disjoint_components(cell_geometry),
-                    )
-                )
-        return choose_winner(
-            polygon,
-            candidates,
-            source_version=self._source_version,
-            on_error=self._count_intersection_error,
-        )
+        order = self._shared_grid_order(datasets)
+        if order is None:
+            raise ValueError(
+                "raster reference layers must share one square-cell grid and unique codes"
+            )
+        try:
+            return self._overlap_grid(polygon, datasets, order)
+        except (ValueError, RuntimeError, shapely.errors.GEOSException) as error:
+            logger.warning("skipping EUNIS polygon after grid overlap error: %s", error)
+            self._count_intersection_error()
+            return EunisResult(None, None, None, None)
 
-    def _shared_window(
+    def _shared_grid_order(
         self,
-        windows: dict[tuple[object, ...], Window | None],
-        dataset: rasterio.DatasetReader,
+        datasets: tuple[tuple[RasterLayer, rasterio.DatasetReader], ...],
+    ) -> tuple[int, ...] | None:
+        """Return layer indices sorted by code when every layer shares one grid."""
+
+        if not self._grid_checked:
+            self._grid_order = _code_order_on_shared_grid(datasets) if datasets else None
+            self._grid_checked = True
+        return self._grid_order
+
+    def _overlap_grid(
+        self,
         polygon: BaseGeometry,
-    ) -> Window | None:
-        key = (tuple(dataset.transform)[:6], dataset.width, dataset.height)
-        if key in windows:
-            return windows[key]
-        window = self._covering_window(dataset, polygon)
-        windows[key] = window
-        return window
+        datasets: tuple[tuple[RasterLayer, rasterio.DatasetReader], ...],
+        order: tuple[int, ...],
+    ) -> EunisResult:
+        first = datasets[0][1]
+        window = self._covering_window(first, polygon)
+        polygon_area = float(polygon.area)
+        if window is None or not polygon_area > 0.0:
+            return EunisResult(None, None, None, None)
+        rows = (int(window.row_off), int(window.row_off + window.height))
+        cols = (int(window.col_off), int(window.col_off + window.width))
+        areas = np.zeros(len(datasets), dtype=np.float64)
+        for band in band_row_ranges(rows[0], rows[1], cols[0], cols[1]):
+            cells = weighted_cells(polygon, first.transform, band, cols)
+            self._accumulate_cells(areas, cells, datasets)
+        ordered = areas[list(order)]
+        best = int(np.argmax(ordered))
+        if not ordered[best] > 0.0:
+            return EunisResult(None, None, None, None)
+        layer = datasets[order[best]][0]
+        percentage = max(0.0, min(100.0, 100.0 * float(ordered[best]) / polygon_area))
+        return EunisResult(layer.code, layer.name, percentage, self._source_version)
+
+    def _accumulate_cells(
+        self,
+        areas: np.ndarray,
+        cells: WeightedCells,
+        datasets: tuple[tuple[RasterLayer, rasterio.DatasetReader], ...],
+    ) -> None:
+        if not len(cells.rows):
+            return
+        tile_rows = cells.rows // TILE_SIZE
+        tile_cols = cells.cols // TILE_SIZE
+        tile_ids = tile_rows * 1_000_003 + tile_cols
+        order = np.argsort(tile_ids, kind="stable")
+        cuts = np.flatnonzero(np.diff(tile_ids[order])) + 1
+        for group in np.split(order, cuts):
+            stack = self._tile_stack(datasets, int(tile_rows[group[0]]), int(tile_cols[group[0]]))
+            if stack is None:
+                continue
+            local_rows = cells.rows[group] % TILE_SIZE
+            local_cols = cells.cols[group] % TILE_SIZE
+            areas += stack[:, local_rows, local_cols].astype(np.float64) @ cells.areas[group]
+
+    def _tile_stack(
+        self,
+        datasets: tuple[tuple[RasterLayer, rasterio.DatasetReader], ...],
+        row: int,
+        column: int,
+    ) -> np.ndarray | None:
+        key = (row, column)
+        if key in self._stack_cache:
+            self._stack_cache.move_to_end(key)
+            self._tile_cache_hits += 1
+            return self._stack_cache[key]
+        self._tile_cache_misses += 1
+        stack = np.zeros((len(datasets), TILE_SIZE, TILE_SIZE), dtype=bool)
+        for index, (_, dataset) in enumerate(datasets):
+            valid = self._positive_mask(dataset, tile_window(dataset, row, column))
+            if valid is not None:
+                stack[index, : valid.shape[0], : valid.shape[1]] = valid
+        result = stack if stack.any() else None
+        self._remember_stack(key, result)
+        return result
+
+    def _remember_stack(self, key: tuple[int, int], stack: np.ndarray | None) -> None:
+        size = stack_bytes(stack)
+        if size > self._tile_cache_byte_budget:
+            return
+        while self._tile_cache_bytes + size > self._tile_cache_byte_budget:
+            evicted = self._stack_cache.pop(next(iter(self._stack_cache)))
+            self._tile_cache_bytes -= stack_bytes(evicted)
+        self._stack_cache[key] = stack
+        self._tile_cache_bytes += size
 
     def _covering_window(
         self,
@@ -266,60 +329,6 @@ class RasterReference:
             valid = False
         if not valid:
             raise ValueError(f"reference raster {path} is not EPSG:3035")
-
-    def _raster_tile_cells(
-        self,
-        layer: RasterLayer,
-        dataset: rasterio.DatasetReader,
-        window: Window,
-    ) -> list[BaseGeometry]:
-        return [
-            geometry
-            for row in _raster_tile_indices(window.row_off, window.height)
-            for column in _raster_tile_indices(window.col_off, window.width)
-            if (geometry := self._cached_tile_geometry(layer, dataset, row, column)) is not None
-        ]
-
-    def _cached_tile_geometry(
-        self,
-        layer: RasterLayer,
-        dataset: rasterio.DatasetReader,
-        row: int,
-        column: int,
-    ) -> BaseGeometry | None:
-        key = (layer.code, row, column)
-        if key in self._tile_cache:
-            geometry = self._tile_cache[key]
-            self._tile_cache.move_to_end(key)
-            self._tile_cache_hits += 1
-            return geometry
-        self._tile_cache_misses += 1
-        window = _raster_tile_window(dataset, row, column)
-        valid = self._positive_mask(dataset, window)
-        geometry = (
-            None if valid is None else _mask_geometry(valid, dataset.window_transform(window))
-        )
-        self._cache_tile_geometry(key, geometry)
-        return geometry
-
-    def _cache_tile_geometry(
-        self,
-        key: tuple[str, int, int],
-        geometry: BaseGeometry | None,
-    ) -> None:
-        estimated_size = _tile_geometry_cache_size(geometry)
-        if estimated_size > self._tile_cache_byte_budget:
-            return
-        while self._tile_cache_bytes + estimated_size > self._tile_cache_byte_budget:
-            oldest = next(iter(self._tile_cache))
-            self._evict_tile_geometry(oldest)
-        self._tile_cache[key] = geometry
-        self._tile_cache_sizes[key] = estimated_size
-        self._tile_cache_bytes += estimated_size
-
-    def _evict_tile_geometry(self, key: tuple[str, int, int]) -> None:
-        self._tile_cache.pop(key)
-        self._tile_cache_bytes -= self._tile_cache_sizes.pop(key)
 
     @staticmethod
     def _window(
@@ -353,20 +362,20 @@ class RasterReference:
         return valid if valid.any() else None
 
 
-def wgs84_envelope(
-    bounds: tuple[float, float, float, float],
-    source_crs: str = "EPSG:3035",
-    pad: float = 1.0,
-) -> tuple[float, float, float, float]:
-    """Return a conservative WGS84 envelope for a projected extent.
+def _shares_square_grid(
+    datasets: tuple[tuple[RasterLayer, rasterio.DatasetReader], ...],
+) -> bool:
+    grids = {(tuple(d.transform)[:6], d.width, d.height) for _, d in datasets}
+    return len(grids) == 1 and is_square_north_up(datasets[0][1].transform)
 
-    ``transform_bounds`` densifies the edges, so the box covers the curved
-    projected boundary rather than only its corners, and the pad keeps it a
-    strict superset. It prunes polygons that cannot reach a reference at all;
-    every surviving polygon is still projected and intersected exactly.
-    """
 
-    return _raster_wgs84_envelope(bounds, source_crs=source_crs, pad=pad)
+def _code_order_on_shared_grid(
+    datasets: tuple[tuple[RasterLayer, rasterio.DatasetReader], ...],
+) -> tuple[int, ...] | None:
+    codes = [layer.code for layer, _ in datasets]
+    if len(set(codes)) != len(codes) or not _shares_square_grid(datasets):
+        return None
+    return tuple(sorted(range(len(datasets)), key=codes.__getitem__))
 
 
 def _wgs84_dataset_extent(

@@ -306,3 +306,24 @@ def test_value_error_intersection_is_counted_and_no_error_is_not(monkeypatch) ->
     )
     assert result == EunisResult(None, None, None, None)
     assert errors == [None]
+
+
+def test_choose_winner_ranks_precomputed_areas_with_candidates() -> None:
+    polygon = box(0, 0, 10, 10)
+    candidate = OverlapCandidate("B1", "b", box(0, 0, 5, 10))
+
+    result = choose_winner(
+        polygon,
+        [candidate],
+        source_version="v",
+        extra_areas=[(80.0, "A1", "a"), (50.0, "A0", "z")],
+    )
+
+    assert (result.code, result.name, result.overlap_percentage) == ("A1", "a", 80.0)
+    tie = choose_winner(
+        polygon,
+        [candidate],
+        source_version="v",
+        extra_areas=[(50.0, "A0", "z")],
+    )
+    assert tie.code == "A0"

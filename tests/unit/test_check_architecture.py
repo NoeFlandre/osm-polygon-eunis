@@ -8,7 +8,6 @@ def test_reference_reader_split_is_declared_in_architecture_layers() -> None:
     layers = architecture["LAYERS"]
     positions = {layer: index for index, layer in enumerate(layers)}
     required = {
-        "reference_geometry",
         "geopackage_sql",
         "geopackage_tiles",
         "raster_reference",
@@ -17,7 +16,6 @@ def test_reference_reader_split_is_declared_in_architecture_layers() -> None:
         "reference_staging",
     }
     dependencies = (
-        ("reference_geometry", "geopackage_tiles"),
         ("geopackage_sql", "geopackage_tiles"),
         ("matching", "raster_reference"),
         ("geopackage_tiles", "geopackage_reference"),

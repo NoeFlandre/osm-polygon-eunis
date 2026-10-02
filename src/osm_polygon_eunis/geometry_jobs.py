@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import sys
+import time
 from collections.abc import Iterator, Mapping
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
@@ -429,6 +432,7 @@ def _process_geometry_job(
 ) -> None:
     dataset, source_path = job
     chunk = worker.chunk
+    started = time.monotonic()
     _process_geometry_path(
         worker.api,
         worker.plans[dataset],
@@ -445,6 +449,7 @@ def _process_geometry_job(
     )
     reset_sidecars.discard(job)
     completed.add(start_index)
+    _log_geometry_timing(job, start_index, references, time.monotonic() - started)
     sidecar = _sidecar_path(chunk.sidecar_root, worker.plans[dataset].spec, source_path)
     signature = _geometry_checkpoint_signature(
         chunk.reference_signature,
@@ -452,6 +457,30 @@ def _process_geometry_job(
         source_path,
     )
     _record_completed_batch(sidecar, signature, completed)
+
+
+def _log_geometry_timing(
+    job: tuple[str, str],
+    reference_batch: int,
+    references: tuple[OverlapReference, ...],
+    seconds: float,
+) -> None:
+    """Emit one JSON line per processed shard and reference batch for run analysis."""
+
+    hits = sum(int(getattr(reference, "tile_cache_hits", 0)) for reference in references)
+    misses = sum(int(getattr(reference, "tile_cache_misses", 0)) for reference in references)
+    record = {
+        "event": "geometry_batch_done",
+        "dataset": job[0],
+        "path": job[1],
+        "reference_batch": reference_batch,
+        "seconds": round(seconds, 3),
+        "pid": os.getpid(),
+        "tile_cache_hits": hits,
+        "tile_cache_misses": misses,
+    }
+    sys.stderr.write(json.dumps(record, sort_keys=True) + "\n")
+    sys.stderr.flush()
 
 
 def _reference_signature(

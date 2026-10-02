@@ -8,7 +8,7 @@ import os
 import re
 import shutil
 import subprocess
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from importlib.metadata import version
 from pathlib import Path
@@ -16,7 +16,7 @@ from tempfile import TemporaryDirectory
 from typing import Any
 
 import pyarrow.parquet as pq
-from huggingface_hub import duplicate_repo
+from huggingface_hub import CommitOperationAdd, duplicate_repo
 from huggingface_hub.utils import RepositoryNotFoundError
 
 from ._protocols import HubApi, StreamClient
@@ -133,6 +133,42 @@ def upload_replacement(
         revision="main",
         parent_commit=parent_commit,
         commit_message=commit_message or f"Add EUNIS labels to {path}",
+    )
+
+
+def upload_replacements(
+    api: HubApi,
+    target_repo: str,
+    files: Sequence[tuple[str, Path]],
+    *,
+    parent_commit: str | None = None,
+    commit_message: str | None = None,
+) -> Any:
+    """Upload several replacement shards as one Hub commit (one is a plain upload).
+
+    The Hub caps repository commits per hour, so shards are grouped.
+    """
+
+    if len(files) == 1:
+        path, local_path = files[0]
+        return upload_replacement(
+            api,
+            target_repo,
+            path,
+            local_path,
+            parent_commit=parent_commit,
+            commit_message=commit_message,
+        )
+    return api.create_commit(
+        repo_id=target_repo,
+        repo_type="dataset",
+        revision="main",
+        operations=[
+            CommitOperationAdd(path_in_repo=path, path_or_fileobj=str(local_path))
+            for path, local_path in files
+        ],
+        parent_commit=parent_commit,
+        commit_message=commit_message or f"Add EUNIS labels to {len(files)} shards",
     )
 
 

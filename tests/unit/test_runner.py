@@ -225,13 +225,13 @@ def test_finalize_dataset_enriches_polygon_and_link_shards_and_cleans_staging(
 
     uploaded: list[tuple[str, Path]] = []
 
-    def fake_upload(api, repo_id, path, local_path, *, parent_commit=None):
+    def fake_upload(api, repo_id, files, *, parent_commit=None):
         del api, repo_id, parent_commit
-        uploaded.append((path, local_path))
-        return SimpleNamespace(oid=f"commit-{len(uploaded)}")
+        uploaded.extend(files)
+        return SimpleNamespace(oid="commit-1")
 
     monkeypatch.setattr(shard_processing, "download_to_temp", fake_download)
-    monkeypatch.setattr(shard_processing, "upload_replacement", fake_upload)
+    monkeypatch.setattr(shard_processing, "upload_replacements", fake_upload)
     plan = DatasetPlan(
         DatasetSpec(
             "wikidata", "source", "target", "polygons/*.parquet", "polygon_document_links/*.parquet"
@@ -275,7 +275,7 @@ def test_finalize_dataset_enriches_polygon_and_link_shards_and_cleans_staging(
         ),
     )
 
-    assert commit == "commit-2"
+    assert commit == "commit-1"
     assert [expectation.path for expectation in expectations] == [
         "polygons/region.parquet",
         "polygon_document_links/region.parquet",
@@ -287,8 +287,86 @@ def test_finalize_dataset_enriches_polygon_and_link_shards_and_cleans_staging(
     assert progress == [
         {"event": "shards_uploaded", "dataset": "wikidata", "path": "polygons/region.parquet"}
     ]
-    assert not sidecar.exists()
-    assert list((tmp_path / "final").iterdir()) == []
+    assert sidecar.exists()
+    assert [path.name for path in (tmp_path / "final").iterdir()] == ["wikidata.finalize.json"]
+
+
+def test_finalize_dataset_resumes_after_the_last_committed_group(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    sources = {}
+    for name in ("a", "b"):
+        sources[f"polygons/{name}.parquet"] = pa.table(
+            {"polygon_id": [name], "geometry": ['{"type":"Point","coordinates":[0,0]}']}
+        )
+
+    def fake_download(api, repo_id, path, revision, directory, *, client=None):
+        del api, repo_id, revision, client
+        destination = directory / path.replace("/", "__")
+        pq.write_table(sources[path], destination)
+        return destination
+
+    commits: list[list[str]] = []
+
+    def fake_upload(api, repo_id, files, *, parent_commit=None):
+        del api, repo_id, parent_commit
+        commits.append([path for path, _ in files])
+        if len(commits) == 2:
+            raise RuntimeError("interrupted")
+        return SimpleNamespace(oid=f"commit-{len(commits)}")
+
+    monkeypatch.setattr(shard_processing, "download_to_temp", fake_download)
+    monkeypatch.setattr(shard_processing, "upload_replacements", fake_upload)
+    monkeypatch.setattr(shard_processing, "_COMMIT_MAX_SHARDS", 1)
+    plan = DatasetPlan(
+        DatasetSpec("website", "source", "target", "polygons/*.parquet"),
+        "source-revision",
+        tuple(sources),
+        tuple(sources),
+        (),
+    )
+    for path in plan.geometry_paths:
+        sidecar = release_plan._sidecar_path(tmp_path / "sidecars", plan.spec, path)
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(
+            pa.table(
+                {
+                    "eunis_code": ["R11"],
+                    "eunis_name": ["steppe"],
+                    "eunis_overlap_percentage": [75.0],
+                    "eunis_source_version": ["EEA-test"],
+                }
+            ),
+            sidecar,
+        )
+
+    def run() -> tuple[DatasetCardAccumulator, tuple]:
+        card = DatasetCardAccumulator()
+        expectations, _ = shard_processing.finalize_dataset(
+            cast(HubApi, object()),
+            plan,
+            shard_processing.FinalizeOptions(
+                sidecar_root=tmp_path / "sidecars",
+                local_root=tmp_path / "final",
+                batch_size=10,
+                parent_commit="base",
+                progress=None,
+                card=card,
+                source_cache_root=None,
+                http_client=cast(StreamClient, object()),
+            ),
+        )
+        return card, expectations
+
+    with pytest.raises(RuntimeError, match="interrupted"):
+        run()
+    card, expectations = run()
+
+    assert commits == [["polygons/a.parquet"], ["polygons/b.parquet"], ["polygons/b.parquet"]]
+    assert [e.path for e in expectations] == ["polygons/a.parquet", "polygons/b.parquet"]
+    assert card.total_rows == 2
+    assert all(sidecar.exists() for sidecar in (tmp_path / "sidecars").rglob("*.parquet"))
 
 
 def test_planning_manifest_and_shared_blobs_are_deterministic(monkeypatch) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -11,7 +12,7 @@ from ._protocols import HubApi, StreamClient
 from .cards import DatasetCardAccumulator
 from .domain import EunisResult
 from .options import ShardContext
-from .publish import ShardExpectation, parquet_signature, upload_replacement
+from .publish import ShardExpectation, parquet_signature, upload_replacement, upload_replacements
 from .reference_staging import _http_client
 from .release_plan import DatasetPlan, Progress, _cached_geometry_path, _sidecar_path
 from .sources import capture_revision, download_to_temp
@@ -57,12 +58,36 @@ def _advance_commit(api: HubApi, target_repo: str, result: Any) -> str:
     return _commit_id(result) or capture_revision(api, target_repo)
 
 
+_COMMIT_MAX_SHARDS = 24
+_COMMIT_MAX_BYTES = 3 * 1024**3
+
+
+@dataclass(slots=True)
+class _PendingCommit:
+    """Enriched shards waiting for one grouped Hub commit."""
+
+    card: DatasetCardAccumulator
+    files: list[tuple[str, Path]]
+    expectations: list[ShardExpectation]
+    geometry_paths: list[str]
+    scratch: list[Path]
+    size: int = 0
+
+    def is_full(self) -> bool:
+        return len(self.geometry_paths) >= _COMMIT_MAX_SHARDS or self.size >= _COMMIT_MAX_BYTES
+
+
 def finalize_dataset(
     api: HubApi,
     plan: DatasetPlan,
     options: FinalizeOptions,
 ) -> tuple[tuple[ShardExpectation, ...], str]:
-    """Append labels, upload changed shards, and clean successful staging files."""
+    """Append labels and upload changed shards in grouped, resumable Hub commits.
+
+    Label sidecars are the resumable checkpoints and are kept. Each committed
+    group is recorded in a progress file, so an interrupted pass resumes after
+    the last committed group instead of repeating (or failing on) earlier shards.
+    """
 
     with _http_client(options.http_client) as reusable_client:
         return _finalize_dataset_with_client(
@@ -80,71 +105,155 @@ def _finalize_dataset_with_client(
     options: FinalizeOptions,
     http_client: StreamClient,
 ) -> tuple[tuple[ShardExpectation, ...], str]:
-    context = ShardContext(api, plan, options, http_client)
     options.local_root.mkdir(parents=True, exist_ok=True)
     link_by_filename = {Path(link_path).name: link_path for link_path in plan.link_paths}
-    expectations: list[ShardExpectation] = []
+    expectations, committed = _load_progress(options, plan)
     current_commit = options.parent_commit
+    pending = _new_pending(options.card)
     for geometry_path in plan.geometry_paths:
-        shard_expectations, current_commit = _finalize_shard(
-            replace(context, options=replace(options, parent_commit=current_commit)),
-            geometry_path,
-            link_by_filename.get(Path(geometry_path).name),
-        )
-        expectations.extend(shard_expectations)
-        if options.progress is not None:
-            options.progress(
-                {"event": "shards_uploaded", "dataset": plan.spec.name, "path": geometry_path}
+        if geometry_path in committed:
+            _report_uploaded(options, plan, geometry_path)
+            continue
+        context = ShardContext(api, plan, replace(options, card=pending.card), http_client)
+        link_path = link_by_filename.get(Path(geometry_path).name)
+        _prepare_shard(context, pending, geometry_path, link_path)
+        if pending.is_full():
+            current_commit = _commit_pending(
+                api, plan, options, pending, expectations, current_commit
             )
+            pending = _new_pending(options.card)
+    current_commit = _commit_remaining(api, plan, options, pending, expectations, current_commit)
     return tuple(expectations), current_commit
 
 
-def _finalize_shard(
+def _commit_remaining(
+    api: HubApi,
+    plan: DatasetPlan,
+    options: FinalizeOptions,
+    pending: _PendingCommit,
+    expectations: list[ShardExpectation],
+    current_commit: str,
+) -> str:
+    if not pending.geometry_paths:
+        return current_commit
+    return _commit_pending(api, plan, options, pending, expectations, current_commit)
+
+
+def _new_pending(card: DatasetCardAccumulator) -> _PendingCommit:
+    return _PendingCommit(card.spawn(), [], [], [], [])
+
+
+def _prepare_shard(
     context: ShardContext[HubApi, DatasetPlan, FinalizeOptions, StreamClient],
+    pending: _PendingCommit,
     geometry_path: str,
     link_path: str | None,
-) -> tuple[tuple[ShardExpectation, ...], str]:
-    api = context.api
-    plan = context.plan
+) -> None:
     options = context.options
-    http_client = context.http_client
     local_source, reused_source = _final_source(
-        api,
-        plan,
+        context.api,
+        context.plan,
         geometry_path,
         source_cache_root=options.source_cache_root,
         local_root=options.local_root,
-        http_client=http_client,
+        http_client=context.http_client,
     )
     sidecar, local_output, geometry_expectation = _enrich_geometry_shard(
         context,
         geometry_path,
         local_source,
     )
-    link_output = _build_link_output(
-        context,
-        link_path,
-        local_source,
-        sidecar,
-    )
-    current_commit = _upload_shard_outputs(
+    link_output = _build_link_output(context, link_path, local_source, sidecar)
+    pending.files.append((geometry_path, local_output))
+    pending.expectations.append(geometry_expectation)
+    pending.geometry_paths.append(geometry_path)
+    pending.size += local_output.stat().st_size
+    pending.scratch.append(local_output)
+    if link_output is not None:
+        pending.files.append((link_output.path, link_output.output))
+        pending.expectations.append(link_output.expectation)
+        pending.size += link_output.output.stat().st_size
+        pending.scratch.extend((link_output.output, link_output.source))
+    if not reused_source:
+        pending.scratch.append(local_source)
+
+
+def _commit_pending(
+    api: HubApi,
+    plan: DatasetPlan,
+    options: FinalizeOptions,
+    pending: _PendingCommit,
+    expectations: list[ShardExpectation],
+    parent_commit: str,
+) -> str:
+    result = upload_replacements(
         api,
-        plan,
-        geometry_path,
-        local_output,
-        link_output,
-        options.parent_commit,
+        plan.spec.output_repo,
+        pending.files,
+        parent_commit=parent_commit,
     )
-    _cleanup_shard(
-        local_source,
-        local_output,
-        sidecar,
-        link_output,
-        delete_source=not reused_source,
-    )
-    if link_output is None:
-        return (geometry_expectation,), current_commit
-    return (geometry_expectation, link_output.expectation), current_commit
+    current_commit = _advance_commit(api, plan.spec.output_repo, result)
+    options.card.merge(pending.card)
+    expectations.extend(pending.expectations)
+    _save_progress(options, plan, expectations)
+    for path in pending.scratch:
+        path.unlink(missing_ok=True)
+    for geometry_path in pending.geometry_paths:
+        _report_uploaded(options, plan, geometry_path)
+    return current_commit
+
+
+def _report_uploaded(options: FinalizeOptions, plan: DatasetPlan, geometry_path: str) -> None:
+    if options.progress is not None:
+        options.progress(
+            {"event": "shards_uploaded", "dataset": plan.spec.name, "path": geometry_path}
+        )
+
+
+def _progress_path(options: FinalizeOptions, plan: DatasetPlan) -> Path:
+    return options.local_root / f"{plan.spec.name}.finalize.json"
+
+
+def _save_progress(
+    options: FinalizeOptions,
+    plan: DatasetPlan,
+    expectations: list[ShardExpectation],
+) -> None:
+    payload = {
+        "source_revision": plan.source_revision,
+        "expectations": [[e.path, e.rows, e.schema] for e in expectations],
+        "card": options.card.snapshot(),
+    }
+    path = _progress_path(options, plan)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _progress_payload(options: FinalizeOptions, plan: DatasetPlan) -> dict[str, Any] | None:
+    path = _progress_path(options, plan)
+    if not path.is_file():
+        return None
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return payload if payload.get("source_revision") == plan.source_revision else None
+
+
+def _load_progress(
+    options: FinalizeOptions,
+    plan: DatasetPlan,
+) -> tuple[list[ShardExpectation], set[str]]:
+    payload = _progress_payload(options, plan)
+    if payload is None:
+        return [], set()
+    options.card.restore(payload["card"])
+    expectations = [ShardExpectation(*entry) for entry in payload["expectations"]]
+    return expectations, {e.path for e in expectations}
+
+
+def clear_finalize_progress(options: FinalizeOptions, plan: DatasetPlan) -> None:
+    """Forget resumable upload progress once the dataset is published and verified."""
+
+    _progress_path(options, plan).unlink(missing_ok=True)
 
 
 def _enrich_geometry_shard(
@@ -199,32 +308,6 @@ def _final_source(
             client=http_client,
         ),
         False,
-    )
-
-
-def _upload_shard_outputs(
-    api: HubApi,
-    plan: DatasetPlan,
-    geometry_path: str,
-    local_output: Path,
-    link_output: _LinkOutput | None,
-    parent_commit: str,
-) -> str:
-    current_commit = _upload_file(
-        api,
-        plan.spec.output_repo,
-        geometry_path,
-        local_output,
-        parent_commit,
-    )
-    if link_output is None:
-        return current_commit
-    return _upload_file(
-        api,
-        plan.spec.output_repo,
-        link_output.path,
-        link_output.output,
-        current_commit,
     )
 
 
@@ -291,23 +374,6 @@ def _upload_file(
             commit_message=commit_message,
         )
     return _advance_commit(api, target_repo, result)
-
-
-def _cleanup_shard(
-    local_source: Path,
-    local_output: Path,
-    sidecar: Path,
-    link_output: _LinkOutput | None,
-    *,
-    delete_source: bool = True,
-) -> None:
-    if delete_source:
-        local_source.unlink(missing_ok=True)
-    local_output.unlink(missing_ok=True)
-    sidecar.unlink(missing_ok=True)
-    if link_output is not None:
-        link_output.source.unlink(missing_ok=True)
-        link_output.output.unlink(missing_ok=True)
 
 
 def _schema_signature(path: Path) -> str:
