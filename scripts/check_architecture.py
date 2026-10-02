@@ -24,6 +24,7 @@ LAYERS = (
     "reference_geometry",
     "raster_geometry",
     "geopackage_sql",
+    "grid_overlap",
     "geopackage_tiles",
     "geopackage_reference",
     "raster_reference",

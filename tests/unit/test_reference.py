@@ -249,10 +249,10 @@ def test_raster_reference_reuses_exact_tile_geometry(tmp_path: Path) -> None:
     with reference:
         first = reference.overlap(box(1, 11, 9, 19))
         second = reference.overlap(box(11, 11, 19, 19))
-        assert len(reference._tile_cache) == 1
+        assert len(reference._stack_cache) == 1
 
     assert first.code == second.code == "R11"
-    assert len(reference._tile_cache) == 0
+    assert len(reference._stack_cache) == 0
 
 
 def test_raster_tile_cache_byte_budget_preserves_sidecar_bytes_and_reports_misses(
@@ -291,16 +291,34 @@ def test_raster_tile_cache_byte_budget_preserves_sidecar_bytes_and_reports_misse
     assert references[1].tile_cache_miss_rate == 1.0
 
 
-def test_raster_tile_cache_evicts_oldest_geometry_at_its_byte_budget() -> None:
-    geometry = box(0, 0, 1, 1)
-    byte_budget = raster_geometry_module._tile_geometry_cache_size(geometry)
-    reference = RasterReference((), tile_cache_bytes=byte_budget)
+def test_raster_tile_cache_evicts_oldest_tile_at_its_byte_budget(tmp_path: Path) -> None:
+    path = tmp_path / "Prob_R11_100m.tif"
+    values = np.ones((4, 256), dtype="uint8")
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        width=256,
+        height=4,
+        count=1,
+        dtype="uint8",
+        crs="EPSG:3035",
+        transform=from_origin(0, 40, 10, 10),
+        nodata=0,
+    ) as dataset:
+        dataset.write(values, 1)
+    tile_bytes = 128 * 128 + 256
+    reference = RasterReference(
+        (RasterLayer("R11", "steppe", path, "EEA-test"),), tile_cache_bytes=tile_bytes
+    )
 
-    reference._cache_tile_geometry(("R11", 0, 0), geometry)
-    reference._cache_tile_geometry(("R11", 0, 1), geometry)
+    with reference:
+        datasets = reference._datasets
+        reference._tile_stack(datasets, 0, 0)
+        reference._tile_stack(datasets, 0, 1)
 
-    assert list(reference._tile_cache) == [("R11", 0, 1)]
-    assert reference.tile_cache_bytes == byte_budget
+        assert list(reference._stack_cache) == [(0, 1)]
+        assert reference.tile_cache_bytes == tile_bytes
 
 
 def test_raster_overlap_returns_no_result_for_invalid_and_outside_polygons(
@@ -705,6 +723,7 @@ def test_references_count_intersection_errors(tmp_path: Path, monkeypatch) -> No
     assert vector.intersection_errors == 0
 
     monkeypatch.setattr(matching, "_exact_intersection_area", broken)
+    monkeypatch.setattr(raster_module, "weighted_cells", broken)
     assert vector.overlap(box(1, 1, 9, 9)).code is None
     assert vector.overlap(box(1, 1, 9, 9)).code is None
     assert raster.overlap(box(1, 11, 19, 19)).code is None
