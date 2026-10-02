@@ -1,3 +1,6 @@
+from itertools import pairwise
+
+
 import pytest
 import shapely
 from rasterio.transform import from_origin
