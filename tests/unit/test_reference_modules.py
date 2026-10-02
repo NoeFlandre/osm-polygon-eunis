@@ -24,7 +24,6 @@ def test_reference_modules_stay_under_four_hundred_lines() -> None:
         "geopackage_reference.py",
         "geopackage_tiles.py",
         "geopackage_sql.py",
-        "reference_geometry.py",
     )
 
     for module_name in module_names:

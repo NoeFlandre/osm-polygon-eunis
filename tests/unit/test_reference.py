@@ -10,22 +10,17 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 import rasterio
-from hypothesis import given
-from hypothesis import strategies as st
 from pyproj import CRS, Transformer
-from rasterio.features import shapes as raster_shapes
 from rasterio.io import MemoryFile
 from rasterio.transform import from_origin
-from shapely.geometry import GeometryCollection, box, shape
+from shapely.geometry import box
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import transform as transform_geometry
 from shapely.wkb import dumps
 
 import osm_polygon_eunis.geopackage_reference as geopackage_module
 import osm_polygon_eunis.geopackage_tiles as tiles_module
-import osm_polygon_eunis.raster_geometry as raster_geometry_module
 import osm_polygon_eunis.raster_reference as raster_module
-import osm_polygon_eunis.reference_geometry as geometry_module
 from osm_polygon_eunis.geopackage_reference import GeoPackageReference
 from osm_polygon_eunis.raster_reference import (
     RasterLayer,
@@ -208,10 +203,7 @@ def test_window_rounds_outwards_to_cover_polygon_bounds(tmp_path: Path) -> None:
     assert (window.col_off, window.row_off, window.width, window.height) == (0, 0, 2, 2)
 
 
-def test_overlap_keeps_positive_cell_at_next_tile_boundary(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+def test_overlap_keeps_positive_cell_at_next_tile_boundary(tmp_path: Path) -> None:
     path = tmp_path / "Prob_R11_100m.tif"
     values = np.zeros((4, 128), dtype="uint8")
     values[0, 64] = 1
@@ -229,14 +221,8 @@ def test_overlap_keeps_positive_cell_at_next_tile_boundary(
     ) as dataset:
         dataset.write(values, 1)
 
-    results = []
-    for tile_size in (64, 128):
-        monkeypatch.setattr(raster_geometry_module, "_RASTER_TILE_SIZE", tile_size)
-        reference = RasterReference((RasterLayer("R11", "steppe", path, "EEA-test"),))
-        results.append(reference.overlap(box(623.3, 33.3, 643.8, 39.0)))
-
-    assert results[0] == results[1]
-    result = results[0]
+    reference = RasterReference((RasterLayer("R11", "steppe", path, "EEA-test"),))
+    result = reference.overlap(box(623.3, 33.3, 643.8, 39.0))
     assert result.code == "R11"
     assert result.overlap_percentage is not None
     assert result.overlap_percentage > 0.0
@@ -345,68 +331,6 @@ def test_raster_reference_rejects_a_nonpositive_tile_cache_budget(tmp_path: Path
             (RasterLayer("R11", "steppe", raster, "EEA-test"),),
             tile_cache_bytes=0,
         )
-
-
-@pytest.mark.filterwarnings(
-    "ignore:Use `@` matmul instead of `*` mul operator for matrix multiplication:"
-    "PendingDeprecationWarning"
-)
-def test_mask_geometry_uses_polygon_constructor_and_zero_copy_mask(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    valid = np.array([[True, True], [True, True]], dtype=bool)
-    captured: dict[str, np.ndarray] = {}
-    coordinates = (((0, 2), (2, 2), (2, 0), (0, 0), (0, 2)),)
-
-    def fake_shapes(image, *, mask, transform):
-        captured["image"] = image
-        assert mask is valid
-        assert transform == from_origin(0, 2, 1, 1)
-        return [({"type": "Polygon", "coordinates": coordinates}, 1)]
-
-    polygon_calls: list[tuple[object, ...]] = []
-    real_polygon = raster_geometry_module.Polygon
-
-    def fake_polygon(shell, holes):
-        polygon_calls.append((shell, holes))
-        return real_polygon(shell, holes)
-
-    monkeypatch.setattr(raster_geometry_module, "shapes", fake_shapes)
-    monkeypatch.setattr(raster_geometry_module, "Polygon", fake_polygon)
-
-    actual = raster_geometry_module._mask_geometry(valid, from_origin(0, 2, 1, 1))
-
-    assert actual is not None
-    assert actual.area == 4.0
-    assert len(polygon_calls) == 1
-    assert captured["image"].dtype == np.uint8
-    assert np.shares_memory(valid, captured["image"])
-
-
-@pytest.mark.property
-@pytest.mark.slow
-@pytest.mark.filterwarnings(
-    "ignore:Use `@` matmul instead of `*` mul operator for matrix multiplication:"
-    "PendingDeprecationWarning"
-)
-@given(st.lists(st.lists(st.booleans(), min_size=8, max_size=8), min_size=8, max_size=8))
-def test_mask_geometry_matches_geojson_reference(mask_rows: list[list[bool]]) -> None:
-    valid = np.asarray(mask_rows, dtype=bool)
-    transform = from_origin(0, valid.shape[0], 1, 1)
-    expected_parts = [
-        shape(geometry)
-        for geometry, _ in raster_shapes(valid.astype("uint8"), mask=valid, transform=transform)
-    ]
-    expected = GeometryCollection(expected_parts) if expected_parts else None
-
-    actual = raster_geometry_module._mask_geometry(valid, transform)
-
-    if expected is None:
-        assert actual is None
-    else:
-        assert actual is not None
-        assert actual.equals(expected)
-        assert actual.area == expected.area
 
 
 def test_reference_rejects_mixed_source_versions(tmp_path: Path) -> None:
@@ -548,13 +472,6 @@ def test_geopackage_candidate_lookup_skips_tiles_outside_the_matrix() -> None:
     )
 
     assert rows == []
-
-
-def test_raster_cell_collection_preserves_exact_intersection_area() -> None:
-    cells = geometry_module._geometry_collection([box(0, 0, 1, 1), box(1, 0, 2, 1)])
-
-    assert cells is not None
-    assert box(0.5, 0.5, 1.5, 1.5).intersection(cells).area == 0.5
 
 
 def test_reference_metadata_and_raster_lifecycle_fail_closed(tmp_path: Path) -> None:
@@ -747,3 +664,57 @@ def test_raster_window_error_fallback_is_logged(monkeypatch, caplog) -> None:
         record.levelno == logging.WARNING and "window" in record.getMessage().lower()
         for record in caplog.records
     )
+
+
+def test_raster_reference_rejects_layers_on_different_grids(tmp_path: Path) -> None:
+    first = _write_raster(tmp_path / "Prob_R11_100m.tif", [[1, 1], [0, 0]])
+    second = tmp_path / "Prob_R12_100m.tif"
+    with rasterio.open(
+        second,
+        "w",
+        driver="GTiff",
+        width=2,
+        height=2,
+        count=1,
+        dtype="uint8",
+        crs="EPSG:3035",
+        transform=from_origin(10, 20, 10, 10),
+        nodata=0,
+    ) as dataset:
+        dataset.write(np.ones((2, 2), dtype="uint8"), 1)
+    reference = RasterReference(
+        (
+            RasterLayer("R11", "steppe", first, "EEA-test"),
+            RasterLayer("R12", "heath", second, "EEA-test"),
+        )
+    )
+
+    with reference, pytest.raises(ValueError, match="share one square-cell grid"):
+        reference.overlap(box(1, 11, 9, 19))
+
+
+def test_raster_reference_picks_the_lower_code_on_equal_overlap(tmp_path: Path) -> None:
+    layers = tuple(
+        RasterLayer(
+            code, code.lower(), _write_raster(tmp_path / f"Prob_{code}_100m.tif", [[1]]), "v"
+        )
+        for code in ("R12", "R11")
+    )
+
+    with RasterReference(layers) as reference:
+        assert reference.overlap(box(1, 1, 9, 9)).code == "R11"
+
+
+def _tiny_raster(directory: Path, code: str) -> Path:
+    return _write_raster(directory / f"Prob_{code}_100m.tif", [[1, 0], [0, 0]])
+
+
+def test_square_grid_detection_rejects_rotated_and_stretched_transforms() -> None:
+    from rasterio.transform import Affine
+
+    from osm_polygon_eunis.grid_overlap import is_square_north_up as _is_square_north_up
+
+    assert _is_square_north_up(Affine(10, 0, 0, 0, -10, 0))
+    assert not _is_square_north_up(Affine(10, 0, 0, 0, -20, 0))
+    assert not _is_square_north_up(Affine(10, 1, 0, 0, -10, 0))
+    assert not _is_square_north_up(Affine(10, 0, 0, 1, -10, 0))

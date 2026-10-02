@@ -520,14 +520,21 @@ _OAR_TABLE_STATE = re.compile(
 )
 
 
+_OAR_TABLE_STATES = {
+    **dict.fromkeys("TE", "terminal"),
+    **dict.fromkeys("WHLRSFA", "active"),
+}
+
+
+def _table_job_state(output: str) -> str | None:
+    match = _OAR_TABLE_STATE.search(output)
+    return None if match is None else _OAR_TABLE_STATES.get(match.group(1).upper())
+
+
 def _job_status_state(output: str) -> str:
-    table_state = _OAR_TABLE_STATE.search(output)
+    table_state = _table_job_state(output)
     if table_state is not None:
-        letter = table_state.group(1).upper()
-        if letter in {"T", "E"}:
-            return "terminal"
-        if letter in {"W", "H", "L", "R", "S", "F", "A"}:
-            return "active"
+        return table_state
     if _job_status_is_active(output):
         return "active"
     if _job_status_is_missing(output):

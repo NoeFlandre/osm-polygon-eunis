@@ -835,3 +835,9 @@ def test_job_status_state_reads_oar_table_state_column(letter: str, state: str) 
     )
 
     assert grid5000._job_status_state(output) == state
+
+
+def test_job_status_state_ignores_unknown_table_state_letters() -> None:
+    output = "482097     osm-polygon-eu nflandre       2026-10-01 23:24:32 Z default\n"
+
+    assert grid5000._job_status_state(output) == "unknown"

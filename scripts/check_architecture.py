@@ -21,7 +21,6 @@ LAYERS = (
     "fileio",
     "geometry",
     "matching",
-    "reference_geometry",
     "raster_geometry",
     "geopackage_sql",
     "grid_overlap",

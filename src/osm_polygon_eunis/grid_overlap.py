@@ -14,10 +14,13 @@ from dataclasses import dataclass
 import numpy as np
 import shapely
 from rasterio.features import rasterize
+from rasterio.io import DatasetReader
 from rasterio.transform import Affine
+from rasterio.windows import Window
 from shapely.geometry.base import BaseGeometry
 
 TILE_SIZE = 128
+_CACHE_ENTRY_BYTES = 256
 # A boundary cell block is clipped once so the overlay never sees the whole polygon.
 _BLOCK_CELLS = 16
 # Bands bound the rasterized window (cells) so a continent-sized polygon stays in memory.
@@ -170,3 +173,25 @@ def _cell_boxes(transform: Affine, rows: np.ndarray, cols: np.ndarray) -> np.nda
     return shapely.box(
         np.minimum(x0, x1), np.minimum(y0, y1), np.maximum(x0, x1), np.maximum(y0, y1)
     )
+
+
+def stack_bytes(stack: np.ndarray | None) -> int:
+    """Estimate the memory a cached tile stack (or an empty marker) retains."""
+
+    return _CACHE_ENTRY_BYTES + (0 if stack is None else int(stack.nbytes))
+
+
+def tile_window(dataset: DatasetReader, row: int, column: int) -> Window:
+    """Return the raster window of one tile, clipped at the raster edge."""
+
+    row_start, col_start = row * TILE_SIZE, column * TILE_SIZE
+    return Window.from_slices(
+        (row_start, min(row_start + TILE_SIZE, dataset.height)),
+        (col_start, min(col_start + TILE_SIZE, dataset.width)),
+    )
+
+
+def is_square_north_up(transform: Affine) -> bool:
+    """Return whether cells are axis-aligned squares (north-up, no rotation)."""
+
+    return abs(transform.a) == abs(transform.e) and transform.b == 0 and transform.d == 0

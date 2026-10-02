@@ -19,7 +19,15 @@ from shapely.geometry.base import BaseGeometry
 
 from .domain import EunisResult
 from .geometry import is_usable
-from .grid_overlap import TILE_SIZE, WeightedCells, band_row_ranges, weighted_cells
+from .grid_overlap import (
+    TILE_SIZE,
+    WeightedCells,
+    band_row_ranges,
+    is_square_north_up,
+    stack_bytes,
+    tile_window,
+    weighted_cells,
+)
 from .matching import choose_winner
 from .raster_geometry import EPSG_LAEA_EUROPE as _EPSG_LAEA_EUROPE
 from .raster_geometry import (
@@ -31,7 +39,6 @@ logger = logging.getLogger(__name__)
 
 _LAYER_CODE = re.compile(r"^Prob_(?P<code>[A-Z][A-Z0-9.]+)_\d+m\.tif$")
 _DEFAULT_RASTER_TILE_CACHE_BYTES = 1536 * 1024 * 1024
-_CACHE_ENTRY_BYTES = 256
 EPSG_LAEA_EUROPE = _EPSG_LAEA_EUROPE
 
 
@@ -222,22 +229,10 @@ class RasterReference:
     ) -> tuple[int, ...] | None:
         """Return layer indices sorted by code when every layer shares one grid."""
 
-        if self._grid_checked:
-            return self._grid_order
-        order: tuple[int, ...] | None = None
-        if datasets:
-            keys = {
-                (tuple(dataset.transform)[:6], dataset.width, dataset.height)
-                for _, dataset in datasets
-            }
-            first = datasets[0][1].transform
-            square = abs(first.a) == abs(first.e) and first.b == 0 and first.d == 0
-            codes = [layer.code for layer, _ in datasets]
-            if len(keys) == 1 and square and len(set(codes)) == len(codes):
-                order = tuple(sorted(range(len(datasets)), key=codes.__getitem__))
-        self._grid_order = order
-        self._grid_checked = True
-        return order
+        if not self._grid_checked:
+            self._grid_order = _code_order_on_shared_grid(datasets) if datasets else None
+            self._grid_checked = True
+        return self._grid_order
 
     def _overlap_grid(
         self,
@@ -299,28 +294,22 @@ class RasterReference:
         self._tile_cache_misses += 1
         stack = np.zeros((len(datasets), TILE_SIZE, TILE_SIZE), dtype=bool)
         for index, (_, dataset) in enumerate(datasets):
-            row_start, col_start = row * TILE_SIZE, column * TILE_SIZE
-            window = Window.from_slices(
-                (row_start, min(row_start + TILE_SIZE, dataset.height)),
-                (col_start, min(col_start + TILE_SIZE, dataset.width)),
-            )
-            valid = self._positive_mask(dataset, window)
+            valid = self._positive_mask(dataset, tile_window(dataset, row, column))
             if valid is not None:
                 stack[index, : valid.shape[0], : valid.shape[1]] = valid
         result = stack if stack.any() else None
-        size = _CACHE_ENTRY_BYTES if result is None else int(result.nbytes) + _CACHE_ENTRY_BYTES
-        if size <= self._tile_cache_byte_budget:
-            while self._tile_cache_bytes + size > self._tile_cache_byte_budget:
-                oldest = next(iter(self._stack_cache))
-                evicted = self._stack_cache.pop(oldest)
-                self._tile_cache_bytes -= (
-                    _CACHE_ENTRY_BYTES
-                    if evicted is None
-                    else int(evicted.nbytes) + _CACHE_ENTRY_BYTES
-                )
-            self._stack_cache[key] = result
-            self._tile_cache_bytes += size
+        self._remember_stack(key, result)
         return result
+
+    def _remember_stack(self, key: tuple[int, int], stack: np.ndarray | None) -> None:
+        size = stack_bytes(stack)
+        if size > self._tile_cache_byte_budget:
+            return
+        while self._tile_cache_bytes + size > self._tile_cache_byte_budget:
+            evicted = self._stack_cache.pop(next(iter(self._stack_cache)))
+            self._tile_cache_bytes -= stack_bytes(evicted)
+        self._stack_cache[key] = stack
+        self._tile_cache_bytes += size
 
     def _covering_window(
         self,
@@ -371,6 +360,22 @@ class RasterReference:
         values = np.asarray(data)
         valid = (~np.ma.getmaskarray(data)) & (values > self._threshold)
         return valid if valid.any() else None
+
+
+def _shares_square_grid(
+    datasets: tuple[tuple[RasterLayer, rasterio.DatasetReader], ...],
+) -> bool:
+    grids = {(tuple(d.transform)[:6], d.width, d.height) for _, d in datasets}
+    return len(grids) == 1 and is_square_north_up(datasets[0][1].transform)
+
+
+def _code_order_on_shared_grid(
+    datasets: tuple[tuple[RasterLayer, rasterio.DatasetReader], ...],
+) -> tuple[int, ...] | None:
+    codes = [layer.code for layer, _ in datasets]
+    if len(set(codes)) != len(codes) or not _shares_square_grid(datasets):
+        return None
+    return tuple(sorted(range(len(datasets)), key=codes.__getitem__))
 
 
 def _wgs84_dataset_extent(
