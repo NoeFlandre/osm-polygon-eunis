@@ -1,15 +1,15 @@
 # Changelog
 
-Release notes for this project are maintained here. Version numbers are read
-from `pyproject.toml` and are not repeated in this file.
+This file contains the release notes for this project. The version numbers are in
+`pyproject.toml`. This file does not repeat them.
 
 ## Unreleased
 
-- Densify WGS84 polygon edges before projection and reject antimeridian-spanning
-  polygons.
-- Retain only areal geometry, recording invalid and collapsed inputs in the
+- Add points to the WGS84 polygon edges before projection. Reject polygons that
+  cross the antimeridian.
+- Keep only areal geometry. Record the invalid and collapsed inputs in the
   manifest.
-- Record the geometry policy in dataset cards and manifests.
-- Restore signature-checked Grid'5000 sidecar checkpoints and bound worker
-  reference caches.
-- Add a non-root Docker image and CI build check.
+- Record the geometry policy in the dataset cards and manifests.
+- Restore the Grid'5000 sidecar checkpoints that have a checked signature. Set
+  a limit on the worker reference caches.
+- Add a non-root Docker image and a CI build check.
