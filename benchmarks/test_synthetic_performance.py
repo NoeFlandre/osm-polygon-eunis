@@ -289,7 +289,7 @@ def _overlap_preparation(
 
         return grid_area
     module = importlib.import_module("osm_polygon_eunis.raster_geometry")
-    legacy = cast(Callable[[np.ndarray, Any], BaseGeometry | None], module._mask_geometry)
+    legacy = cast(Callable[[np.ndarray, Any], BaseGeometry | None], vars(module)["_mask_geometry"])
 
     def vector_area() -> float:
         cells = legacy(mask, transform)
