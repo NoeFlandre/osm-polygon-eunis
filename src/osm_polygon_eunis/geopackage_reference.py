@@ -19,6 +19,7 @@ from .domain import EunisResult, OverlapCandidate, SchemaError
 from .geometry import is_usable
 from .geopackage_sql import _sql_identifier
 from .geopackage_tiles import _GeoPackageTileMethods, _TileLayer
+from .grid_overlap import WeightedCells
 from .matching import choose_winner
 
 EPSG_LAEA_EUROPE = 3035
@@ -203,9 +204,10 @@ class GeoPackageReference(_GeoPackageTileMethods):
         polygon: BaseGeometry,
     ) -> list[tuple[float, str, str]]:
         areas: list[tuple[float, str, str]] = []
+        bands: dict[tuple[object, ...], list[WeightedCells]] = {}
         for layer in self._tile_layers:
             try:
-                area = self._tile_layer_area(connection, layer, polygon)
+                area = self._tile_layer_area(connection, layer, polygon, bands)
             except (ValueError, RuntimeError, shapely.errors.GEOSException) as error:
                 logger.warning("skipping EUNIS tile layer %s: %s", layer.table, error)
                 self._count_intersection_error()

@@ -449,7 +449,7 @@ def test_geopackage_tile_reference_uses_exact_positive_pixels(tmp_path: Path) ->
     assert result.overlap_percentage == 50.0
 
 
-def test_geopackage_candidate_lookup_skips_tiles_outside_the_matrix() -> None:
+def test_geopackage_tile_lookup_returns_nothing_for_a_missing_tile() -> None:
     layer = tiles_module._TileLayer(
         "R11",
         0.0,
@@ -465,13 +465,12 @@ def test_geopackage_candidate_lookup_skips_tiles_outside_the_matrix() -> None:
         0,
     )
 
-    rows = GeoPackageReference._candidate_tile_rows(
-        sqlite3.connect(":memory:"),
-        layer,
-        box(100, 100, 110, 110),
-    )
-
-    assert rows == []
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute(
+            "CREATE TABLE R11 (zoom_level INTEGER, tile_column INTEGER, "
+            "tile_row INTEGER, tile_data BLOB)"
+        )
+        assert GeoPackageReference._tile_blob(connection, layer, 5, 5) is None
 
 
 def test_reference_metadata_and_raster_lifecycle_fail_closed(tmp_path: Path) -> None:
@@ -593,7 +592,7 @@ def test_geopackage_tile_cache_and_metadata_guards(tmp_path: Path) -> None:
         )
         connection.execute("INSERT INTO R11 VALUES (0, 0, 0, 'not-binary')")
         with pytest.raises(ValueError, match="binary tile"):
-            GeoPackageReference._candidate_tile_rows(connection, layer, box(1, 1, 19, 19))
+            GeoPackageReference._tile_blob(connection, layer, 0, 0)
 
 
 def test_geopackage_tile_discovery_fails_closed_on_corrupt_database(tmp_path: Path) -> None:

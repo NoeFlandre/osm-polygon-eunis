@@ -22,7 +22,7 @@ from .grid_overlap import WeightedCells, band_row_ranges, weighted_cells
 
 EPSG_LAEA_EUROPE = 3035
 
-_GEOPACKAGE_TILE_CACHE_SIZE = 1024
+_GEOPACKAGE_TILE_CACHE_SIZE = 4096
 _ALPHA_BAND = 4
 _TILE_METADATA_FIELDS = 13
 
@@ -169,8 +169,13 @@ class _GeoPackageTileMethods:
         connection: sqlite3.Connection,
         layer: _TileLayer,
         polygon: BaseGeometry,
+        bands: dict[tuple[object, ...], list[WeightedCells]],
     ) -> float:
-        """Return the exact polygon area covered by positive pixels of one tile layer."""
+        """Return the exact polygon area covered by positive pixels of one tile layer.
+
+        ``bands`` memoizes the polygon's weighted cells per grid, so layers that
+        share a tile matrix rasterize the polygon only once.
+        """
 
         if not polygon.intersects(box(layer.min_x, layer.min_y, layer.max_x, layer.max_y)):
             return 0.0
@@ -186,22 +191,20 @@ class _GeoPackageTileMethods:
                 layer.matrix_height * layer.tile_height, math.ceil((layer.max_y - min_y) / pixel_y)
             ),
         )
-        blobs = {
-            (column, row): blob
-            for column, row, blob in self._candidate_tile_rows(connection, layer, polygon)
-        }
-        transform = from_origin(layer.min_x, layer.max_y, pixel_x, pixel_y)
-        total = 0.0
-        for band in band_row_ranges(rows[0], rows[1], cols[0], cols[1]):
-            cells = weighted_cells(polygon, transform, band, cols)
-            total += self._valid_cell_area(layer, cells, blobs)
-        return total
+        grid = (layer.min_x, layer.max_y, pixel_x, pixel_y, cols, rows)
+        if grid not in bands:
+            transform = from_origin(layer.min_x, layer.max_y, pixel_x, pixel_y)
+            bands[grid] = [
+                weighted_cells(polygon, transform, band, cols)
+                for band in band_row_ranges(rows[0], rows[1], cols[0], cols[1])
+            ]
+        return sum(self._valid_cell_area(connection, layer, cells) for cells in bands[grid])
 
     def _valid_cell_area(
         self,
+        connection: sqlite3.Connection,
         layer: _TileLayer,
         cells: WeightedCells,
-        blobs: dict[tuple[int, int], bytes | memoryview],
     ) -> float:
         if not len(cells.rows):
             return 0.0
@@ -213,30 +216,50 @@ class _GeoPackageTileMethods:
         total = 0.0
         for group in np.split(order, cuts):
             column, row = int(tile_columns[group[0]]), int(tile_rows[group[0]])
-            blob = blobs.get((column, row))
-            valid = None if blob is None else self._cached_tile(layer, column, row, blob)
+            valid = self._tile_mask(connection, layer, column, row)
             if valid is not None:
                 local_rows = cells.rows[group] % layer.tile_height
                 local_cols = cells.cols[group] % layer.tile_width
                 total += float(cells.areas[group][valid[local_rows, local_cols]].sum())
         return total
 
-    def _cached_tile(
+    def _tile_mask(
         self,
+        connection: sqlite3.Connection,
         layer: _TileLayer,
         tile_column: int,
         tile_row: int,
-        blob: bytes | memoryview,
     ) -> np.ndarray | None:
         key = (layer.table, tile_column, tile_row)
         if key in self._tile_cache:
             self._tile_cache.move_to_end(key)
             return self._tile_cache[key]
-        valid = self._decode_tile(blob)
+        blob = self._tile_blob(connection, layer, tile_column, tile_row)
+        valid = None if blob is None else self._decode_tile(blob)
         self._tile_cache[key] = valid
         if len(self._tile_cache) > _GEOPACKAGE_TILE_CACHE_SIZE:
             self._tile_cache.popitem(last=False)
         return valid
+
+    @staticmethod
+    def _tile_blob(
+        connection: sqlite3.Connection,
+        layer: _TileLayer,
+        tile_column: int,
+        tile_row: int,
+    ) -> bytes | memoryview | None:
+        table = _sql_identifier(layer.table)
+        row = connection.execute(
+            # Identifier escaped by _sql_identifier; all values are bound parameters.
+            f"SELECT tile_data FROM {table} "  # noqa: S608
+            "WHERE zoom_level = ? AND tile_column = ? AND tile_row = ?",
+            (layer.zoom_level, tile_column, tile_row),
+        ).fetchone()
+        if row is None:
+            return None
+        if not isinstance(row[0], (bytes, memoryview)):
+            raise SchemaError(f"GeoPackage tile {layer.table} has no binary tile data")
+        return row[0]
 
     def _decode_tile(self, blob: bytes | memoryview) -> np.ndarray | None:
         with warnings.catch_warnings():
@@ -248,33 +271,3 @@ class _GeoPackageTileMethods:
                 if dataset.count >= _ALPHA_BAND:
                     valid &= dataset.read(_ALPHA_BAND) > 0
         return valid if valid.any() else None
-
-    @staticmethod
-    def _candidate_tile_rows(
-        connection: sqlite3.Connection,
-        layer: _TileLayer,
-        polygon: BaseGeometry,
-    ) -> list[tuple[int, int, bytes | memoryview]]:
-        tile_span_x = layer.tile_width * layer.pixel_x_size
-        tile_span_y = layer.tile_height * layer.pixel_y_size
-        min_x, min_y, max_x, max_y = polygon.bounds
-        min_column = max(0, math.floor((min_x - layer.min_x) / tile_span_x))
-        max_column = min(layer.matrix_width - 1, math.floor((max_x - layer.min_x) / tile_span_x))
-        min_row = max(0, math.floor((layer.max_y - max_y) / tile_span_y))
-        max_row = min(layer.matrix_height - 1, math.floor((layer.max_y - min_y) / tile_span_y))
-        if min_column > max_column or min_row > max_row:
-            return []
-        table = _sql_identifier(layer.table)
-        rows = connection.execute(
-            # Identifier escaped by _sql_identifier; all values are bound parameters.
-            f"SELECT tile_column, tile_row, tile_data FROM {table} "  # noqa: S608
-            "WHERE zoom_level = ? AND tile_column BETWEEN ? AND ? "
-            "AND tile_row BETWEEN ? AND ?",
-            (layer.zoom_level, min_column, max_column, min_row, max_row),
-        ).fetchall()
-        typed_rows: list[tuple[int, int, bytes | memoryview]] = []
-        for tile_column, tile_row, blob in rows:
-            if not isinstance(blob, (bytes, memoryview)):
-                raise SchemaError(f"GeoPackage tile {layer.table} has no binary tile data")
-            typed_rows.append((int(tile_column), int(tile_row), blob))
-        return typed_rows
