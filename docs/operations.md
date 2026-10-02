@@ -77,8 +77,8 @@ The worker stores its data in these places:
 - Logs: under `logs`
 - Receipts: under `receipts`
 
-The source staging and the UV cache use node-local scratch. Nobody backs up this
-scratch. A resumed job recreates the source bytes and the UV cache.
+The source staging and the UV cache use node-local scratch. This scratch is
+not backed up. A resumed job recreates the source bytes and the UV cache.
 
 The worker caches the validated EEA assets at
 `GRID5000_PERSISTENT_ROOT/cache/reference`. Later short jobs can reuse them
