@@ -2,12 +2,15 @@
 
 ## Decision
 
-Duplicate each source dataset on the Hugging Face Hub, then replace only
-geometry-bearing Parquet shards one at a time. Downloaded input and output
-shards are temporary and are removed after schema and row-count verification.
+Duplicate each source dataset on the Hugging Face Hub. Then replace only the
+Parquet shards that contain geometry. Replace them one at a time. The downloaded
+input shards and output shards are temporary. Remove them after the schema and
+row-count verification.
 
 ## Consequences
 
-Unchanged files remain remote and local storage stays bounded. A manifest records
-the source commit, changed paths, reference assets, and verification receipts so
-an interrupted run can resume without reprocessing verified shards.
+The unchanged files stay remote. The local storage stays bounded.
+
+A manifest records the source commit, the changed paths, the reference assets,
+and the verification receipts. An interrupted run can resume with this manifest.
+It does not process the verified shards again.

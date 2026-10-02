@@ -1,26 +1,37 @@
 # Mutation testing
 
-The overlap selection and geometry kernels are mutation-tested in a separate
-GitHub Actions workflow. Mutmut targets `matching.py` and `geometry.py`, with
-their focused unit suites. The workflow runs on source and test changes, weekly,
-and on manual dispatch. Keeping it separate from deterministic QA prevents the
-slower mutation run from extending every unrelated Python matrix job.
+A separate GitHub Actions workflow runs mutation tests on the overlap selection
+kernel and the geometry kernel. Mutmut targets `matching.py` and `geometry.py`.
+It uses their focused unit suites.
 
-The first measured baseline was 91.935% (114 of 124 mutants killed). The CI
-gate keeps a 91.9% minimum and requires a complete inventory, no mutants without
-tests, and no skipped, suspicious, timed out, or interrupted mutants. Each
-survivor must have an exact entry and explanation in `scripts/check_mutation.py`.
-The current
-allowlisted comparison is equivalent because its caller handles unequal
-percentages before comparing the values.
+The workflow runs on source changes and test changes. It also runs every week
+and on manual dispatch. The workflow is separate from the deterministic QA. This
+prevents the slow mutation run from making every unrelated Python matrix job
+longer.
 
-The workflow saves the exported statistics and full mutmut result list as a
-14-day artifact, including when the gate fails. Seven equivalent survivors are
-documented in `scripts/check_mutation.py`: the tie comparison is guarded by the
-unequal-area check; valid polygons have positive area; `make_valid` preserves
-valid polygons and turns collapsed polygons into non-areal output; and pyproj
-resolves lowercase EPSG identifiers to the same CRS. Run the workflow locally
-with:
+The first measured baseline was 91.935% (114 of 124 mutants killed). The CI gate
+has these rules:
+
+- The minimum is 91.9%.
+- The inventory must be complete.
+- No mutant can be without tests.
+- No mutant can be skipped, suspicious, timed out, or interrupted.
+- Each survivor must have an exact entry and an explanation in
+  `scripts/check_mutation.py`.
+
+The workflow saves the exported statistics and the full mutmut result list as an
+artifact for 14 days. It saves them also when the gate fails.
+
+`scripts/check_mutation.py` documents seven equivalent survivors:
+
+- The tie comparison is guarded by the unequal-area check. The caller handles
+  unequal percentages before it compares the values.
+- Valid polygons have positive area.
+- `make_valid` keeps valid polygons the same. It changes collapsed polygons to
+  non-areal output.
+- pyproj resolves lowercase EPSG identifiers to the same CRS.
+
+To run the workflow locally, use these commands:
 
 ```bash
 uv run mutmut run --max-children 2
