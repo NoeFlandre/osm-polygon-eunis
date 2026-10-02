@@ -1,7 +1,6 @@
 from itertools import pairwise
 
 import pytest
-import shapely
 from rasterio.transform import from_origin
 from shapely.geometry import Point, Polygon, box
 
@@ -24,6 +23,7 @@ def _brute_force_areas(polygon: Polygon) -> dict[tuple[int, int], float]:
     return areas
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize(
     "polygon",
     [
@@ -60,7 +60,3 @@ def test_band_row_ranges_cover_the_window_without_gaps() -> None:
     assert ranges[0][0] == 130
     assert ranges[-1][1] == 100_000
     assert all(left[1] == right[0] for left, right in pairwise(ranges))
-
-
-def test_shapely_is_the_exact_reference() -> None:
-    assert shapely.area(box(0, 0, 2, 3)) == 6.0

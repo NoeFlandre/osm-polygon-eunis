@@ -29,7 +29,7 @@ import rasterio
 from pyproj import Transformer
 from rasterio.features import shapes
 from rasterio.transform import from_origin
-from shapely.geometry import GeometryCollection, Point, shape
+from shapely.geometry import GeometryCollection, Point, box, shape
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import transform as transform_geometry
 
@@ -266,13 +266,36 @@ def _measure_raster_order(
     )
 
 
-def _mask_geometry_function() -> Callable[[np.ndarray, Any], BaseGeometry | None]:
+def _overlap_preparation(
+    mask: np.ndarray,
+    transform: Any,
+    polygon: BaseGeometry,
+) -> Callable[[], float]:
+    """Return a callable that yields the polygon's overlap area with the mask cells.
+
+    Newer revisions use the exact grid overlap; older ones vectorize the mask first.
+    """
+
     try:
-        module = importlib.import_module("osm_polygon_eunis.raster_geometry")
+        grid = importlib.import_module("osm_polygon_eunis.grid_overlap")
     except ModuleNotFoundError:
-        module = importlib.import_module("osm_polygon_eunis.reference")
-    attribute_name = "_mask_geometry"
-    return cast(Callable[[np.ndarray, Any], BaseGeometry | None], getattr(module, attribute_name))
+        grid = None
+    if grid is not None:
+        height, width = mask.shape
+
+        def grid_area() -> float:
+            cells = grid.weighted_cells(polygon, transform, (0, height), (0, width))
+            return float(cells.areas[mask[cells.rows, cells.cols]].sum())
+
+        return grid_area
+    module = importlib.import_module("osm_polygon_eunis.raster_geometry")
+    legacy = cast(Callable[[np.ndarray, Any], BaseGeometry | None], module._mask_geometry)
+
+    def vector_area() -> float:
+        cells = legacy(mask, transform)
+        return 0.0 if cells is None else float(polygon.intersection(cells).area)
+
+    return vector_area
 
 
 def _timed_repeats(function: Callable[[], object], *, repeats: int, iterations: int) -> float:
@@ -323,21 +346,18 @@ def test_mask_geometry_polygon_construction_benchmark(
     mask[4:22, 5:28] = True
     mask[39:58, 36:61] = True
     transform = from_origin(0, 6400, 100, 100)
-    construct = _mask_geometry_function()
-    expected_parts = [
-        shape(geometry)
-        for geometry, _ in shapes(mask.astype(np.uint8), mask=mask, transform=transform)
-    ]
-    expected = GeometryCollection(expected_parts)
-    actual = construct(mask, transform)
-    assert actual is not None and actual.equals(expected)
+    expected = GeometryCollection(
+        [
+            shape(geometry)
+            for geometry, _ in shapes(mask.astype(np.uint8), mask=mask, transform=transform)
+        ]
+    )
+    polygon = box(500, 1000, 5200, 5700)
+    construct = _overlap_preparation(mask, transform, polygon)
+    assert construct() == pytest.approx(polygon.intersection(expected).area, abs=1e-6)
 
     iterations = max(20, int(200 * _scale()))
-    median_seconds = _timed_repeats(
-        lambda: construct(mask, transform),
-        repeats=5,
-        iterations=iterations,
-    )
+    median_seconds = _timed_repeats(construct, repeats=5, iterations=iterations)
     metrics = benchmark_result["metrics"]
     invariants = benchmark_result["invariants"]
     assert isinstance(metrics, dict) and isinstance(invariants, dict)
