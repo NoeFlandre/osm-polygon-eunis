@@ -46,6 +46,15 @@ class SidecarAppendOptions:
     geometry_column: str = "geometry"
 
 
+# Writer-side mapping: keep Arrow details here, outside the domain layer. Both
+# result directions use explicit attributes rather than EunisResult field order.
+_LABEL_FIELDS: tuple[tuple[pa.Field, str], ...] = (
+    (pa.field("eunis_code", pa.string(), nullable=True), "code"),
+    (pa.field("eunis_name", pa.string(), nullable=True), "name"),
+    (pa.field("eunis_overlap_percentage", pa.float64(), nullable=True), "overlap_percentage"),
+    (pa.field("eunis_source_version", pa.string(), nullable=True), "source_version"),
+)
+
 # Sidecar-only column: per-row count of candidates dropped because the exact GEOS
 # intersection raised, summed across reference passes. It is never appended to
 # published shards. Sidecars written before it existed read as zero.
@@ -69,69 +78,48 @@ def _validate_batch_size(batch_size: int) -> None:
         raise ValueError("batch_size must be positive")
 
 
+def _label_schema() -> pa.Schema:
+    return pa.schema([field for field, _attribute in _LABEL_FIELDS])
+
+
 def _output_schema(schema: pa.Schema) -> pa.Schema:
-    existing = set(schema.names)
-    duplicate_fields = existing.intersection(EUNIS_FIELDS)
+    duplicate_fields = set(schema.names).intersection(EUNIS_FIELDS)
     if duplicate_fields:
         raise ValueError(f"source already contains EUNIS fields: {sorted(duplicate_fields)}")
-    fields = [
-        pa.field("eunis_code", pa.string(), nullable=True),
-        pa.field("eunis_name", pa.string(), nullable=True),
-        pa.field("eunis_overlap_percentage", pa.float64(), nullable=True),
-        pa.field("eunis_source_version", pa.string(), nullable=True),
-    ]
-    return schema.append(fields[0]).append(fields[1]).append(fields[2]).append(fields[3])
+    for field, _attribute in _LABEL_FIELDS:
+        schema = schema.append(field)
+    return schema
 
 
 def _append_results(table: pa.Table, results: list[EunisResult]) -> pa.Table:
-    for name, data_type, values in _result_columns(results):
-        table = table.append_column(name, pa.array(values, type=data_type))
+    for field, values in _result_columns(results):
+        table = table.append_column(field, values)
     return table
 
 
-def _result_columns(
-    results: list[EunisResult],
-) -> tuple[tuple[str, pa.DataType, list[object]], ...]:
-    return (
-        ("eunis_code", pa.string(), [result.code for result in results]),
-        ("eunis_name", pa.string(), [result.name for result in results]),
-        (
-            "eunis_overlap_percentage",
-            pa.float64(),
-            [result.overlap_percentage for result in results],
-        ),
-        ("eunis_source_version", pa.string(), [result.source_version for result in results]),
+def _result_columns(results: list[EunisResult]) -> tuple[tuple[pa.Field, pa.Array], ...]:
+    return tuple(
+        (field, pa.array([getattr(result, attribute) for result in results], type=field.type))
+        for field, attribute in _LABEL_FIELDS
     )
 
 
 def _sidecar_schema() -> pa.Schema:
-    return pa.schema(
-        [
-            pa.field("eunis_code", pa.string(), nullable=True),
-            pa.field("eunis_name", pa.string(), nullable=True),
-            pa.field("eunis_overlap_percentage", pa.float64(), nullable=True),
-            pa.field("eunis_source_version", pa.string(), nullable=True),
-            pa.field(INTERSECTION_ERRORS_FIELD, pa.int64(), nullable=False),
-        ]
-    )
+    return _label_schema().append(pa.field(INTERSECTION_ERRORS_FIELD, pa.int64(), nullable=False))
 
 
 def _results_table(results: list[EunisResult], errors: list[int]) -> pa.Table:
-    return pa.table(
-        {
-            "eunis_code": [result.code for result in results],
-            "eunis_name": [result.name for result in results],
-            "eunis_overlap_percentage": [result.overlap_percentage for result in results],
-            "eunis_source_version": [result.source_version for result in results],
-            INTERSECTION_ERRORS_FIELD: errors,
-        },
-        schema=_sidecar_schema(),
-    )
+    columns = {field.name: values for field, values in _result_columns(results)}
+    return pa.table({**columns, INTERSECTION_ERRORS_FIELD: errors}, schema=_sidecar_schema())
 
 
 def _table_results(table: pa.Table) -> list[EunisResult]:
-    columns = [table[name].to_pylist() for name in EUNIS_FIELDS]
-    return [EunisResult(*values) for values in zip(*columns, strict=True)]
+    columns = [table[field.name].to_pylist() for field, _attribute in _LABEL_FIELDS]
+    attributes = [attribute for _field, attribute in _LABEL_FIELDS]
+    return [
+        EunisResult(**dict(zip(attributes, values, strict=True)))
+        for values in zip(*columns, strict=True)
+    ]
 
 
 def _table_errors(table: pa.Table) -> list[int]:
@@ -346,7 +334,7 @@ def _ensure_no_extra_batches(
 
 def _validate_sidecar_schema(sidecar_file: pq.ParquetFile) -> None:
     names = sidecar_file.schema_arrow.names
-    if names not in (list(EUNIS_FIELDS), [*EUNIS_FIELDS, INTERSECTION_ERRORS_FIELD]):
+    if names not in (_label_schema().names, _sidecar_schema().names):
         raise ValueError("sidecar has an unexpected schema")
 
 
@@ -398,8 +386,8 @@ def append_label_sidecar(
             _observe_batch(table, sidecar_table, options.geometry_column, options.observe)
             if options.count_errors is not None:
                 options.count_errors(sum(_table_errors(sidecar_table)))
-            for name in EUNIS_FIELDS:
-                table = table.append_column(name, sidecar_table[name])
+            for field, _attribute in _LABEL_FIELDS:
+                table = table.append_column(field, sidecar_table[field.name])
             writer.write_table(table)
             rows += batch.num_rows
     _ensure_no_extra_batches(sidecar_batches, "sidecar has more rows than source")
