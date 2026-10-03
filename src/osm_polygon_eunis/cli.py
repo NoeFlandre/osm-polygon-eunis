@@ -19,6 +19,7 @@ from huggingface_hub import HfApi
 from huggingface_hub.errors import HfHubHTTPError
 
 from ._protocols import HubApi
+from .fileio import write_json_atomic
 from .grid5000 import (
     Grid5000Config,
     Grid5000Submission,
@@ -636,10 +637,4 @@ def _receipt_payload(receipt: ReleaseReceipt) -> dict[str, object]:
 
 
 def _write_receipt_file(path: Path, payload: Mapping[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
-    try:
-        temporary.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-        temporary.replace(path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    write_json_atomic(path, payload)
