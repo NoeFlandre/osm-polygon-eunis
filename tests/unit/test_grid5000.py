@@ -63,6 +63,41 @@ def test_grid5000_default_walltime_is_one_hour() -> None:
     assert config.walltime == "1:00:00"
 
 
+def test_write_job_state_preserves_full_payload_and_bytes(tmp_path: Path) -> None:
+    path = tmp_path / "state" / "job.json"
+    config = replace(_config(excluded_sites=("rennes",)), job_type="deploy")
+    job = Grid5000Job(
+        config=config,
+        job_id="123456",
+        source_revision="abc123",
+        submitted_at="2026-10-03T06:00:00+00:00",
+    )
+
+    grid5000._write_job_state(path, job)
+
+    payload = {
+        "batch_size": 256,
+        "cluster": "dahu",
+        "cores": 16,
+        "datasets": ["website", "wikidata", "description"],
+        "excluded_sites": ["rennes"],
+        "frontend": "fgrenoble",
+        "job_id": "123456",
+        "job_type": "deploy",
+        "persistent_root": "/home/u/eunis",
+        "queue": "default",
+        "site": "grenoble",
+        "source_revision": "abc123",
+        "submitted_at": "2026-10-03T06:00:00+00:00",
+        "walltime": "1:00:00",
+        "workers": 16,
+    }
+    assert path.read_bytes() == (json.dumps(payload, sort_keys=True, indent=2) + "\n").encode(
+        "utf-8"
+    )
+    assert not path.with_name(".job.json.tmp").exists()
+
+
 def test_grid5000_rejects_walltime_over_one_hour() -> None:
     with pytest.raises(ValueError, match="one hour"):
         _config(walltime="1:00:01")

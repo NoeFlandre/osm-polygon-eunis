@@ -12,6 +12,8 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Final, TypeGuard
 
+from .fileio import write_json_atomic
+
 Command = tuple[str, ...]
 CommandRunner = Callable[[Command], str]
 
@@ -585,13 +587,7 @@ def _write_job_state(path: Path, job: Grid5000Job) -> None:
         "walltime": job.config.walltime,
         "workers": job.config.workers,
     }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
-    try:
-        temporary.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-        temporary.replace(path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    write_json_atomic(path, payload)
 
 
 def resolve_source_revision(

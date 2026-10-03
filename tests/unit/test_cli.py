@@ -150,6 +150,9 @@ def test_release_writes_full_receipt_atomically(monkeypatch, capsys, tmp_path: P
     stdout_payload = json.loads(capsys.readouterr().out)
     receipt_payload = json.loads(receipt_path.read_text(encoding="utf-8"))
     assert stdout_payload == receipt_payload
+    assert receipt_path.read_bytes() == (
+        json.dumps(stdout_payload, sort_keys=True, indent=2) + "\n"
+    ).encode("utf-8")
     assert receipt_payload["status"] == "verified"
     dataset = receipt_payload["datasets"][0]
     assert dataset["source_revision"] == "source-revision"
