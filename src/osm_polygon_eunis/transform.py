@@ -73,9 +73,38 @@ def _counted_overlap(
     return result, _reference_errors(reference) - before
 
 
+EMPTY_RESULT = EunisResult(None, None, None, None)
+
+
 def _validate_batch_size(batch_size: int) -> None:
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
+
+
+def _require_column(parquet_file: pq.ParquetFile, label: str, column: str) -> None:
+    if column not in parquet_file.schema_arrow.names:
+        raise ValueError(f"{label} column {column!r} is missing")
+
+
+def _open_shard(source: Path, batch_size: int, label: str, column: str) -> pq.ParquetFile:
+    """Validate the batch size, open ``source`` and require ``column`` in it."""
+
+    _validate_batch_size(batch_size)
+    parquet_file = pq.ParquetFile(source)
+    _require_column(parquet_file, label, column)
+    return parquet_file
+
+
+def _stream_batches(parquet_file: pq.ParquetFile, batch_size: int) -> Iterator[pa.Table]:
+    """Yield each bounded input batch as a one-batch table with the source schema."""
+
+    schema = parquet_file.schema_arrow
+    for batch in parquet_file.iter_batches(batch_size=batch_size):
+        yield pa.Table.from_batches([batch], schema=schema)
+
+
+def _overlap_results(values: list[object], reference: OverlapReference) -> list[EunisResult]:
+    return [reference.overlap(to_equal_area(parse_geometry(value))) for value in values]
 
 
 def _label_schema() -> pa.Schema:
@@ -157,22 +186,14 @@ def enrich_parquet_shard(
         OSError: If either Parquet path cannot be read or written.
     """
 
-    _validate_batch_size(batch_size)
-    parquet_file = pq.ParquetFile(source)
-    source_schema = parquet_file.schema_arrow
-    if geometry_column not in source_schema.names:
-        raise ValueError(f"geometry column {geometry_column!r} is missing")
-    output_schema = _output_schema(source_schema)
+    parquet_file = _open_shard(source, batch_size, "geometry", geometry_column)
+    output_schema = _output_schema(parquet_file.schema_arrow)
     rows = 0
     with _writer(destination, output_schema) as writer:
-        for batch in parquet_file.iter_batches(batch_size=batch_size):
-            table = pa.Table.from_batches([batch], schema=source_schema)
-            results = []
-            for value in table[geometry_column].to_pylist():
-                geometry = to_equal_area(parse_geometry(value))
-                results.append(reference.overlap(geometry))
+        for table in _stream_batches(parquet_file, batch_size):
+            results = _overlap_results(table[geometry_column].to_pylist(), reference)
             writer.write_table(_append_results(table, results))
-            rows += batch.num_rows
+            rows += table.num_rows
     return rows
 
 
@@ -186,23 +207,17 @@ def enrich_link_shard(
 ) -> int:
     """Enrich a link shard using only the current region's polygon label map."""
 
-    _validate_batch_size(batch_size)
-    parquet_file = pq.ParquetFile(source)
-    source_schema = parquet_file.schema_arrow
-    if polygon_id_column not in source_schema.names:
-        raise ValueError(f"polygon id column {polygon_id_column!r} is missing")
-    output_schema = _output_schema(source_schema)
+    parquet_file = _open_shard(source, batch_size, "polygon id", polygon_id_column)
+    output_schema = _output_schema(parquet_file.schema_arrow)
     rows = 0
-    empty = EunisResult(None, None, None, None)
     with _writer(destination, output_schema) as writer:
-        for batch in parquet_file.iter_batches(batch_size=batch_size):
-            table = pa.Table.from_batches([batch], schema=source_schema)
+        for table in _stream_batches(parquet_file, batch_size):
             results = [
-                labels_by_polygon_id.get(polygon_id, empty)
+                labels_by_polygon_id.get(polygon_id, EMPTY_RESULT)
                 for polygon_id in table[polygon_id_column].to_pylist()
             ]
             writer.write_table(_append_results(table, results))
-            rows += batch.num_rows
+            rows += table.num_rows
     return rows
 
 
@@ -221,16 +236,13 @@ def update_label_sidecar(
         options.current,
         options.geometry_column,
     )
-    source_schema = source_file.schema_arrow
-    empty = EunisResult(None, None, None, None)
     current_batches = (
         iter(current_file.iter_batches(batch_size=options.batch_size)) if current_file else None
     )
     rows = 0
     with pq.ParquetWriter(destination, _sidecar_schema(), compression="zstd") as writer:
-        for batch in source_file.iter_batches(batch_size=options.batch_size):
-            source_table = pa.Table.from_batches([batch], schema=source_schema)
-            previous, previous_errors = _previous_results(current_batches, batch.num_rows, empty)
+        for source_table in _stream_batches(source_file, options.batch_size):
+            previous, previous_errors = _previous_results(current_batches, source_table.num_rows)
             updated, errors = _updated_results(
                 source_table[options.geometry_column].to_pylist(),
                 previous,
@@ -238,7 +250,7 @@ def update_label_sidecar(
                 selected_references,
             )
             writer.write_table(_results_table(updated, errors))
-            rows += batch.num_rows
+            rows += source_table.num_rows
     _ensure_no_extra_batches(current_batches, "current sidecar has more rows than source")
     return rows
 
@@ -264,7 +276,7 @@ def _sidecar_inputs(
 ) -> tuple[pq.ParquetFile, pq.ParquetFile | None]:
     _validate_sidecar_paths(current, destination)
     source_file = pq.ParquetFile(source)
-    _validate_geometry_column(source_file, geometry_column)
+    _require_column(source_file, "geometry", geometry_column)
     current_file = pq.ParquetFile(current) if current is not None else None
     if current_file is not None:
         _validate_sidecar_schema(current_file)
@@ -276,18 +288,12 @@ def _validate_sidecar_paths(current: Path | None, destination: Path) -> None:
         raise ValueError("current sidecar and destination must differ")
 
 
-def _validate_geometry_column(source_file: pq.ParquetFile, geometry_column: str) -> None:
-    if geometry_column not in source_file.schema_arrow.names:
-        raise ValueError(f"geometry column {geometry_column!r} is missing")
-
-
 def _previous_results(
     batches: Iterator[pa.RecordBatch] | None,
     row_count: int,
-    empty: EunisResult,
 ) -> tuple[list[EunisResult], list[int]]:
     if batches is None:
-        return [empty] * row_count, [0] * row_count
+        return [EMPTY_RESULT] * row_count, [0] * row_count
     try:
         previous_batch = next(batches)
     except StopIteration as error:
@@ -364,32 +370,28 @@ def append_label_sidecar(
     counter column itself is never written to the published shard.
     """
 
-    _validate_batch_size(options.batch_size)
-    source_file = pq.ParquetFile(source)
+    source_file = _open_shard(source, options.batch_size, "geometry", options.geometry_column)
     sidecar_file = pq.ParquetFile(sidecar)
-    source_schema = source_file.schema_arrow
-    if options.geometry_column not in source_schema.names:
-        raise ValueError(f"geometry column {options.geometry_column!r} is missing")
     _validate_sidecar_schema(sidecar_file)
-    output_schema = _output_schema(source_schema)
+    output_schema = _output_schema(source_file.schema_arrow)
     sidecar_batches = iter(sidecar_file.iter_batches(batch_size=options.batch_size))
     rows = 0
     with _writer(destination, output_schema) as writer:
-        for batch in source_file.iter_batches(batch_size=options.batch_size):
+        for source_table in _stream_batches(source_file, options.batch_size):
             sidecar_batch = _next_matching_batch(
                 sidecar_batches,
-                batch.num_rows,
+                source_table.num_rows,
                 "sidecar has fewer rows than source",
             )
-            table = pa.Table.from_batches([batch], schema=source_schema)
             sidecar_table = pa.Table.from_batches([sidecar_batch])
-            _observe_batch(table, sidecar_table, options.geometry_column, options.observe)
+            _observe_batch(source_table, sidecar_table, options.geometry_column, options.observe)
             if options.count_errors is not None:
                 options.count_errors(sum(_table_errors(sidecar_table)))
+            table = source_table
             for field, _attribute in _LABEL_FIELDS:
                 table = table.append_column(field, sidecar_table[field.name])
             writer.write_table(table)
-            rows += batch.num_rows
+            rows += source_table.num_rows
     _ensure_no_extra_batches(sidecar_batches, "sidecar has more rows than source")
     return rows
 
