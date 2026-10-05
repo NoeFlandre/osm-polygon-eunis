@@ -122,10 +122,30 @@ possibly-missing-attribute = "error"
 possibly-missing-import = "error"
 
 [tool.mutmut]
-source_paths = ["src/osm_polygon_eunis/matching.py", "src/osm_polygon_eunis/geometry.py"]
-also_copy = ["src/osm_polygon_eunis/domain.py", "src/osm_polygon_eunis/__init__.py"]
+source_paths = [
+  "src/osm_polygon_eunis/matching.py",
+  "src/osm_polygon_eunis/geometry.py",
+  "src/osm_polygon_eunis/grid_overlap.py",
+  "src/osm_polygon_eunis/transform.py",
+  "src/osm_polygon_eunis/release_plan.py",
+]
+also_copy = [
+  "src/osm_polygon_eunis/__init__.py",
+  "src/osm_polygon_eunis/_protocols.py",
+  "src/osm_polygon_eunis/domain.py",
+  "src/osm_polygon_eunis/fileio.py",
+  "src/osm_polygon_eunis/publish.py",
+  "src/osm_polygon_eunis/sources.py",
+]
+# The brute-force grid cross-check is marked slow but runs in under a second.
+pytest_add_cli_args = ["-m", "slow or not slow"]
 pytest_add_cli_args_test_selection = [
   "tests/unit/test_matching.py",
   "tests/unit/test_geometry.py",
   "tests/property/test_geometry_properties.py",
+  "tests/unit/test_grid_overlap.py",
+  "tests/unit/test_transform.py",
+  "tests/unit/test_transform_schema.py",
+  "tests/unit/test_transform_contract.py",
+  "tests/unit/test_release_plan.py",
 ]
