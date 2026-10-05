@@ -30,9 +30,22 @@ def _stats(killed: int, survived: int, total: int, *, no_tests: int = 0) -> dict
     }
 
 
+def _other_modules(*, besides: str) -> str:
+    return "\n".join(
+        f"osm_polygon_eunis.{module}.x: killed"
+        for module in sorted(MODULE_MINIMUM_SCORES)
+        if module != besides
+    )
+
+
 def test_accepts_threshold_and_only_documented_equivalent_mutant() -> None:
-    stats = _stats(124, 1, 125)
-    results = _rows(124, ["osm_polygon_eunis.matching.x__outranks__mutmut_5"])
+    others = len(MODULE_MINIMUM_SCORES) - 1
+    stats = _stats(124 + others, 1, 125 + others)
+    results = (
+        _rows(124, ["osm_polygon_eunis.matching.x__outranks__mutmut_5"])
+        + "\n"
+        + _other_modules(besides="matching")
+    )
 
     assert evaluate(stats, results) == []
 
@@ -76,9 +89,11 @@ def test_modules_ratchet_independently() -> None:
 
 
 def test_rejects_modules_without_a_configured_baseline() -> None:
-    stats = _stats(1, 0, 1)
+    others = len(MODULE_MINIMUM_SCORES)
+    stats = _stats(others + 1, 0, others + 1)
+    results = _other_modules(besides="") + "\nosm_polygon_eunis.unlisted.x: killed"
 
-    errors = evaluate(stats, "osm_polygon_eunis.unlisted.x: killed")
+    errors = evaluate(stats, results)
 
     assert errors == ["no minimum mutation score is configured for module 'unlisted'"]
 
@@ -148,3 +163,22 @@ def test_mutation_scope_lists_the_ratcheted_modules_and_their_tests() -> None:
         "tests/unit/test_transform_contract.py",
         "tests/unit/test_release_plan.py",
     } <= set(mutation["pytest_add_cli_args_test_selection"])
+
+
+def test_rejects_reports_missing_a_configured_module() -> None:
+    stats = _stats(1, 0, 1)
+
+    errors = evaluate(stats, "osm_polygon_eunis.release_plan.x: killed")
+
+    assert errors == [
+        f"mutation report has no results for configured module {module!r}"
+        for module in sorted(set(MODULE_MINIMUM_SCORES) - {"release_plan"})
+    ]
+
+
+def test_accepts_reports_with_every_configured_module() -> None:
+    modules = sorted(MODULE_MINIMUM_SCORES)
+    stats = _stats(len(modules), 0, len(modules))
+    results = "\n".join(f"osm_polygon_eunis.{module}.x: killed" for module in modules)
+
+    assert evaluate(stats, results) == []

@@ -270,7 +270,12 @@ def module_scores(reported: dict[str, str]) -> dict[str, float]:
 
 def _check_module_scores(reported: dict[str, str]) -> list[str]:
     errors: list[str] = []
-    for module, score in sorted(module_scores(reported).items()):
+    scores = module_scores(reported)
+    errors.extend(
+        f"mutation report has no results for configured module {module!r}"
+        for module in sorted(set(MODULE_MINIMUM_SCORES) - set(scores))
+    )
+    for module, score in sorted(scores.items()):
         minimum = MODULE_MINIMUM_SCORES.get(module)
         if minimum is None:
             errors.append(f"no minimum mutation score is configured for module {module!r}")
