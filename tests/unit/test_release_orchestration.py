@@ -13,21 +13,22 @@ from osm_polygon_eunis import (
     manifest_state,
     release_orchestration,
     release_plan,
-    runner,
     shard_processing,
 )
 from osm_polygon_eunis._protocols import HubApi, StreamClient
 from osm_polygon_eunis.cards import CardArtifacts, DatasetCardAccumulator
 from osm_polygon_eunis.domain import EunisResult
 from osm_polygon_eunis.eea import EeaGroup, RemoteAsset
+from osm_polygon_eunis.geometry_jobs import process_geometry_paths
 from osm_polygon_eunis.options import BatchLimits, GeometryPathOptions, ReleaseOptions
 from osm_polygon_eunis.publish import ShardExpectation, VerificationReceipt
-from osm_polygon_eunis.runner import DatasetPlan, DatasetReceipt, process_geometry_paths
+from osm_polygon_eunis.release_plan import DatasetPlan, DatasetReceipt
 from osm_polygon_eunis.sources import DatasetSpec
 
-# Remaining ``runner._*`` references are limited to seams with no public entry point:
-# monkeypatch targets that stub network/HF side effects for ``run_release``, and the
-# orchestration/manifest helpers that ``run_release`` only reaches after live I/O.
+# Remaining private ``release_orchestration._*`` references are limited to seams with no
+# public entry point: monkeypatch targets that stub network/HF side effects for
+# ``run_release``, and the orchestration/manifest helpers that ``run_release`` only
+# reaches after live I/O.
 
 
 class _Reference:
@@ -186,7 +187,7 @@ def test_run_release_rejects_invalid_reference_config(
         config.write_text(contents, encoding="utf-8")
 
     with pytest.raises(ValueError, match=message):
-        runner.run_release(
+        release_orchestration.run_release(
             cast(HubApi, object()),
             ReleaseOptions(
                 reference_config=config,
@@ -260,7 +261,7 @@ def test_finalize_dataset_enriches_polygon_and_link_shards_and_cleans_staging(
     def capture_progress(event) -> None:
         progress.append(dict(event))
 
-    expectations, commit = runner.finalize_dataset(
+    expectations, commit = shard_processing.finalize_dataset(
         cast(HubApi, object()),
         plan,
         shard_processing.FinalizeOptions(
@@ -388,7 +389,7 @@ def test_planning_manifest_and_shared_blobs_are_deterministic(monkeypatch) -> No
         manifest_state, "list_repo_files", lambda api, repo, revision: entries[repo]
     )
 
-    plans = runner.plan_datasets(cast(HubApi, object()))
+    plans = release_plan.plan_datasets(cast(HubApi, object()))
 
     assert [plan.spec.name for plan in plans] == ["website", "wikidata", "description"]
     assert plans[1].link_paths == ("polygon_document_links/a.parquet",)
@@ -558,7 +559,7 @@ def test_run_release_coordinates_pooled_processing(monkeypatch, tmp_path: Path) 
     )
     monkeypatch.setattr(release_orchestration, "_finalize_plan", lambda *args, **kwargs: receipt)
 
-    result = runner.run_release(
+    result = release_orchestration.run_release(
         cast(HubApi, object()),
         ReleaseOptions(
             reference_config=config,
@@ -570,9 +571,3 @@ def test_run_release_coordinates_pooled_processing(monkeypatch, tmp_path: Path) 
     assert result.datasets == (receipt,)
     assert len(seen) == 1
     assert seen[0][1] == release_orchestration._SOURCE_WORKERS
-
-
-def test_runner_is_a_small_public_facade() -> None:
-    runner_path = Path(runner.__file__)
-
-    assert len(runner_path.read_text(encoding="utf-8").splitlines()) < 250

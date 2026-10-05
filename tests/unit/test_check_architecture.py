@@ -12,7 +12,6 @@ def test_reference_reader_split_is_declared_in_architecture_layers() -> None:
         "geopackage_tiles",
         "raster_reference",
         "geopackage_reference",
-        "reference",
         "reference_staging",
     }
     dependencies = (
@@ -20,8 +19,6 @@ def test_reference_reader_split_is_declared_in_architecture_layers() -> None:
         ("matching", "raster_reference"),
         ("geopackage_tiles", "geopackage_reference"),
         ("geopackage_sql", "geopackage_reference"),
-        ("raster_reference", "reference"),
-        ("geopackage_reference", "reference"),
         ("_protocols", "reference_staging"),
         ("eea", "reference_staging"),
         ("fileio", "reference_staging"),

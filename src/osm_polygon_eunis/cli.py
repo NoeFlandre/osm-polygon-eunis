@@ -27,20 +27,22 @@ from .grid5000 import (
     submit_grid5000,
 )
 from .options import BatchLimits, ReleaseOptions
-from .release_plan import DatasetPlan
-from .runner import (
-    DATASET_NAMES,
+from .publish import VerificationError
+from .release_orchestration import (
     DEFAULT_WORKERS,
     ConfigError,
     DryRunReport,
-    Progress,
-    ReleaseReceipt,
-    VerificationError,
-    plan_datasets,
     plan_release,
     run_release,
     validate_reference_config,
     verify_release,
+)
+from .release_plan import (
+    DATASET_NAMES,
+    DatasetPlan,
+    Progress,
+    ReleaseReceipt,
+    plan_datasets,
 )
 
 logger = logging.getLogger(__name__)

@@ -67,6 +67,8 @@ target-version = "py312"
 src = ["src", "tests", "scripts", "benchmarks"]
 
 [tool.ruff.lint]
+# Vulture's V-codes appear in per-definition ``# noqa`` comments.
+external = ["V"]
 select = [
   "E", "F", "I", "B", "UP", "SIM", "C4", "RUF",
   "D",

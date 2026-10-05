@@ -15,14 +15,13 @@ from osm_polygon_eunis._protocols import HubApi
 from osm_polygon_eunis.cli import CliDependencies
 from osm_polygon_eunis.grid5000 import Grid5000Config
 from osm_polygon_eunis.options import BatchLimits, ReleaseOptions
-from osm_polygon_eunis.publish import ShardExpectation, VerificationReceipt
-from osm_polygon_eunis.runner import (
+from osm_polygon_eunis.publish import ShardExpectation, VerificationError, VerificationReceipt
+from osm_polygon_eunis.release_orchestration import ConfigError
+from osm_polygon_eunis.release_plan import (
     DATASET_NAMES,
-    ConfigError,
     DatasetPlan,
     DatasetReceipt,
     ReleaseReceipt,
-    VerificationError,
     plan_datasets,
     selected_dataset_names,
 )

@@ -25,7 +25,7 @@ class HttpResponse(Protocol):
 class RequestClient(Protocol):
     def request(
         self,
-        method: str,
+        method: str,  # noqa: V107
         url: str,
         *,
         headers: Any = None,
@@ -48,12 +48,12 @@ class StreamResponse(Protocol):
 class StreamClient(Protocol):
     def stream(
         self,
-        method: str,
+        method: str,  # noqa: V107
         url: str,
         *,
         headers: Mapping[str, str] = ...,
-        follow_redirects: bool = ...,
-        timeout: Any = ...,
+        follow_redirects: bool = ...,  # noqa: V107
+        timeout: Any = ...,  # noqa: V107
     ) -> AbstractContextManager[StreamResponse]: ...
 
 
@@ -63,17 +63,17 @@ class InventoryApi(Protocol):
         repo_id: str,
         *,
         revision: str | None = None,
-        repo_type: str | None = None,
+        repo_type: str | None = None,  # noqa: V107
     ) -> Any: ...
 
     def list_repo_tree(
         self,
         repo_id: str,
-        path_in_repo: str | None = None,
+        path_in_repo: str | None = None,  # noqa: V107
         *,
-        recursive: bool = False,
+        recursive: bool = False,  # noqa: V107
         revision: str | None = None,
-        repo_type: str | None = None,
+        repo_type: str | None = None,  # noqa: V107
     ) -> Iterable[Any]: ...
 
 

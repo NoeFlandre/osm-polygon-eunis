@@ -10,13 +10,13 @@ from typing import cast
 
 import pytest
 
-from osm_polygon_eunis import manifest_state, release_orchestration, runner
+from osm_polygon_eunis import manifest_state, release_orchestration
 from osm_polygon_eunis._protocols import HubApi, StreamClient
 from osm_polygon_eunis.eea import EeaGroup
 from osm_polygon_eunis.geometry import GEOMETRY_POLICY
 from osm_polygon_eunis.options import BatchLimits, ReleaseOptions
 from osm_polygon_eunis.publish import ShardExpectation, VerificationError, VerificationReceipt
-from osm_polygon_eunis.runner import DatasetPlan, DatasetReceipt
+from osm_polygon_eunis.release_plan import DatasetPlan, DatasetReceipt, ReleaseReceipt
 from osm_polygon_eunis.sources import DatasetSpec
 
 
@@ -175,7 +175,7 @@ def test_run_release_verifies_matching_manifests_without_processing(
         lambda *args, **kwargs: pytest.fail("matching release must not upload source shards"),
     )
 
-    result = runner.run_release(
+    result = release_orchestration.run_release(
         cast(HubApi, object()),
         ReleaseOptions(
             reference_config=config,
@@ -403,5 +403,5 @@ def test_no_op_release_reports_each_verified_dataset(
         progress=events.append,
     )
 
-    assert result == runner.ReleaseReceipt((receipt,), {"source_version": "EEA-test"})
+    assert result == ReleaseReceipt((receipt,), {"source_version": "EEA-test"})
     assert events == [{"event": "dataset_no_op", "dataset": "website"}]
