@@ -408,9 +408,34 @@ def test_planning_manifest_and_shared_blobs_are_deterministic(monkeypatch) -> No
         threshold=0,
         config={"classification_record": "class"},
     )
-    assets = manifest["assets"]
-    assert isinstance(assets, list)
-    assert [asset["path"] for asset in assets] == ["/Prob_R11.tif", "/habitats.gpkg"]
+    assert manifest == {
+        "source_version": "EEA-test",
+        "crs": "EPSG:3035",
+        "threshold": 0,
+        "classification_record": "class",
+        "assets": [
+            {
+                "record_id": "record",
+                "path": "/Prob_R11.tif",
+                "url": "https://example.test/Prob_R11.tif",
+                "size": 1,
+                "etag": "etag",
+                "code": "R11",
+                "name": "steppe",
+                "sha256": "sha",
+            },
+            {
+                "record_id": "record",
+                "path": "/habitats.gpkg",
+                "url": "https://example.test/habitats.gpkg",
+                "size": 1,
+                "etag": "etag",
+                "code": None,
+                "name": None,
+                "sha256": None,
+            },
+        ],
+    }
 
     shared = manifest_state._shared_blobs(cast(HubApi, object()), plans[1], {"polygons/a.parquet"})
     assert shared == {

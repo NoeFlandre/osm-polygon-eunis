@@ -204,7 +204,10 @@ def test_parquet_signature_reports_rows_and_schema(tmp_path: Path) -> None:
     rows, schema = parquet_signature(path)
 
     assert rows == 2
-    assert isinstance(schema, str) and schema
+    expected = hashlib.sha256(
+        pa.schema([("polygon_id", pa.string())]).serialize().to_pybytes()
+    ).hexdigest()
+    assert schema == expected
 
 
 def test_verify_dataset_rejects_missing_target_paths() -> None:
