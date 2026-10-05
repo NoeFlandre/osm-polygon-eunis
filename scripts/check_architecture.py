@@ -27,7 +27,6 @@ LAYERS = (
     "geopackage_tiles",
     "geopackage_reference",
     "raster_reference",
-    "reference",
     "eea",
     "reference_cache",
     "transform",
@@ -41,7 +40,6 @@ LAYERS = (
     "shard_processing",
     "card_publishing",
     "release_orchestration",
-    "runner",
     "grid5000",
     "cli",
 )

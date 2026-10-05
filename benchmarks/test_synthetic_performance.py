@@ -33,7 +33,8 @@ from shapely.ops import transform as transform_geometry
 
 from osm_polygon_eunis import transform as transform_module
 from osm_polygon_eunis.domain import EunisResult
-from osm_polygon_eunis.reference import GeoPackageReference, RasterLayer, RasterReference
+from osm_polygon_eunis.geopackage_reference import GeoPackageReference
+from osm_polygon_eunis.raster_reference import RasterLayer, RasterReference
 
 _SEED = 20260926
 _RASTER_LAYERS = 10

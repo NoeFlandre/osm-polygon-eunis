@@ -15,8 +15,8 @@ from osm_polygon_eunis import geometry_jobs, reference_cache
 from osm_polygon_eunis._protocols import HubApi, StreamClient
 from osm_polygon_eunis.eea import EeaGroup, RemoteAsset
 from osm_polygon_eunis.options import BatchLimits
-from osm_polygon_eunis.reference import RasterLayer, RasterReference
-from osm_polygon_eunis.runner import DatasetPlan
+from osm_polygon_eunis.raster_reference import RasterLayer, RasterReference
+from osm_polygon_eunis.release_plan import DatasetPlan
 from osm_polygon_eunis.sources import DatasetSpec
 from osm_polygon_eunis.transform import enrich_parquet_shard
 

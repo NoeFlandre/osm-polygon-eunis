@@ -16,7 +16,7 @@ from rasterio.transform import from_origin
 from shapely.geometry import box, mapping
 from shapely.ops import transform
 
-from osm_polygon_eunis.reference import RasterLayer, RasterReference
+from osm_polygon_eunis.raster_reference import RasterLayer, RasterReference
 from osm_polygon_eunis.transform import enrich_parquet_shard
 
 

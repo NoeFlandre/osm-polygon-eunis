@@ -13,12 +13,12 @@ from pytest_bdd import given, scenarios, then, when
 from shapely.geometry import box, mapping
 from shapely.geometry.base import BaseGeometry
 
-from osm_polygon_eunis import cli, manifest_state, release_orchestration, runner
+from osm_polygon_eunis import cli, manifest_state, release_orchestration
 from osm_polygon_eunis._protocols import HubApi
 from osm_polygon_eunis.cli import CliDependencies
 from osm_polygon_eunis.domain import EunisResult
 from osm_polygon_eunis.publish import ShardExpectation, VerificationReceipt
-from osm_polygon_eunis.runner import DatasetPlan, DatasetReceipt
+from osm_polygon_eunis.release_plan import DatasetPlan, DatasetReceipt
 from osm_polygon_eunis.sources import DatasetSpec
 from osm_polygon_eunis.transform import enrich_parquet_shard
 
@@ -198,8 +198,8 @@ def older_release(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, acceptance_st
 @when("I preview the release through the CLI")
 def preview_release(acceptance_state, capsys) -> None:
     plan = cast(DatasetPlan, acceptance_state["plan"])
-    report = runner.DryRunReport(
-        (runner.DryRunDataset(plan, True, plan.geometry_paths),),
+    report = release_orchestration.DryRunReport(
+        (release_orchestration.DryRunDataset(plan, True, plan.geometry_paths),),
         False,
         1,
     )

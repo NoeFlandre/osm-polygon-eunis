@@ -15,12 +15,11 @@ from osm_polygon_eunis import (
     cli,
     manifest_state,
     release_orchestration,
-    runner,
 )
 from osm_polygon_eunis._protocols import HubApi, StreamClient
 from osm_polygon_eunis.cli import CliDependencies
 from osm_polygon_eunis.options import BatchLimits, ReleaseOptions
-from osm_polygon_eunis.runner import DatasetPlan
+from osm_polygon_eunis.release_plan import DatasetPlan, DatasetReceipt
 from osm_polygon_eunis.sources import DatasetSpec
 
 
@@ -89,7 +88,7 @@ def test_plan_release_makes_no_hub_writes(monkeypatch, tmp_path: Path) -> None:
         lambda *args: pytest.fail("dry run must not duplicate"),
     )
 
-    report = runner.plan_release(
+    report = release_orchestration.plan_release(
         cast(HubApi, api), reference_config=_config(tmp_path), workdir=tmp_path / "run"
     )
 
@@ -108,7 +107,7 @@ def test_plan_release_reports_no_op_without_uploads(monkeypatch, tmp_path: Path)
     )
     monkeypatch.setattr(release_orchestration, "_compatible_manifests", lambda *args: True)
 
-    report = runner.plan_release(
+    report = release_orchestration.plan_release(
         cast(HubApi, api), reference_config=_config(tmp_path), workdir=tmp_path / "run"
     )
 
@@ -169,8 +168,8 @@ def test_release_fails_fast_before_any_hub_request(
 def test_release_dry_run_prints_preview_without_token(monkeypatch, capsys, tmp_path: Path) -> None:
     monkeypatch.delenv("HF_TOKEN", raising=False)
     plan = _plans()[0]
-    report = runner.DryRunReport(
-        (runner.DryRunDataset(plan, False, ("polygons/a.parquet",)),), False, 3
+    report = release_orchestration.DryRunReport(
+        (release_orchestration.DryRunDataset(plan, False, ("polygons/a.parquet",)),), False, 3
     )
     dependencies = CliDependencies(
         api_factory=lambda _endpoint: cast(HubApi, object()),
@@ -198,7 +197,7 @@ def test_verify_release_fails_when_target_has_no_manifest(monkeypatch, tmp_path:
     api = _ReadOnlyApi(set())
 
     with pytest.raises(ValueError, match="no EUNIS manifest"):
-        runner.verify_release(cast(HubApi, api), workdir=tmp_path)
+        release_orchestration.verify_release(cast(HubApi, api), workdir=tmp_path)
 
 
 def test_verify_release_pins_manifest_inputs_and_reports(monkeypatch, tmp_path: Path) -> None:
@@ -212,7 +211,7 @@ def test_verify_release_pins_manifest_inputs_and_reports(monkeypatch, tmp_path: 
     def fake_verify(_api, pinned, _existing, **_kwargs):
         seen.append(pinned)
         verification = VerificationReceipt("target-a", "target-rev", {}, (), manifest)
-        return runner.DatasetReceipt(pinned, (), verification, no_op=True)
+        return DatasetReceipt(pinned, (), verification, no_op=True)
 
     monkeypatch.setattr(release_orchestration, "plan_datasets", lambda _api, names=None: (plan,))
     monkeypatch.setattr(
@@ -220,7 +219,7 @@ def test_verify_release_pins_manifest_inputs_and_reports(monkeypatch, tmp_path: 
     )
     monkeypatch.setattr(release_orchestration, "_verify_no_op_dataset", fake_verify)
 
-    receipt = runner.verify_release(
+    receipt = release_orchestration.verify_release(
         cast(HubApi, _ReadOnlyApi({"target-a"})), workdir=tmp_path, datasets=["website"]
     )
 
@@ -239,12 +238,12 @@ def test_verify_release_rejects_manifest_without_source_pins(monkeypatch, tmp_pa
     )
 
     with pytest.raises(ValueError, match="lacks source revision"):
-        runner.verify_release(cast(HubApi, _ReadOnlyApi(set())), workdir=tmp_path)
+        release_orchestration.verify_release(cast(HubApi, _ReadOnlyApi(set())), workdir=tmp_path)
 
 
 def test_run_release_rejects_non_positive_workers(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="workers"):
-        runner.run_release(
+        release_orchestration.run_release(
             cast(HubApi, object()),
             ReleaseOptions(
                 reference_config=_config(tmp_path),
@@ -256,7 +255,7 @@ def test_run_release_rejects_non_positive_workers(tmp_path: Path) -> None:
 
 def test_run_release_rejects_negative_intersection_error_limit(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="max_intersection_errors"):
-        runner.run_release(
+        release_orchestration.run_release(
             cast(HubApi, object()),
             ReleaseOptions(
                 reference_config=_config(tmp_path),
@@ -274,8 +273,10 @@ def test_intersection_error_limit_fails_only_when_exceeded() -> None:
 
     card = DatasetCardAccumulator()
     card.record_intersection_errors(3)
-    plan = cast(runner.DatasetPlan, SimpleNamespace(spec=SimpleNamespace(name="website")))
+    plan = cast(DatasetPlan, SimpleNamespace(spec=SimpleNamespace(name="website")))
     card_publishing._enforce_intersection_error_limit(card, plan, None)
     card_publishing._enforce_intersection_error_limit(card, plan, 3)
-    with pytest.raises(runner.IntersectionErrorLimitError, match=r"website: 3 .* limit of 2"):
+    with pytest.raises(
+        card_publishing.IntersectionErrorLimitError, match=r"website: 3 .* limit of 2"
+    ):
         card_publishing._enforce_intersection_error_limit(card, plan, 2)
