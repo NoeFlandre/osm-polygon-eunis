@@ -10,7 +10,7 @@ import re
 import tempfile
 import time
 import xml.etree.ElementTree as ET  # types only; parsing goes through defusedxml
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from importlib.metadata import version
 from pathlib import Path
@@ -37,7 +37,9 @@ _SHARE_TOKEN = re.compile(
     re.IGNORECASE,
 )
 _DEFAULT_CATALOG_API = "https://sdi.eea.europa.eu/catalogue/datahub/api/records"
-_DEFAULT_CLASSIFICATION_RECORD = "bfe4c237-e378-4a83-ab21-b3807f96c2e2"
+_DEFAULT_WEBDAV_HOST = "sdi.eea.europa.eu"
+_RASTER_SUFFIXES = (".tif", ".tiff")
+_VECTOR_SUFFIX = ".gpkg"
 _WEBDAV_DEPTH = "1"
 _XLSX_MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _HTTP_RETRY_ATTEMPTS = 3
@@ -113,18 +115,22 @@ def _child_text(element: ET.Element, name: str) -> str | None:
     return None
 
 
-def parse_webdav_entries(payload: bytes) -> tuple[WebDavEntry, ...]:
+def parse_webdav_entries(
+    payload: bytes,
+    *,
+    host: str = _DEFAULT_WEBDAV_HOST,
+) -> tuple[WebDavEntry, ...]:
     """Parse a public Nextcloud WebDAV directory listing."""
 
     root = _safe_fromstring(payload)
     return tuple(
-        _webdav_entry(response)
+        _webdav_entry(response, host)
         for response in root.iter()
         if _local_name(response.tag) == "response"
     )
 
 
-def _webdav_entry(response: ET.Element) -> WebDavEntry:
+def _webdav_entry(response: ET.Element, host: str) -> WebDavEntry:
     path = _child_text(response, "href")
     if not path:
         raise ValueError("WebDAV response is missing href")
@@ -132,7 +138,7 @@ def _webdav_entry(response: ET.Element) -> WebDavEntry:
     etag = _webdav_etag(response)
     is_collection = _is_collection(response)
     parts = urlsplit(path)
-    url = path if parts.scheme else urlunsplit(("https", "sdi.eea.europa.eu", path, "", ""))
+    url = path if parts.scheme else urlunsplit(("https", host, path, "", ""))
     return WebDavEntry(path, url, size, etag, is_collection)
 
 
@@ -297,10 +303,10 @@ def _shared_strings(archive: ZipFile) -> tuple[str, ...]:
         root = _safe_fromstring(archive.read("xl/sharedStrings.xml"))
     except KeyError:
         return ()
-    return tuple(_shared_string(item) for item in root.iter() if _local_name(item.tag) == "si")
+    return tuple(_joined_text(item) for item in root.iter() if _local_name(item.tag) == "si")
 
 
-def _shared_string(item: ET.Element) -> str:
+def _joined_text(item: ET.Element) -> str:
     return "".join(element.text or "" for element in item.iter() if _local_name(element.tag) == "t")
 
 
@@ -321,7 +327,7 @@ def _xlsx_cell_value(cell: ET.Element, shared_strings: tuple[str, ...]) -> str:
     if cell_type == "s":
         return _shared_string_value(shared_strings, raw)
     if cell_type == "inlineStr":
-        return _inline_string(cell)
+        return _joined_text(cell)
     return raw
 
 
@@ -330,10 +336,6 @@ def _shared_string_value(shared_strings: tuple[str, ...], raw: str) -> str:
         return shared_strings[int(raw)]
     except (IndexError, ValueError) as error:
         raise ValueError("XLSX cell references an invalid shared string") from error
-
-
-def _inline_string(cell: ET.Element) -> str:
-    return "".join(element.text or "" for element in cell.iter() if _local_name(element.tag) == "t")
 
 
 def _xlsx_rows(archive: ZipFile, shared_strings: tuple[str, ...]) -> Iterable[tuple[str, ...]]:
@@ -396,11 +398,17 @@ def raster_assets_from_entries(
     return tuple(sorted(assets, key=lambda asset: asset.path))
 
 
+def _is_raster_entry(entry: WebDavEntry) -> bool:
+    return not entry.is_collection and entry.path.lower().endswith(_RASTER_SUFFIXES)
+
+
+def _is_vector_entry(entry: WebDavEntry) -> bool:
+    return entry.path.lower().endswith(_VECTOR_SUFFIX)
+
+
 def _raster_codes(entries: Iterable[WebDavEntry]) -> tuple[str, ...]:
     return tuple(
-        parse_layer_code(Path(entry.path).name)
-        for entry in entries
-        if not entry.is_collection and entry.path.lower().endswith((".tif", ".tiff"))
+        parse_layer_code(Path(entry.path).name) for entry in entries if _is_raster_entry(entry)
     )
 
 
@@ -410,7 +418,7 @@ def _raster_asset(
     record_id: str,
     source_version: str,
 ) -> RemoteAsset | None:
-    if entry.is_collection or not entry.path.lower().endswith((".tif", ".tiff")):
+    if not _is_raster_entry(entry):
         return None
     code = parse_layer_code(Path(entry.path).name)
     if code not in labels:
@@ -431,22 +439,15 @@ def _raster_asset(
 
 def _online_resources(value: object) -> Iterable[tuple[str | None, str]]:
     if isinstance(value, Mapping):
-        yield from _online_mapping_resources(value)
+        resource = _online_resource(value)
+        if resource is not None:
+            yield resource
+        children: Iterable[object] = value.values()
+    elif isinstance(value, list):
+        children = value
+    else:
         return
-    if isinstance(value, list):
-        yield from _online_list_resources(value)
-
-
-def _online_mapping_resources(value: Mapping[object, object]) -> Iterable[tuple[str | None, str]]:
-    resource = _online_resource(value)
-    if resource is not None:
-        yield resource
-    for child in value.values():
-        yield from _online_resources(child)
-
-
-def _online_list_resources(value: list[object]) -> Iterable[tuple[str | None, str]]:
-    for child in value:
+    for child in children:
         yield from _online_resources(child)
 
 
@@ -476,23 +477,16 @@ def _catalog_mapping_value(value: Mapping[object, object]) -> str | None:
 
 
 def _all_text(value: object) -> Iterable[str]:
-    if isinstance(value, Mapping):
-        yield from _mapping_text(value)
-        return
-    if isinstance(value, list):
-        yield from _list_text(value)
-        return
     if isinstance(value, str):
         yield value
-
-
-def _mapping_text(value: Mapping[object, object]) -> Iterable[str]:
-    for child in value.values():
-        yield from _all_text(child)
-
-
-def _list_text(value: list[object]) -> Iterable[str]:
-    for child in value:
+        return
+    if isinstance(value, Mapping):
+        children: Iterable[object] = value.values()
+    elif isinstance(value, list):
+        children = value
+    else:
+        return
+    for child in children:
         yield from _all_text(child)
 
 
@@ -512,9 +506,9 @@ def _validated_catalog_links(
     record: Mapping[str, object],
 ) -> tuple[str, str, str]:
     if not isinstance(title, str) or not folder or not service:
-        raise ValueError("EEA catalog record lacks title, EPSG:3035, folder, or service")
+        raise ValueError("EEA catalog record lacks title, folder, or service")
     if not _has_equal_area_crs(record):
-        raise ValueError("EEA catalog record lacks title, EPSG:3035, folder, or service")
+        raise ValueError("EEA catalog record lacks EPSG:3035")
     return title, folder, service
 
 
@@ -555,26 +549,22 @@ def _discover_entries(
     root_url: str,
     *,
     max_depth: int = 3,
-    file_suffixes: tuple[str, ...] = (".tif", ".tiff", ".gpkg"),
+    file_suffixes: tuple[str, ...] = (*_RASTER_SUFFIXES, _VECTOR_SUFFIX),
 ) -> tuple[WebDavEntry, ...]:
     queue: list[tuple[str, int]] = [(root_url, 0)]
     seen: set[str] = set()
     files: list[WebDavEntry] = []
     while queue:
         url, depth = queue.pop(0)
-        if not _should_visit(url, depth, seen, max_depth):
+        if url in seen or depth > max_depth:
             continue
         seen.add(url)
         response = client.request("PROPFIND", url, headers={"Depth": _WEBDAV_DEPTH})
         response.raise_for_status()
         context = _WebDavTraversalContext(url, depth, max_depth, file_suffixes, queue, files)
-        for entry in parse_webdav_entries(response.content):
+        for entry in parse_webdav_entries(response.content, host=urlsplit(url).netloc):
             _collect_entry(entry, context)
     return tuple(sorted(files, key=lambda entry: entry.path))
-
-
-def _should_visit(url: str, depth: int, seen: set[str], max_depth: int) -> bool:
-    return url not in seen and depth <= max_depth
 
 
 def _collect_entry(entry: WebDavEntry, context: _WebDavTraversalContext) -> None:
@@ -614,38 +604,31 @@ def _retry_delay(attempt: int) -> float:
     return _HTTP_RETRY_BASE_SECONDS * (2**attempt)
 
 
-def _get_attempt(
-    client: _HttpClient,
-    url: str,
-    kwargs: Mapping[str, object],
-    attempt: int,
-) -> _HttpResponse | None:
-    try:
-        response = client.get(url, **kwargs)
-    except httpx.TransportError as error:
-        if attempt + 1 == _HTTP_RETRY_ATTEMPTS:
-            raise
-        logger.warning(
-            "retrying EEA metadata GET %s after transport error (attempt %d/%d): %s",
-            url,
-            attempt + 1,
-            _HTTP_RETRY_ATTEMPTS,
-            error,
-        )
-        time.sleep(_retry_delay(attempt))
-        return None
-    if _retryable_status(response.status_code) and attempt + 1 < _HTTP_RETRY_ATTEMPTS:
-        logger.warning(
-            "retrying EEA metadata GET %s after HTTP %d (attempt %d/%d)",
-            url,
-            response.status_code,
-            attempt + 1,
-            _HTTP_RETRY_ATTEMPTS,
-        )
-        time.sleep(_retry_delay(attempt))
-        return None
-    response.raise_for_status()
-    return response
+def _is_transient_error(error: Exception) -> bool:
+    if isinstance(error, httpx.HTTPStatusError):
+        return _retryable_status(error.response.status_code)
+    return isinstance(error, httpx.TransportError | ValueError)
+
+
+def _retrying[T](operation: Callable[[], T], *, describe: str) -> T:
+    """Run `operation`, retrying transient failures with exponential backoff."""
+
+    for attempt in range(_HTTP_RETRY_ATTEMPTS - 1):
+        try:
+            return operation()
+        except (httpx.HTTPError, ValueError) as error:
+            if not _is_transient_error(error):
+                raise
+            logger.warning(
+                "retrying %s after %s (attempt %d/%d): %s",
+                describe,
+                type(error).__name__,
+                attempt + 1,
+                _HTTP_RETRY_ATTEMPTS,
+                error,
+            )
+            time.sleep(_retry_delay(attempt))
+    return operation()
 
 
 def _get_with_retry(
@@ -657,11 +640,13 @@ def _get_with_retry(
     """Retry transient metadata GET failures a small, bounded number of times."""
 
     kwargs = {"params": params} if params is not None else {}
-    for attempt in range(_HTTP_RETRY_ATTEMPTS):
-        response = _get_attempt(client, url, kwargs, attempt)
-        if response is not None:
-            return response
-    raise AssertionError("unreachable retry loop")
+
+    def get() -> _HttpResponse:
+        response = client.get(url, **kwargs)
+        response.raise_for_status()
+        return response
+
+    return _retrying(get, describe=f"EEA metadata GET {url}")
 
 
 def _fetch_arcgis_page(client: _HttpClient, service_url: str, offset: int) -> Mapping[str, object]:
@@ -677,7 +662,6 @@ def _fetch_arcgis_page(client: _HttpClient, service_url: str, offset: int) -> Ma
             "f": "json",
         },
     )
-    response.raise_for_status()
     page = response.json()
     if not isinstance(page, Mapping):
         raise SchemaError("EEA ImageServer response is not an object")
@@ -689,12 +673,45 @@ def _merge_labels(labels: dict[str, str], additions: Mapping[str, str]) -> None:
         _merge_label(labels, code, name, source="ImageServer")
 
 
-def _classification_catalog_links(record: Mapping[str, object]) -> tuple[str, str]:
+def _classification_folder(record: Mapping[str, object]) -> str:
     title = _catalog_title(record, "eunis terrestrial habitat classification")
     folder = _resource_url(record, "EEA:FOLDERPATH")
     if not isinstance(title, str) or not folder:
         raise ValueError("EEA classification record lacks title or public folder")
-    return title, folder
+    return folder
+
+
+def _classification_links(record: Mapping[str, object]) -> tuple[str, str]:
+    folder = _classification_folder(record)
+    return folder, folder
+
+
+def _fetch_record_entries[L: tuple[str, ...]](
+    client: _HttpClient,
+    record_id: str,
+    catalog_api: str,
+    links_fn: Callable[[Mapping[str, object]], L],
+    *,
+    max_depth: int = 3,
+    file_suffixes: tuple[str, ...] = (*_RASTER_SUFFIXES, _VECTOR_SUFFIX),
+) -> tuple[L, tuple[WebDavEntry, ...]]:
+    """Resolve a catalog record to its parsed links and public WebDAV entries.
+
+    `links_fn` returns a tuple whose second item is the public folder URL.
+    """
+
+    response = _get_with_retry(client, f"{catalog_api.rstrip('/')}/{record_id}?language=eng")
+    links = links_fn(response.json())
+    folder_url = links[1]
+    share_page = _get_with_retry(client, folder_url)
+    token = extract_share_token(share_page.text)
+    entries = _discover_entries(
+        client,
+        _webdav_folder_url(folder_url, token),
+        max_depth=max_depth,
+        file_suffixes=file_suffixes,
+    )
+    return links, entries
 
 
 def _select_classification_entry(entries: Iterable[WebDavEntry]) -> WebDavEntry:
@@ -710,21 +727,17 @@ def _select_classification_entry(entries: Iterable[WebDavEntry]) -> WebDavEntry:
 
 def resolve_classification_labels(
     client: _HttpClient,
-    record_id: str = _DEFAULT_CLASSIFICATION_RECORD,
+    record_id: str,
     *,
     catalog_api: str = _DEFAULT_CATALOG_API,
 ) -> dict[str, str]:
     """Fetch and parse the small authoritative 2021 EUNIS table in memory."""
 
-    response = _get_with_retry(client, f"{catalog_api.rstrip('/')}/{record_id}?language=eng")
-    response.raise_for_status()
-    _title, folder_url = _classification_catalog_links(response.json())
-    share_page = _get_with_retry(client, folder_url)
-    share_page.raise_for_status()
-    token = extract_share_token(share_page.text)
-    entries = _discover_entries(
+    _links, entries = _fetch_record_entries(
         client,
-        _webdav_folder_url(folder_url, token),
+        record_id,
+        catalog_api,
+        _classification_links,
         max_depth=1,
         file_suffixes=(".xlsx",),
     )
@@ -732,7 +745,6 @@ def resolve_classification_labels(
     if entry.size is None:
         raise ValueError("EEA classification workbook has no byte size")
     workbook = _get_with_retry(client, entry.url)
-    workbook.raise_for_status()
     if len(workbook.content) != entry.size:
         raise ValueError("EEA classification workbook byte count differs from metadata")
     return parse_classification_workbook(workbook.content)
@@ -748,13 +760,9 @@ def resolve_group(
 ) -> EeaGroup:
     """Resolve one official catalog record without downloading its data."""
 
-    response = _get_with_retry(client, f"{catalog_api.rstrip('/')}/{record_id}?language=eng")
-    response.raise_for_status()
-    title, folder_url, service_url = catalog_links(response.json())
-    share_page = _get_with_retry(client, folder_url)
-    share_page.raise_for_status()
-    token = extract_share_token(share_page.text)
-    entries = _discover_entries(client, _webdav_folder_url(folder_url, token))
+    (title, folder_url, service_url), entries = _fetch_record_entries(
+        client, record_id, catalog_api, catalog_links
+    )
     labels = _resolve_group_labels(client, service_url, entries, fallback_labels)
     raster_assets = raster_assets_from_entries(
         entries,
@@ -786,16 +794,12 @@ def _vector_asset(
     record_id: str,
     source_version: str,
 ) -> RemoteAsset | None:
-    vector_entries = _vector_entries(entries)
+    vector_entries = tuple(entry for entry in entries if _is_vector_entry(entry))
     if len(vector_entries) > 1:
         raise ValueError(f"EEA record has multiple GeoPackages: {record_id}")
     if not vector_entries:
         return None
     return _build_vector_asset(vector_entries[0], record_id, source_version)
-
-
-def _vector_entries(entries: Iterable[WebDavEntry]) -> tuple[WebDavEntry, ...]:
-    return tuple(entry for entry in entries if entry.path.lower().endswith(".gpkg"))
 
 
 def _build_vector_asset(
@@ -869,11 +873,12 @@ class _ConfigSettings:
 
 
 def _config_settings(config: object) -> _ConfigSettings:
-    config = _config_mapping(config)
+    if not isinstance(config, Mapping):
+        raise SchemaError("EEA config must be a JSON object")
     source_version = _required_config_string(config.get("source_version"), "source_version")
     record_ids = _record_ids(config.get("catalog_records"))
     classification_record = _required_config_string(
-        config.get("classification_record", _DEFAULT_CLASSIFICATION_RECORD),
+        config.get("classification_record"),
         "classification_record",
     )
     supplemental_labels = config.get("supplemental_labels", {})
@@ -881,12 +886,6 @@ def _config_settings(config: object) -> _ConfigSettings:
         raise SchemaError("EEA config has invalid supplemental_labels")
     labels = _supplemental_labels(supplemental_labels)
     return _ConfigSettings(source_version, record_ids, classification_record, labels)
-
-
-def _config_mapping(config: object) -> Mapping[object, object]:
-    if not isinstance(config, Mapping):
-        raise SchemaError("EEA config must be a JSON object")
-    return config
 
 
 def _required_config_string(value: object, field: str) -> str:
@@ -926,17 +925,6 @@ def _resolve_groups(
     )
 
 
-def _should_retry_download_error(
-    error: httpx.HTTPStatusError | httpx.TransportError,
-    attempt: int,
-) -> bool:
-    if attempt + 1 == _HTTP_RETRY_ATTEMPTS:
-        return False
-    if isinstance(error, httpx.TransportError):
-        return True
-    return _retryable_status(error.response.status_code)
-
-
 def _stream_asset(
     client: StreamClient,
     asset: RemoteAsset,
@@ -954,48 +942,11 @@ def _stream_asset(
     return written, digest.hexdigest()
 
 
-def _download_attempt_result(
-    written: int,
-    expected_size: int,
-    digest: str,
-    attempt: int,
-) -> str | None:
-    if written == expected_size:
-        return digest
-    if attempt + 1 == _HTTP_RETRY_ATTEMPTS:
-        raise ValueError(f"EEA asset byte count {written} does not match metadata {expected_size}")
-    return None
-
-
-def _download_asset_attempt(
-    client: StreamClient,
-    asset: RemoteAsset,
-    partial_path: Path,
-    attempt: int,
-) -> str | None:
-    try:
-        written, digest = _stream_asset(client, asset, partial_path)
-    except (httpx.HTTPStatusError, httpx.TransportError) as error:
-        if not _should_retry_download_error(error, attempt):
-            raise
-        logger.warning(
-            "retrying EEA asset download %s after %s (attempt %d/%d): %s",
-            asset.url,
-            type(error).__name__,
-            attempt + 1,
-            _HTTP_RETRY_ATTEMPTS,
-            error,
-        )
-        return None
-    result = _download_attempt_result(written, asset.size, digest, attempt)
-    if result is None:
-        logger.warning(
-            "retrying EEA asset download %s after byte count mismatch (attempt %d/%d)",
-            asset.url,
-            attempt + 1,
-            _HTTP_RETRY_ATTEMPTS,
-        )
-    return result
+def _download_attempt(client: StreamClient, asset: RemoteAsset, partial_path: Path) -> str:
+    written, digest = _stream_asset(client, asset, partial_path)
+    if written != asset.size:
+        raise ValueError(f"EEA asset byte count {written} does not match metadata {asset.size}")
+    return digest
 
 
 def download_asset(client: StreamClient, asset: RemoteAsset, destination: Path) -> str:
@@ -1010,12 +961,11 @@ def download_asset(client: StreamClient, asset: RemoteAsset, destination: Path) 
     ) as temporary:
         partial_path = Path(temporary.name)
     try:
-        for attempt in range(_HTTP_RETRY_ATTEMPTS):
-            digest = _download_asset_attempt(client, asset, partial_path, attempt)
-            if digest is not None:
-                partial_path.replace(destination)
-                return digest
-            time.sleep(_retry_delay(attempt))
+        digest = _retrying(
+            lambda: _download_attempt(client, asset, partial_path),
+            describe=f"EEA asset download {asset.url}",
+        )
+        partial_path.replace(destination)
+        return digest
     finally:
         partial_path.unlink(missing_ok=True)
-    raise AssertionError("unreachable retry loop")

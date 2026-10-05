@@ -15,7 +15,7 @@ from osm_polygon_eunis._protocols import HttpClient
 from osm_polygon_eunis.eea import (
     RemoteAsset,
     WebDavEntry,
-    _classification_catalog_links,
+    _classification_folder,
     _discover_entries,
     _fetch_arcgis_labels,
     _get_with_retry,
@@ -172,10 +172,7 @@ def test_classification_links_accept_iso_json_character_strings() -> None:
         ],
     }
 
-    assert _classification_catalog_links(record) == (
-        "EUNIS terrestrial habitat classification review",
-        "https://example.test/folder",
-    )
+    assert _classification_folder(record) == "https://example.test/folder"
 
 
 def test_webdav_discovery_walks_nested_directories() -> None:
@@ -228,7 +225,12 @@ class _FakeResponse:
         return self._payload
 
     def raise_for_status(self) -> None:
-        return None
+        if self.status_code >= 400:
+            raise httpx.HTTPStatusError(
+                "status",
+                request=httpx.Request("GET", "https://example.test"),
+                response=httpx.Response(self.status_code),
+            )
 
 
 class _FakeHttpClient:
@@ -300,19 +302,44 @@ def test_metadata_get_retry_is_logged(caplog, monkeypatch) -> None:
     )
 
 
-def test_metadata_get_attempt_returns_immediate_response() -> None:
-    response = _FakeResponse(payload={"ok": True})
+def test_metadata_get_sleeps_with_exponential_backoff(monkeypatch) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr(eea.time, "sleep", sleeps.append)
 
     class Client:
-        def get(self, url, **kwargs):
-            assert url == "https://example.test/metadata"
-            assert kwargs == {}
-            return response
+        def __init__(self) -> None:
+            self.calls = 0
 
-    assert (
-        eea._get_attempt(cast(HttpClient, Client()), "https://example.test/metadata", {}, 0)
-        is response
-    )
+        def get(self, url, **kwargs):
+            del url, kwargs
+            self.calls += 1
+            return _FakeResponse(status_code=503)
+
+    client = Client()
+    with pytest.raises(httpx.HTTPStatusError):
+        _get_with_retry(cast(HttpClient, client), "https://example.test/metadata")
+
+    assert client.calls == eea._HTTP_RETRY_ATTEMPTS
+    assert sleeps == [0.5, 1.0]
+
+
+def test_metadata_get_does_not_retry_client_errors(monkeypatch) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr(eea.time, "sleep", sleeps.append)
+
+    class Client:
+        calls = 0
+
+        def get(self, url, **kwargs):
+            del url, kwargs
+            self.calls += 1
+            return _FakeResponse(status_code=404)
+
+    client = Client()
+    with pytest.raises(httpx.HTTPStatusError):
+        _get_with_retry(cast(HttpClient, client), "https://example.test/metadata")
+    assert client.calls == 1
+    assert sleeps == []
 
 
 def _catalog_record(folder: str, service: str) -> dict[str, object]:
@@ -575,7 +602,7 @@ def test_catalog_and_classification_selection_reject_ambiguous_records() -> None
             )
         )
     with pytest.raises(ValueError, match="title or public folder"):
-        _classification_catalog_links({})
+        _classification_folder({})
 
 
 def test_arcgis_pagination_and_non_mapping_pages() -> None:
@@ -755,7 +782,8 @@ def test_vector_asset_and_group_resolution_fail_closed(monkeypatch) -> None:
 
 
 def test_config_resolution_and_asset_download(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(eea.time, "sleep", lambda _delay: None)
+    sleeps: list[float] = []
+    monkeypatch.setattr(eea.time, "sleep", sleeps.append)
     config_path = tmp_path / "reference.json"
     config_path.write_text(
         json.dumps(
@@ -780,7 +808,12 @@ def test_config_resolution_and_asset_download(monkeypatch, tmp_path: Path) -> No
             eea._config_settings(invalid)
     with pytest.raises(ValueError, match="supplemental"):
         eea._config_settings(
-            {"source_version": "x", "catalog_records": [], "supplemental_labels": {"R11": ""}}
+            {
+                "source_version": "x",
+                "catalog_records": [],
+                "classification_record": "classification",
+                "supplemental_labels": {"R11": ""},
+            }
         )
 
     class FakeClient:
@@ -852,6 +885,7 @@ def test_config_resolution_and_asset_download(monkeypatch, tmp_path: Path) -> No
             tmp_path / "bad.bin",
         )
     assert calls == ["GET"] * eea._HTTP_RETRY_ATTEMPTS
+    assert sleeps == [0.5, 1.0]
 
 
 def test_webdav_listing_rejects_xml_entity_declarations() -> None:
