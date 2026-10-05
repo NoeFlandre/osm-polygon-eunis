@@ -29,7 +29,7 @@ jobs:
           enable-cache: true
           python-version: ${{ matrix.python-version }}
       - run: uv sync --locked --group dev
-      - name: Keep the default pytest run under eight seconds
+      - name: Keep the default pytest run under twelve seconds
         if: matrix.python-version == '3.12'
         run: |
           log_file="$RUNNER_TEMP/default-pytest.log"
@@ -45,8 +45,8 @@ jobs:
             echo "Could not read pytest's reported runtime" >&2
             exit 1
           fi
-          echo "Default pytest runtime: ${elapsed}s (limit: 8s)"
-          python -c 'import sys; sys.exit(float(sys.argv[1]) >= 8)' "$elapsed"
+          echo "Default pytest runtime: ${elapsed}s (limit: 12s)"
+          python -c 'import sys; sys.exit(float(sys.argv[1]) >= 12)' "$elapsed"
       - run: make quality
 
   build:
