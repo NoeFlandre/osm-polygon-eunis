@@ -98,9 +98,8 @@ def _open_shard(source: Path, batch_size: int, label: str, column: str) -> pq.Pa
 def _stream_batches(parquet_file: pq.ParquetFile, batch_size: int) -> Iterator[pa.Table]:
     """Yield each bounded input batch as a one-batch table with the source schema."""
 
-    schema = parquet_file.schema_arrow
     for batch in parquet_file.iter_batches(batch_size=batch_size):
-        yield pa.Table.from_batches([batch], schema=schema)
+        yield pa.Table.from_batches([batch])
 
 
 def _overlap_results(values: list[object], reference: OverlapReference) -> list[EunisResult]:

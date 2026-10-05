@@ -151,7 +151,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup, the task
 targets, and the change expectations. `make quality` is the same deterministic
 gate that CI runs.
 
-The matching kernel mutation baseline runs in its own workflow. The workflow has
+The mutation baselines for five core modules run in their own workflow. The workflow has
 a path filter and runs every week. See the
 [mutation testing guide](docs/mutation-testing.md).
 

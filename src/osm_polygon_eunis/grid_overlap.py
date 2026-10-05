@@ -46,12 +46,9 @@ def band_row_ranges(
     tiles_per_band = max(1, MAX_BAND_CELLS // (width * TILE_SIZE))
     step = tiles_per_band * TILE_SIZE
     first = (row_start // TILE_SIZE) * TILE_SIZE
-    ranges: list[tuple[int, int]] = []
-    start = first
-    while start < row_end:
-        ranges.append((max(start, row_start), min(start + step, row_end)))
-        start += step
-    return ranges
+    return [
+        (max(start, row_start), min(start + step, row_end)) for start in range(first, row_end, step)
+    ]
 
 
 def weighted_cells(
