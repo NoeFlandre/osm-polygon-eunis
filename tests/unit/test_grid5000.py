@@ -330,7 +330,7 @@ def test_submit_runs_policy_sync_oar_and_post_policy_without_secrets(tmp_path: P
         runner=fake_runner,
     )
 
-    assert result.job is not None
+    assert result.job is not None, "submission should record the new job"
     assert result.job.job_id == "123456"
     assert result.datasets == ("website", "wikidata", "description")
     assert result.source_revision == "abc123"
@@ -596,8 +596,7 @@ def test_submit_fails_closed_when_exclusion_scope_does_not_match_request(tmp_pat
 
 
 def test_parse_active_eunis_jobs_report_returns_validated_job_lists() -> None:
-    parse_report = getattr(grid5000, "_parse_active_eunis_jobs_report", None)
-    assert callable(parse_report), "active-job report parsing should be a separate unit"
+    parse_report = grid5000._parse_active_eunis_jobs_report
 
     active = [{"site": "nancy", "job_id": "6942984", "state": "running"}]
     errors = [{"site": "bordeaux", "error": "unreachable"}]
@@ -617,8 +616,7 @@ def test_parse_active_eunis_jobs_report_returns_validated_job_lists() -> None:
     ],
 )
 def test_parse_active_eunis_jobs_report_rejects_malformed_lists(output: str) -> None:
-    parse_report = getattr(grid5000, "_parse_active_eunis_jobs_report", None)
-    assert callable(parse_report), "active-job report parsing should be a separate unit"
+    parse_report = grid5000._parse_active_eunis_jobs_report
 
     with pytest.raises(TypeError, match="cannot verify active EUNIS jobs"):
         parse_report(output)
@@ -733,6 +731,7 @@ def test_submit_replaces_state_after_terminal_job_and_writes_safe_state(
     )
 
     assert first.job is not None
+    assert first.job.job_id == "654321"
     assert second.job is not None
     assert second.job.job_id == "654321"
     payload = state.read_text(encoding="utf-8")
@@ -855,7 +854,8 @@ def test_submit_tolerates_policy_warnings_about_other_jobs(tmp_path: Path) -> No
         runner=fake_runner,
     )
 
-    assert result.job is not None
+    assert result.job is not None, "tolerated warnings must not block submission"
+    assert result.job.job_id == "123456"
 
 
 @pytest.mark.parametrize(

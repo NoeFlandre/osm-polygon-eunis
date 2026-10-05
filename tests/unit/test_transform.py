@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from osm_polygon_eunis.domain import EUNIS_FIELDS, EunisResult
 from osm_polygon_eunis.transform import (
@@ -320,3 +321,56 @@ def test_sidecar_without_counter_on_reference_counts_zero_and_bad_schema_fails(
             tmp_path / "out.parquet",
             SidecarAppendOptions(batch_size=1),
         )
+
+
+def _empty_geometry_shard(path: Path) -> None:
+    schema = pa.schema([("polygon_id", pa.string()), ("geometry", pa.string())])
+    pq.write_table(schema.empty_table(), path)
+
+
+def test_all_streaming_functions_handle_zero_row_shards(tmp_path: Path) -> None:
+    source = tmp_path / "empty.parquet"
+    _empty_geometry_shard(source)
+    reference = _FakeReference([])
+
+    enriched = enrich_parquet_shard(
+        source, tmp_path / "e.parquet", reference=reference, batch_size=2
+    )
+    linked = enrich_link_shard(
+        source, tmp_path / "l.parquet", labels_by_polygon_id={}, batch_size=2
+    )
+    sidecar = tmp_path / "s.parquet"
+    updated = update_label_sidecar(
+        source, sidecar, SidecarUpdateOptions(batch_size=2, reference=reference)
+    )
+    appended = append_label_sidecar(
+        source, sidecar, tmp_path / "a.parquet", SidecarAppendOptions(batch_size=2)
+    )
+
+    assert (enriched, linked, updated, appended) == (0, 0, 0, 0)
+    assert pq.read_table(tmp_path / "e.parquet").column_names[-4:] == list(EUNIS_FIELDS)
+    assert pq.read_table(tmp_path / "a.parquet").num_rows == 0
+
+
+def test_streaming_functions_keep_validation_messages(tmp_path: Path) -> None:
+    source = tmp_path / "empty.parquet"
+    _empty_geometry_shard(source)
+    out = tmp_path / "out.parquet"
+    reference = _FakeReference([])
+
+    with pytest.raises(ValueError, match="batch_size must be positive"):
+        enrich_parquet_shard(source, out, reference=reference, batch_size=0)
+    with pytest.raises(ValueError, match="geometry column 'nope' is missing"):
+        enrich_parquet_shard(source, out, reference=reference, batch_size=1, geometry_column="nope")
+    with pytest.raises(ValueError, match="polygon id column 'nope' is missing"):
+        enrich_link_shard(
+            source, out, labels_by_polygon_id={}, batch_size=1, polygon_id_column="nope"
+        )
+    with pytest.raises(ValueError, match="geometry column 'nope' is missing"):
+        update_label_sidecar(
+            source,
+            out,
+            SidecarUpdateOptions(reference=reference, geometry_column="nope"),
+        )
+    with pytest.raises(ValueError, match="geometry column 'nope' is missing"):
+        append_label_sidecar(source, out, out, SidecarAppendOptions(geometry_column="nope"))
