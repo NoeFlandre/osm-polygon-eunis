@@ -13,7 +13,7 @@ import pyarrow.parquet as pq
 from osm_polygon_eunis import card_publishing, release_orchestration, release_plan, shard_processing
 from osm_polygon_eunis._protocols import HubApi
 from osm_polygon_eunis.geometry import GEOMETRY_POLICY
-from osm_polygon_eunis.geometry_jobs import _GeometryRunOptions
+from osm_polygon_eunis.geometry_chunks import _GeometryRunOptions
 from osm_polygon_eunis.options import BatchLimits, ReleaseOptions
 from osm_polygon_eunis.publish import (
     MANIFEST_VERSION,

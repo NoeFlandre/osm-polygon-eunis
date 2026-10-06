@@ -14,7 +14,13 @@ from typing import cast
 
 import pytest
 
-from osm_polygon_eunis import geometry_jobs, reference_staging
+from osm_polygon_eunis import (
+    geometry_checkpoints,
+    geometry_chunks,
+    geometry_jobs,
+    geometry_workers,
+    reference_staging,
+)
 from osm_polygon_eunis._protocols import HubApi, StreamClient
 from osm_polygon_eunis.eea import EeaGroup, RemoteAsset
 from osm_polygon_eunis.options import BatchLimits, GeometryPathOptions
@@ -34,7 +40,7 @@ def test_reference_signature_is_order_independent_and_uses_current_kernel() -> N
     )
 
     assert (
-        geometry_jobs._reference_signature({"b": "2", "a": "1"}, 4)
+        geometry_checkpoints._reference_signature({"b": "2", "a": "1"}, 4)
         == hashlib.sha256(expected_payload.encode("utf-8")).hexdigest()
     )
 
@@ -45,28 +51,34 @@ def test_reference_signature_includes_reference_version_and_labels() -> None:
     revised_asset = replace(asset, source_version="EEA-next")
     relabeled_group = replace(group, labels={"R11": "new name"})
 
-    initial = geometry_jobs._reference_signature({}, 4, (group,))
+    initial = geometry_checkpoints._reference_signature({}, 4, (group,))
 
     assert (
-        geometry_jobs._reference_signature({}, 4, (replace(group, vector_asset=revised_asset),))
+        geometry_checkpoints._reference_signature(
+            {}, 4, (replace(group, vector_asset=revised_asset),)
+        )
         != initial
     )
-    assert geometry_jobs._reference_signature({}, 4, (relabeled_group,)) != initial
+    assert geometry_checkpoints._reference_signature({}, 4, (relabeled_group,)) != initial
 
 
 def test_geometry_checkpoint_signature_includes_source_revision_and_shard() -> None:
     spec = DatasetSpec("website", "source", "target", "polygons/*.parquet")
     plan = DatasetPlan(spec, "revision-a", (), (), ())
-    initial = geometry_jobs._geometry_checkpoint_signature("references", plan, "polygons/a.parquet")
+    initial = geometry_checkpoints._geometry_checkpoint_signature(
+        "references", plan, "polygons/a.parquet"
+    )
 
     assert (
-        geometry_jobs._geometry_checkpoint_signature(
+        geometry_checkpoints._geometry_checkpoint_signature(
             "references", replace(plan, source_revision="revision-b"), "polygons/a.parquet"
         )
         != initial
     )
     assert (
-        geometry_jobs._geometry_checkpoint_signature("references", plan, "polygons/b.parquet")
+        geometry_checkpoints._geometry_checkpoint_signature(
+            "references", plan, "polygons/b.parquet"
+        )
         != initial
     )
 
@@ -82,9 +94,9 @@ def test_run_plan_log_records_reference_batches_and_checkpoint_signatures(
         (),
     )
     stderr = StringIO()
-    monkeypatch.setattr(geometry_jobs.sys, "stderr", stderr)
+    monkeypatch.setattr(geometry_workers.sys, "stderr", stderr)
 
-    geometry_jobs._log_geometry_run_plan((plan,), (0, 2), "reference-signature")
+    geometry_workers._log_geometry_run_plan((plan,), (0, 2), "reference-signature")
 
     signatures = {
         path: hashlib.sha256(
@@ -114,7 +126,7 @@ def test_completed_batches_reject_old_kernel_marker_without_deleting_it(tmp_path
     marker = sidecar.with_name(f"{sidecar.name}.done")
     marker.write_text(json.dumps({"signature": "kernel-v2", "batches": [0, 1]}))
 
-    assert geometry_jobs._completed_batches(sidecar, "kernel-v3") == set()
+    assert geometry_checkpoints._completed_batches(sidecar, "kernel-v3") == set()
     assert marker.is_file()
     assert json.loads(marker.read_text()) == {
         "signature": "kernel-v2",
@@ -127,7 +139,7 @@ def test_completed_batches_rejects_a_non_list_batch_value(tmp_path: Path) -> Non
     marker = sidecar.with_name(f"{sidecar.name}.done")
     marker.write_text(json.dumps({"signature": "kernel-v3", "batches": "0,1"}))
 
-    assert geometry_jobs._completed_batches(sidecar, "kernel-v3") == set()
+    assert geometry_checkpoints._completed_batches(sidecar, "kernel-v3") == set()
 
 
 def test_checkpoint_batches_keeps_only_exact_integer_batch_ids() -> None:
@@ -136,7 +148,7 @@ def test_checkpoint_batches_keeps_only_exact_integer_batch_ids() -> None:
         "batches": [0, True, "1", 2, 1.5],
     }
 
-    assert geometry_jobs._checkpoint_batches(payload, "kernel-v3") == {0, 2}
+    assert geometry_checkpoints._checkpoint_batches(payload, "kernel-v3") == {0, 2}
 
 
 @pytest.mark.parametrize(
@@ -146,15 +158,15 @@ def test_checkpoint_batches_keeps_only_exact_integer_batch_ids() -> None:
 def test_checkpoint_batches_rejects_missing_or_stale_payload(
     payload: object,
 ) -> None:
-    assert geometry_jobs._checkpoint_batches(payload, "kernel-v3") == set()
+    assert geometry_checkpoints._checkpoint_batches(payload, "kernel-v3") == set()
 
 
 def test_completed_batches_returns_empty_for_missing_or_invalid_marker(tmp_path: Path) -> None:
     sidecar = tmp_path / "labels.parquet"
 
-    assert geometry_jobs._completed_batches(sidecar, "kernel-v3") == set()
+    assert geometry_checkpoints._completed_batches(sidecar, "kernel-v3") == set()
     sidecar.with_name(f"{sidecar.name}.done").write_text("{")
-    assert geometry_jobs._completed_batches(sidecar, "kernel-v3") == set()
+    assert geometry_checkpoints._completed_batches(sidecar, "kernel-v3") == set()
 
 
 def test_geometry_path_reset_discards_stale_sidecar_and_preserves_old_next(
@@ -165,7 +177,7 @@ def test_geometry_path_reset_discards_stale_sidecar_and_preserves_old_next(
     plan = DatasetPlan(spec, "source-revision", (), (), ())
     source = tmp_path / "source.parquet"
     source.write_bytes(b"source")
-    monkeypatch.setattr(geometry_jobs, "download_to_temp", lambda *_args, **_kwargs: source)
+    monkeypatch.setattr(geometry_workers, "download_to_temp", lambda *_args, **_kwargs: source)
     sidecar = _sidecar_path(tmp_path / "sidecars", spec, "polygons/a.parquet")
     sidecar.parent.mkdir(parents=True)
     sidecar.write_bytes(b"stale labels")
@@ -177,8 +189,8 @@ def test_geometry_path_reset_discards_stale_sidecar_and_preserves_old_next(
         current_paths.append(options.current)
         destination.write_bytes(b"fresh labels")
 
-    monkeypatch.setattr(geometry_jobs, "update_label_sidecar", fake_update)
-    geometry_jobs._process_geometry_path(
+    monkeypatch.setattr(geometry_workers, "update_label_sidecar", fake_update)
+    geometry_workers._process_geometry_path(
         cast(HubApi, object()),
         plan,
         "polygons/a.parquet",
@@ -228,35 +240,37 @@ def test_process_geometry_chunk_resumes_only_matching_checkpoint_batches(
     sidecar.parent.mkdir(parents=True)
     sidecar.write_text("old-kernel-labels")
     marker = sidecar.with_name(f"{sidecar.name}.done")
-    current_signature = geometry_jobs._geometry_checkpoint_signature("kernel-v3", plan, job[1])
+    current_signature = geometry_checkpoints._geometry_checkpoint_signature(
+        "kernel-v3", plan, job[1]
+    )
     marker_signature = "kernel-v2" if existing_signature == "kernel-v2" else current_signature
     marker.write_text(json.dumps({"signature": marker_signature, "batches": existing_batches}))
 
     events: list[tuple[object, ...]] = []
     group_batches = ((0, ("first",)), (1, ("second",)))
-    monkeypatch.setattr(geometry_jobs, "HfApi", lambda **_kwargs: object())
+    monkeypatch.setattr(geometry_workers, "HfApi", lambda **_kwargs: object())
     monkeypatch.setattr(
-        geometry_jobs,
+        geometry_workers,
         "_indexed_reference_group_batches",
         lambda _groups, **_kwargs: group_batches,
     )
     monkeypatch.setattr(
-        geometry_jobs,
+        geometry_workers,
         "_geometry_micro_batches",
         lambda _jobs, _limits: ((job,),),
     )
     monkeypatch.setattr(
-        geometry_jobs,
+        geometry_workers,
         "_cache_geometry_jobs",
         lambda _api, _plans, jobs, _root, _client: events.append(("cache", jobs)),
     )
     monkeypatch.setattr(
-        geometry_jobs,
+        geometry_workers,
         "_remove_cached_geometry_jobs",
         lambda _plans, jobs, _root: events.append(("remove", jobs)),
     )
     monkeypatch.setattr(
-        geometry_jobs,
+        geometry_workers,
         "_worker_reference_batch",
         lambda _groups, _root, _threshold, *, start_index: (start_index,),
     )
@@ -269,8 +283,8 @@ def test_process_geometry_chunk_resumes_only_matching_checkpoint_batches(
         else:
             sidecar.write_text(sidecar.read_text() + f"+batch-{batch_index}")
 
-    monkeypatch.setattr(geometry_jobs, "_process_geometry_path", process)
-    chunk = geometry_jobs._GeometryChunk(
+    monkeypatch.setattr(geometry_workers, "_process_geometry_path", process)
+    chunk = geometry_chunks._GeometryChunk(
         groups=(),
         reference_directory=tmp_path,
         plans=(plan,),
@@ -284,7 +298,7 @@ def test_process_geometry_chunk_resumes_only_matching_checkpoint_batches(
         reference_signature="kernel-v3",
     )
 
-    assert geometry_jobs._process_geometry_chunk(chunk) == (job,)
+    assert geometry_workers._process_geometry_chunk(chunk) == (job,)
     assert [event[1] for event in events if event[0] == "process"] == expected_processed
     assert [event[2] for event in events if event[0] == "process"] == expected_reset
     assert json.loads(marker.read_text()) == {
@@ -316,10 +330,10 @@ def test_run_geometry_workers_uses_spawn_context(monkeypatch: pytest.MonkeyPatch
         def map(self, function, work):
             return (function(item) for item in work)
 
-    monkeypatch.setattr(geometry_jobs, "ProcessPoolExecutor", FakePool)
-    monkeypatch.setattr(geometry_jobs, "_process_geometry_chunk", lambda chunk: chunk)
-    geometry_jobs._run_geometry_workers(
-        cast(tuple[geometry_jobs._GeometryChunk, ...], ("work",)),
+    monkeypatch.setattr(geometry_workers, "ProcessPoolExecutor", FakePool)
+    monkeypatch.setattr(geometry_workers, "_process_geometry_chunk", lambda chunk: chunk)
+    geometry_workers._run_geometry_workers(
+        cast(tuple[geometry_chunks._GeometryChunk, ...], ("work",)),
         None,
         max_workers=1,
     )
@@ -330,7 +344,7 @@ def test_run_geometry_workers_uses_spawn_context(monkeypatch: pytest.MonkeyPatch
 def test_geometry_chunks_respect_configured_worker_fanout() -> None:
     jobs = tuple(("website", f"polygons/{index}.parquet") for index in range(5))
 
-    chunks = geometry_jobs._geometry_chunks(
+    chunks = geometry_chunks._geometry_chunks(
         jobs,
         BatchLimits(workers=2, geometry_tasks_per_worker=1),
     )
@@ -342,7 +356,7 @@ def test_geometry_chunks_respect_configured_worker_fanout() -> None:
 def test_geometry_micro_batches_respect_retained_shard_limit() -> None:
     jobs = tuple(("website", f"polygons/{index}.parquet") for index in range(5))
 
-    batches = geometry_jobs._geometry_micro_batches(
+    batches = geometry_chunks._geometry_micro_batches(
         jobs,
         BatchLimits(retained_source_shards_per_worker=2),
     )
@@ -407,8 +421,8 @@ def _run_options(
     plans: tuple[DatasetPlan, ...],
     groups: tuple[EeaGroup, ...],
     overrides: _RunOverrides = _DEFAULT_RUN_OVERRIDES,
-) -> geometry_jobs._GeometryRunOptions:
-    return geometry_jobs._GeometryRunOptions(
+) -> geometry_chunks._GeometryRunOptions:
+    return geometry_chunks._GeometryRunOptions(
         api=overrides.api or cast(HubApi, object()),
         plans=plans,
         groups=groups,
@@ -426,61 +440,6 @@ def _run_options(
     )
 
 
-def test_process_reference_groups_uses_checkpointed_path_with_one_worker(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    group = EeaGroup(
-        "record", "title", "folder", "service", {}, (), _asset("/habitats.gpkg", code=None)
-    )
-    plans = (
-        DatasetPlan(
-            DatasetSpec("website", "source", "target", "polygons/*.parquet"), "rev", (), ("a",), ()
-        ),
-    )
-    seen: list[tuple[tuple[str, ...], int]] = []
-    monkeypatch.setattr(
-        geometry_jobs,
-        "_process_reference_groups_parallel",
-        lambda options: seen.append(
-            (tuple(item.record_id for item in options.groups), options.limits.workers)
-        ),
-    )
-    geometry_jobs._process_reference_groups(
-        _run_options(
-            tmp_path,
-            plans,
-            (group,),
-            _RunOverrides(batch_size=2, workers=1),
-        )
-    )
-
-    assert seen == [(("record",), 1)]
-
-
-def test_process_reference_groups_dispatches_streaming_parallel_batches(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    group = EeaGroup(
-        "record", "title", "folder", "service", {}, (), _asset("/habitats.gpkg", code=None)
-    )
-    plan = DatasetPlan(
-        DatasetSpec("website", "source", "target", "polygons/*.parquet"), "rev", (), ("a",), ()
-    )
-    seen: list[tuple[tuple[str, ...], int]] = []
-
-    def fake_parallel(options):
-        seen.append((tuple(group.record_id for group in options.groups), options.limits.workers))
-
-    monkeypatch.setattr(geometry_jobs, "_process_reference_groups_parallel", fake_parallel)
-    geometry_jobs._process_reference_groups(
-        _run_options(tmp_path, (plan,), (group,), _RunOverrides(batch_size=2, workers=2))
-    )
-
-    assert seen == [(("record",), 2)]
-
-
 def test_process_geometry_chunk_runs_each_micro_batch_against_each_reference_batch(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -492,32 +451,34 @@ def test_process_geometry_chunk_runs_each_micro_batch_against_each_reference_bat
         ("a.parquet", "b.parquet"),
         (),
     )
-    monkeypatch.setattr(geometry_jobs, "HfApi", lambda **kwargs: ("api", kwargs))
+    monkeypatch.setattr(geometry_workers, "HfApi", lambda **kwargs: ("api", kwargs))
     monkeypatch.setattr(
-        geometry_jobs, "_indexed_reference_group_batches", lambda groups: ((0, groups), (5, groups))
+        geometry_workers,
+        "_indexed_reference_group_batches",
+        lambda groups: ((0, groups), (5, groups)),
     )
     monkeypatch.setattr(
-        geometry_jobs,
+        geometry_workers,
         "_indexed_reference_group_batches",
         lambda groups, **_kwargs: ((0, groups), (5, groups)),
     )
     monkeypatch.setattr(
-        geometry_jobs,
+        geometry_workers,
         "_geometry_micro_batches",
         lambda jobs, _limits: (jobs[:1], jobs[1:]),
     )
     monkeypatch.setattr(
-        geometry_jobs,
+        geometry_workers,
         "_cache_geometry_jobs",
         lambda api, plans, jobs, root, client: events.append(("cache", jobs)),
     )
     monkeypatch.setattr(
-        geometry_jobs,
+        geometry_workers,
         "_remove_cached_geometry_jobs",
         lambda plans, jobs, root: events.append(("remove", jobs)),
     )
     monkeypatch.setattr(
-        geometry_jobs,
+        geometry_workers,
         "_worker_reference_batch",
         lambda groups, root, threshold, *, start_index: (f"refs-{start_index}",),
     )
@@ -528,9 +489,9 @@ def test_process_geometry_chunk_runs_each_micro_batch_against_each_reference_bat
         assert options.progress is None
         events.append(("process", source_path, references))
 
-    monkeypatch.setattr(geometry_jobs, "_process_geometry_path", fake_process)
+    monkeypatch.setattr(geometry_workers, "_process_geometry_path", fake_process)
     jobs = (("dataset", "a.parquet"), ("dataset", "b.parquet"))
-    chunk = geometry_jobs._GeometryChunk(
+    chunk = geometry_chunks._GeometryChunk(
         groups=(),
         reference_directory=tmp_path,
         plans=(plan,),
@@ -544,7 +505,7 @@ def test_process_geometry_chunk_runs_each_micro_batch_against_each_reference_bat
         reference_signature="test-signature",
     )
 
-    assert geometry_jobs._process_geometry_chunk(chunk) == jobs
+    assert geometry_workers._process_geometry_chunk(chunk) == jobs
     assert events == [
         ("cache", jobs[:1]),
         ("process", "a.parquet", ("refs-0",)),
@@ -571,18 +532,18 @@ def test_process_geometry_path_reports_completed_sidecar(
     source = tmp_path / "source.parquet"
     source.write_bytes(b"source")
     monkeypatch.setattr(
-        geometry_jobs,
+        geometry_workers,
         "_download_geometry_source",
         lambda *_args, **_kwargs: source,
     )
     monkeypatch.setattr(
-        geometry_jobs,
+        geometry_workers,
         "update_label_sidecar",
         lambda _source, destination, _options: destination.write_bytes(b"sidecar"),
     )
     events: list[Mapping[str, object]] = []
 
-    geometry_jobs._process_geometry_path(
+    geometry_workers._process_geometry_path(
         cast(HubApi, object()),
         plan,
         "polygons/a.parquet",
@@ -614,12 +575,12 @@ def test_parallel_reference_processing_returns_without_geometry_jobs(
         (),
     )
     monkeypatch.setattr(
-        geometry_jobs,
+        reference_staging,
         "_stage_reference_groups",
         lambda **_kwargs: pytest.fail("empty plans must skip reference downloads"),
     )
 
-    geometry_jobs._process_reference_groups_parallel(
+    geometry_jobs._process_reference_groups(
         _run_options(tmp_path, (plan,), (), _RunOverrides(batch_size=2, workers=2))
     )
 
@@ -633,9 +594,9 @@ def test_geometry_job_helpers_handle_empty_and_nonempty_work(
     plans = {"website": plan}
     jobs = (("website", "polygons/a.parquet"),)
     limits = BatchLimits(workers=2)
-    assert geometry_jobs._geometry_chunks((), limits) == ()
-    assert tuple(geometry_jobs._geometry_micro_batches(())) == ()
-    assert tuple(geometry_jobs._geometry_micro_batches(jobs)) == (jobs,)
+    assert geometry_chunks._geometry_chunks((), limits) == ()
+    assert tuple(geometry_chunks._geometry_micro_batches(())) == ()
+    assert tuple(geometry_chunks._geometry_micro_batches(jobs)) == (jobs,)
 
     downloaded: list[tuple[object, str, Path, bool, object]] = []
 
@@ -644,15 +605,15 @@ def test_geometry_job_helpers_handle_empty_and_nonempty_work(
         downloaded.append((selected_plan, source_path, root, retain_source, client))
         return _cached_geometry_path(root, selected_plan, source_path)
 
-    monkeypatch.setattr(geometry_jobs, "_download_geometry_source", fake_download)
+    monkeypatch.setattr(geometry_workers, "_download_geometry_source", fake_download)
     source_root = tmp_path / "sources"
     source = _cached_geometry_path(source_root, plan, jobs[0][1])
     source.parent.mkdir(parents=True)
     source.write_bytes(b"cached")
     client = cast(StreamClient, object())
 
-    geometry_jobs._cache_geometry_jobs(cast(HubApi, object()), plans, jobs, source_root, client)
-    geometry_jobs._remove_cached_geometry_jobs(plans, jobs, source_root)
+    geometry_workers._cache_geometry_jobs(cast(HubApi, object()), plans, jobs, source_root, client)
+    geometry_workers._remove_cached_geometry_jobs(plans, jobs, source_root)
 
     assert downloaded == [(plan, jobs[0][1], source_root, True, client)]
     assert not source.exists()
@@ -679,11 +640,11 @@ def test_parallel_reference_processing_stages_and_dispatches_geometry_work(
         yield tmp_path / "references"
 
     work_units: list[
-        tuple[geometry_jobs._GeometryRunOptions, tuple[tuple[str, str], ...], Path, str]
+        tuple[geometry_chunks._GeometryRunOptions, tuple[tuple[str, str], ...], Path, str]
     ] = []
 
     def fake_work_units(
-        options: geometry_jobs._GeometryRunOptions,
+        options: geometry_chunks._GeometryRunOptions,
         jobs: tuple[tuple[str, str], ...],
         reference_directory: Path,
         reference_signature: str,
@@ -692,10 +653,10 @@ def test_parallel_reference_processing_stages_and_dispatches_geometry_work(
         return ("work-unit",)
 
     worker_calls: list[tuple[object, ...]] = []
-    monkeypatch.setattr(geometry_jobs, "_stage_reference_groups", fake_stage)
-    monkeypatch.setattr(geometry_jobs, "_geometry_work_units", fake_work_units)
+    monkeypatch.setattr(reference_staging, "_stage_reference_groups", fake_stage)
+    monkeypatch.setattr(geometry_chunks, "_geometry_work_units", fake_work_units)
     monkeypatch.setattr(
-        geometry_jobs,
+        geometry_workers,
         "_run_geometry_workers",
         lambda work, progress, *, max_workers: worker_calls.append((work, progress, max_workers)),
     )
@@ -709,7 +670,7 @@ def test_parallel_reference_processing_stages_and_dispatches_geometry_work(
     def progress(_event: object) -> None:
         return None
 
-    geometry_jobs._process_reference_groups_parallel(
+    geometry_jobs._process_reference_groups(
         _run_options(
             tmp_path,
             (plan,),
@@ -735,19 +696,19 @@ def test_parallel_reference_processing_stages_and_dispatches_geometry_work(
     assert options.limits.workers == 3
     assert jobs == (("website", "polygons/a.parquet"),)
     assert reference_directory == tmp_path / "references"
-    assert signature == geometry_jobs._reference_signature(staged_checksums, 2, groups)
+    assert signature == geometry_checkpoints._reference_signature(staged_checksums, 2, groups)
     assert worker_calls == [(("work-unit",), progress, 3)]
 
 
 def test_geometry_chunking_and_progress_reporting_cover_work_items() -> None:
     jobs = (("website", "a.parquet"), ("website", "b.parquet"))
-    assert geometry_jobs._geometry_chunks(jobs, BatchLimits(workers=2)) == (
+    assert geometry_chunks._geometry_chunks(jobs, BatchLimits(workers=2)) == (
         (jobs[0],),
         (jobs[1],),
     )
 
     events: list[Mapping[str, object]] = []
-    geometry_jobs._report_completed_geometry(jobs, events.append)
+    geometry_workers._report_completed_geometry(jobs, events.append)
 
     assert events == [
         {"event": "sidecar_updated", "dataset": "website", "path": "a.parquet"},
@@ -785,7 +746,7 @@ def test_geometry_work_units_capture_hub_connection_settings(
         (),
         _RunOverrides(api=cast(HubApi, api), threshold=2, batch_size=4),
     )
-    work = geometry_jobs._geometry_work_units(
+    work = geometry_chunks._geometry_work_units(
         options,
         (("website", "polygons/a.parquet"),),
         Path("references"),

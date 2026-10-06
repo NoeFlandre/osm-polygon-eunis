@@ -11,7 +11,7 @@ from pyproj import Transformer
 from shapely.geometry import box, mapping
 from shapely.ops import transform
 
-from osm_polygon_eunis import geometry_jobs, reference_cache, run_analysis
+from osm_polygon_eunis import geometry_chunks, geometry_jobs, reference_cache, run_analysis
 from osm_polygon_eunis._protocols import HubApi, StreamClient
 from osm_polygon_eunis.eea import EeaGroup, RemoteAsset
 from osm_polygon_eunis.options import BatchLimits
@@ -59,7 +59,7 @@ def _spawned_geometry_fixture(
     Path,
     pa.Table,
     Path,
-    geometry_jobs._GeometryRunOptions,
+    geometry_chunks._GeometryRunOptions,
     list[Mapping[str, object]],
 ]:
     source_root = tmp_path / "source"
@@ -127,7 +127,7 @@ def _spawned_geometry_fixture(
         (),
     )
     progress: list[Mapping[str, object]] = []
-    options = geometry_jobs._GeometryRunOptions(
+    options = geometry_chunks._GeometryRunOptions(
         api=cast(HubApi, SimpleNamespace(endpoint="https://huggingface.co", token=None)),
         plans=(plan,),
         groups=tuple(groups),
