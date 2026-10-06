@@ -216,39 +216,65 @@ def test_grid5000_submit_accepts_an_explicit_site_and_defaults_to_a_short_job(
     assert json.loads(capsys.readouterr().out)["source_revision"] == "abc123"
 
 
-def test_every_option_has_help_and_top_level_help_shows_examples(capsys) -> None:
-    parser = cli._parser()
-    subparsers = next(
-        action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
-    )
-    for name, subparser in subparsers.choices.items():
-        for action in subparser._actions:
-            assert action.help, f"{name} {action.option_strings} has no help"
-    with pytest.raises(SystemExit):
+def test_top_level_help_shows_examples(capsys) -> None:
+    with pytest.raises(SystemExit) as raised:
         cli.main(["--help"])
     out = capsys.readouterr().out
+    assert raised.value.code == 0
     assert "examples:" in out
     assert "HF_TOKEN" in out
     assert "osm-polygon-eunis verify" in out
 
 
 @pytest.mark.parametrize(
-    "argv",
+    ("argv", "options"),
     [
-        ["release", "--workers", "0"],
-        ["release", "--max-intersection-errors", "-1"],
-        ["release", "--max-intersection-errors", "x"],
-        ["release", "--dataset", "unknown"],
-        ["verify", "--dataset", "unknown"],
-        ["bogus"],
-        [],
+        (["plan"], ["--dataset", "--endpoint"]),
+        (
+            ["release"],
+            ["--workers", "--max-intersection-errors", "--dataset", "--receipt", "--dry-run"],
+        ),
+        (["verify"], ["--dataset", "--endpoint", "--workdir"]),
+        (["analyze-run"], ["--log", "--sidecars", "--slowest-shards"]),
+        (["grid5000"], ["submit"]),
+        (["grid5000", "submit"], ["--site", "--cluster", "--walltime"]),
     ],
 )
-def test_invalid_arguments_exit_with_usage_error(argv: list[str], capsys) -> None:
+def test_subcommand_help_lists_options(argv: list[str], options: list[str], capsys) -> None:
+    with pytest.raises(SystemExit) as raised:
+        cli.main([*argv, "--help"])
+    out = capsys.readouterr().out
+    assert raised.value.code == 0
+    assert out.startswith(f"usage: osm-polygon-eunis {' '.join(argv)}")
+    for option in options:
+        assert option in out, f"`{' '.join(argv)} --help` does not document {option}"
+
+
+@pytest.mark.parametrize(
+    ("argv", "message"),
+    [
+        (["release", "--workers", "0"], "argument --workers: expected a positive integer"),
+        (
+            ["release", "--max-intersection-errors", "-1"],
+            "argument --max-intersection-errors: expected a non-negative integer, got '-1'",
+        ),
+        (
+            ["release", "--max-intersection-errors", "x"],
+            "argument --max-intersection-errors: expected a non-negative integer, got 'x'",
+        ),
+        (["release", "--dataset", "unknown"], "argument --dataset: invalid choice: 'unknown'"),
+        (["verify", "--dataset", "unknown"], "argument --dataset: invalid choice: 'unknown'"),
+        (["bogus"], "argument command: invalid choice: 'bogus'"),
+        ([], "the following arguments are required: command"),
+    ],
+)
+def test_invalid_arguments_exit_with_usage_error(argv: list[str], message: str, capsys) -> None:
     with pytest.raises(SystemExit) as raised:
         cli.main(argv)
-    assert raised.value.code == 2
-    assert "usage:" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert raised.value.code == cli.EXIT_USAGE
+    assert err.startswith("usage: osm-polygon-eunis")
+    assert f"error: {message}" in err
 
 
 def test_release_passes_dataset_selection_and_workers(monkeypatch, tmp_path: Path) -> None:
@@ -277,24 +303,33 @@ def test_release_passes_dataset_selection_and_workers(monkeypatch, tmp_path: Pat
     assert cast(ReleaseOptions, seen["options"]).max_intersection_errors == 0
 
 
+class _TreeApi:
+    def __init__(self) -> None:
+        self.touched: list[str] = []
+
+    def repo_info(self, repo_id: str, **_kwargs):
+        self.touched.append(repo_id)
+        return SimpleNamespace(sha="rev")
+
+    def list_repo_tree(self, repo_id: str, **_kwargs):
+        self.touched.append(repo_id)
+        paths = ("polygons/a.parquet", "data/a.parquet", "polygon_document_links/a.parquet")
+        return [SimpleNamespace(path=path, blob_id="b") for path in paths]
+
+
 def test_plan_datasets_touches_only_selected_dataset() -> None:
-    touched: list[str] = []
+    api = _TreeApi()
 
-    class Api:
-        def repo_info(self, repo_id: str, **_kwargs):
-            touched.append(repo_id)
-            return SimpleNamespace(sha="rev")
-
-        def list_repo_tree(self, repo_id: str, **_kwargs):
-            touched.append(repo_id)
-            paths = ("polygons/a.parquet", "data/a.parquet", "polygon_document_links/a.parquet")
-            return [SimpleNamespace(path=path, blob_id="b") for path in paths]
-
-    plans = plan_datasets(cast(HubApi, Api()), ["website"])
+    plans = plan_datasets(cast(HubApi, api), ["website"])
 
     assert [plan.spec.name for plan in plans] == ["website"]
-    assert set(touched) == {"NoeFlandre/osm-polygon-website-tag"}
-    assert [p.spec.name for p in plan_datasets(cast(HubApi, Api()), None)] == list(DATASET_NAMES)
+    assert set(api.touched) == {"NoeFlandre/osm-polygon-website-tag"}
+
+
+def test_plan_datasets_without_selection_plans_every_dataset() -> None:
+    plans = plan_datasets(cast(HubApi, _TreeApi()), None)
+
+    assert [plan.spec.name for plan in plans] == list(DATASET_NAMES)
 
 
 def test_selected_dataset_names_keeps_release_order_and_rejects_unknown() -> None:
