@@ -41,6 +41,7 @@ LAYERS = (
     "card_publishing",
     "release_orchestration",
     "grid5000",
+    "run_analysis",
     "cli",
 )
 FORBIDDEN = {module: set(LAYERS[index + 1 :]) for index, module in enumerate(LAYERS)}

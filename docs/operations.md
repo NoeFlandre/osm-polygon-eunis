@@ -126,6 +126,35 @@ it checks the size, the metadata identity, and the recorded SHA-256.
 **Warning:** Do not submit again until the prior job is verified as terminal and
 no active EUNIS job exists on any site.
 
+### Analyze a run
+
+The worker writes one `geometry_run_plan` record before processing. It writes one
+`geometry_batch_done` record for each completed shard and reference batch. The
+plan record lists the expected reference batches and the checkpoint signature
+for each shard.
+
+Use `analyze-run` to read the saved logs and sidecars. It makes no network calls
+and does not need `HF_TOKEN`. Pass every log file from the job and its retries.
+Set `--sidecars` to the directory that contains `website`, `wikidata`, and
+`description` sidecar directories:
+
+```bash
+uv run osm-polygon-eunis analyze-run \
+  --log /path/to/logs/eunis-123.log \
+  --log /path/to/logs/eunis-124.log \
+  --sidecars /path/to/sidecars/eunis \
+  --slowest-shards 10
+```
+
+The JSON result reports worker time, batch throughput, the slowest shards, and
+checkpoint progress for each dataset. The throughput unit is geometry batch
+records per worker hour. The command divides the record count by their summed
+`seconds` values and multiplies by 3,600. This is worker time, not elapsed wall
+time. Repeated timing records count as work. The command counts only checkpoints
+whose signatures match the plan record. It skips malformed records and reports
+their count. Logs without a plan record still report timing data, but checkpoint
+progress is `null`.
+
 ### Local storage and QA environment
 
 Use a temporary directory on the HDD. It must have enough room for these items:
@@ -239,11 +268,16 @@ information with examples.
 | `release` | `--endpoint URL` | public Hub | Hub endpoint |
 | `verify` | `--dataset NAME` | all | limit verification; repeatable |
 | `verify` | `--endpoint URL` | public Hub | Hub endpoint |
+| `analyze-run` | `--log PATH` | required, repeatable | local job log file |
+| `analyze-run` | `--sidecars PATH` | `EUNIS_SIDECAR_DIR` or `OSM_EUNIS_WORKDIR/sidecars` (default: `.eunis-run/sidecars`) | directory that contains dataset sidecars |
+| `analyze-run` | `--slowest-shards N` | 5 | slowest shards to show for each dataset |
 
 The installed wheel includes the default reference configuration. In a source
 checkout, it resolves to `config/eea-2021-reference.json`. Set
 `OSM_EUNIS_WORKDIR` to choose the default local staging directory for `release`
-and `verify`. An explicit `--workdir` has priority.
+and `verify`, and the default checkpoint directory for `analyze-run`. An explicit
+`--workdir` has priority for `release` and `verify`; `--sidecars` has priority for
+`analyze-run`.
 
 The Python API accepts one `ReleaseOptions` value that contains `BatchLimits`.
 The defaults are:
