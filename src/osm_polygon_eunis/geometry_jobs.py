@@ -202,12 +202,22 @@ def _process_reference_groups_parallel(options: _GeometryRunOptions) -> None:
         client=options.http_client,
     ) as reference_directory:
         options.checksums.update(reference_checksums)
+        reference_signature = _reference_signature(
+            reference_checksums, options.threshold, options.groups
+        )
+        reference_batch_ids = tuple(
+            start_index
+            for start_index, _ in _indexed_reference_group_batches(
+                options.groups, limits=options.limits
+            )
+        )
         work = _geometry_work_units(
             options,
             jobs,
             reference_directory,
-            _reference_signature(reference_checksums, options.threshold, options.groups),
+            reference_signature,
         )
+        _log_geometry_run_plan(options.plans, reference_batch_ids, reference_signature)
         _run_geometry_workers(work, options.progress, max_workers=options.limits.workers)
 
 
@@ -479,6 +489,30 @@ def _log_geometry_timing(
         "tile_cache_hits": hits,
         "tile_cache_misses": misses,
     }
+    _log_geometry_event(record)
+
+
+def _log_geometry_run_plan(
+    plans: tuple[DatasetPlan, ...],
+    reference_batch_ids: tuple[int, ...],
+    reference_signature: str,
+) -> None:
+    """Log the checkpoint identities needed to report offline run progress."""
+
+    for plan in plans:
+        record = {
+            "event": "geometry_run_plan",
+            "dataset": plan.spec.name,
+            "reference_batch_ids": list(reference_batch_ids),
+            "checkpoint_signatures": {
+                path: _geometry_checkpoint_signature(reference_signature, plan, path)
+                for path in plan.geometry_paths
+            },
+        }
+        _log_geometry_event(record)
+
+
+def _log_geometry_event(record: Mapping[str, object]) -> None:
     sys.stderr.write(json.dumps(record, sort_keys=True) + "\n")
     sys.stderr.flush()
 

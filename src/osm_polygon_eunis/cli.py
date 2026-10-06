@@ -44,6 +44,7 @@ from .release_plan import (
     ReleaseReceipt,
     plan_datasets,
 )
+from .run_analysis import RunAnalysisError, summarize_run
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,7 @@ examples:
   osm-polygon-eunis release --batch-size 256 --workdir .eunis-run
   osm-polygon-eunis release --dataset wikidata --workers 4
   osm-polygon-eunis verify --dataset website
+  osm-polygon-eunis analyze-run --log job.log --sidecars /data/sidecars/eunis
   osm-polygon-eunis release -q > receipt.json
   osm-polygon-eunis grid5000 submit --site SITE --frontend FRONTEND \\
     --cluster CLUSTER --persistent-root /home/USER/osm-polygon-eunis --state /path/on/HDD/job.json
@@ -148,6 +150,12 @@ def _add_workdir(parser: argparse.ArgumentParser) -> None:
         default=default,
         help=f"local staging directory for shards, sidecars and cards (default: {default})",
     )
+
+
+def _default_sidecar_root() -> Path:
+    configured = os.environ.get("EUNIS_SIDECAR_DIR")
+    workdir = Path(os.environ.get("OSM_EUNIS_WORKDIR") or ".eunis-run")
+    return Path(configured) if configured else workdir / "sidecars"
 
 
 def _default_reference_config() -> Path:
@@ -234,6 +242,37 @@ def _parser() -> argparse.ArgumentParser:
     _add_dataset(verify)
     _add_endpoint(verify)
     _add_common(verify)
+
+    analyze = subparsers.add_parser(
+        "analyze-run",
+        help="summarize local geometry logs and checkpoints",
+        description=(
+            "Summarize geometry batch timing records and matching .done checkpoints. "
+            "This command reads local files only."
+        ),
+    )
+    analyze.add_argument(
+        "--log",
+        action="append",
+        required=True,
+        type=Path,
+        metavar="PATH",
+        help="job log file; repeat for each retry log",
+    )
+    analyze.add_argument(
+        "--sidecars",
+        type=Path,
+        default=_default_sidecar_root(),
+        help=f"directory containing dataset sidecars (default: {_default_sidecar_root()})",
+    )
+    analyze.add_argument(
+        "--slowest-shards",
+        type=_positive_int,
+        default=5,
+        metavar="N",
+        help="slowest shards to show for each dataset (default: 5)",
+    )
+    _add_common(analyze)
 
     grid_parser = subparsers.add_parser(
         "grid5000",
@@ -343,7 +382,7 @@ def _exit_code(error: Exception) -> int:
 
     if isinstance(error, VerificationError):
         return EXIT_VERIFICATION
-    if isinstance(error, ConfigError):
+    if isinstance(error, (ConfigError, RunAnalysisError)):
         return EXIT_USAGE
     if isinstance(error, (HfHubHTTPError, httpx.HTTPError, ConnectionError, TimeoutError)):
         return EXIT_REMOTE
@@ -494,6 +533,15 @@ def _run(args: argparse.Namespace, services: CliDependencies) -> int:
                 services.api_factory(args.endpoint),
                 workdir=args.workdir,
                 datasets=args.dataset,
+            )
+        )
+        return EXIT_OK
+    if args.command == "analyze-run":
+        _print_json(
+            summarize_run(
+                args.log,
+                args.sidecars,
+                slowest_limit=args.slowest_shards,
             )
         )
         return EXIT_OK

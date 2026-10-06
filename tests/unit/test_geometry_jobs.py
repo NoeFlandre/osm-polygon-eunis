@@ -7,6 +7,7 @@ import json
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -68,6 +69,44 @@ def test_geometry_checkpoint_signature_includes_source_revision_and_shard() -> N
         geometry_jobs._geometry_checkpoint_signature("references", plan, "polygons/b.parquet")
         != initial
     )
+
+
+def test_run_plan_log_records_reference_batches_and_checkpoint_signatures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = DatasetPlan(
+        DatasetSpec("website", "source-repo", "target-repo", "polygons/*.parquet"),
+        "source-revision",
+        ("polygons/a.parquet", "polygons/b.parquet"),
+        ("polygons/a.parquet", "polygons/b.parquet"),
+        (),
+    )
+    stderr = StringIO()
+    monkeypatch.setattr(geometry_jobs.sys, "stderr", stderr)
+
+    geometry_jobs._log_geometry_run_plan((plan,), (0, 2), "reference-signature")
+
+    signatures = {
+        path: hashlib.sha256(
+            json.dumps(
+                {
+                    "references": "reference-signature",
+                    "dataset": "website",
+                    "source_repo": "source-repo",
+                    "source_revision": "source-revision",
+                    "source_path": path,
+                },
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        for path in ("polygons/a.parquet", "polygons/b.parquet")
+    }
+    assert json.loads(stderr.getvalue()) == {
+        "event": "geometry_run_plan",
+        "dataset": "website",
+        "reference_batch_ids": [0, 2],
+        "checkpoint_signatures": signatures,
+    }
 
 
 def test_completed_batches_reject_old_kernel_marker_without_deleting_it(tmp_path: Path) -> None:
