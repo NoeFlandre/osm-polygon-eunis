@@ -103,7 +103,9 @@ The installed command includes the default EEA reference config. In a source
 checkout, it comes from
 [`config/eea-2021-reference.json`](config/eea-2021-reference.json). Set
 `OSM_EUNIS_WORKDIR` to choose the default staging directory for `release` and
-`verify`.
+`verify`. `EUNIS_SIDECAR_DIR`, `EUNIS_SOURCE_DIR` and `EUNIS_REFERENCE_DIR`
+override the sidecar, source and reference-cache directories; the
+[operations guide](docs/operations.md) describes them.
 
 The [operations guide](docs/operations.md) describes Grid'5000 execution,
 receipts, resuming checkpoints, and the final no-op check.

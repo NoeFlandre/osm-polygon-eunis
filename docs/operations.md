@@ -263,6 +263,7 @@ information with examples.
 | `release` | `--batch-size N` | 256 | Parquet rows per streamed batch (must be > 0) |
 | `release` | `--workers N` | 8 | geometry worker processes (must be > 0) |
 | `release` | `--max-intersection-errors N` | no limit | fail a dataset before its manifest is published when GEOS intersection errors dropped more than N overlap candidates (`card.intersection_errors`) |
+| `release` | `--receipt PATH` | none | write the verified release receipt atomically to this path |
 | `release` | `--dataset NAME` | all | re-run or resume only the named datasets; repeatable |
 | `release` | `--dry-run` | off | preview without Hub writes |
 | `release` | `--endpoint URL` | public Hub | Hub endpoint |
