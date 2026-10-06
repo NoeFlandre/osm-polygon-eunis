@@ -570,4 +570,4 @@ def test_run_release_coordinates_pooled_processing(monkeypatch, tmp_path: Path) 
 
     assert result.datasets == (receipt,)
     assert len(seen) == 1
-    assert seen[0][1] == release_orchestration._SOURCE_WORKERS
+    assert seen[0][1] == BatchLimits().workers

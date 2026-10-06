@@ -25,7 +25,7 @@ from .manifest_state import (
     _try_no_op_release,
     _verify_no_op_dataset,
 )
-from .options import ReleaseOptions
+from .options import ReleaseOptions, resolve_sidecar_root
 from .publish import VerificationError, duplicate_source, target_exists
 from .reference_staging import _http_client
 from .release_plan import (
@@ -34,9 +34,6 @@ from .release_plan import (
     ReleaseReceipt,
     plan_datasets,
 )
-
-_SOURCE_WORKERS = 8
-DEFAULT_WORKERS = _SOURCE_WORKERS
 
 
 @dataclass(frozen=True, slots=True)
@@ -321,8 +318,7 @@ def _cleanup_source_cache(root: Path) -> None:
 def _sidecar_root(workdir: Path) -> Path:
     """Resolve the resumable sidecar location, including Grid persistent storage."""
 
-    configured = os.environ.get("EUNIS_SIDECAR_DIR")
-    root = Path(configured) if configured else workdir / "sidecars"
+    root = resolve_sidecar_root(workdir)
     root.mkdir(parents=True, exist_ok=True)
     return root
 

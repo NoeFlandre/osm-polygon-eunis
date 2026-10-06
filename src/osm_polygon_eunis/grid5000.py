@@ -13,6 +13,10 @@ from pathlib import Path, PurePosixPath
 from typing import Final, TypeGuard
 
 from .fileio import write_json_atomic
+from .options import DEFAULT_BATCH_SIZE
+
+DEFAULT_GRID_CORES = 16
+DEFAULT_GRID_WORKERS = 16
 
 Command = tuple[str, ...]
 CommandRunner = Callable[[Command], str]
@@ -196,10 +200,10 @@ class Grid5000Config:
     cluster: str
     queue: str = "default"
     job_type: str | None = None
-    cores: int = 16
-    workers: int = 16
+    cores: int = DEFAULT_GRID_CORES
+    workers: int = DEFAULT_GRID_WORKERS
     walltime: str = "1:00:00"
-    batch_size: int = 256
+    batch_size: int = DEFAULT_BATCH_SIZE
     excluded_sites: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:

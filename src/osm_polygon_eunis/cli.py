@@ -21,15 +21,24 @@ from huggingface_hub.errors import HfHubHTTPError
 from ._protocols import HubApi
 from .fileio import write_json_atomic
 from .grid5000 import (
+    DEFAULT_GRID_CORES,
+    DEFAULT_GRID_WORKERS,
     Grid5000Config,
     Grid5000Submission,
     resolve_source_revision,
     submit_grid5000,
 )
-from .options import BatchLimits, ReleaseOptions
+from .options import (
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_WORKDIR,
+    DEFAULT_WORKERS,
+    BatchLimits,
+    ReleaseOptions,
+    resolve_sidecar_root,
+    resolve_workdir,
+)
 from .publish import VerificationError
 from .release_orchestration import (
-    DEFAULT_WORKERS,
     ConfigError,
     DryRunReport,
     plan_release,
@@ -71,11 +80,11 @@ def _non_negative_int(value: str) -> int:
     return number
 
 
-_EPILOG = """\
+_EPILOG = f"""\
 examples:
   osm-polygon-eunis plan
-  osm-polygon-eunis release --dry-run --workdir .eunis-run
-  osm-polygon-eunis release --batch-size 256 --workdir .eunis-run
+  osm-polygon-eunis release --dry-run --workdir {DEFAULT_WORKDIR}
+  osm-polygon-eunis release --batch-size {DEFAULT_BATCH_SIZE} --workdir {DEFAULT_WORKDIR}
   osm-polygon-eunis release --dataset wikidata --workers 4
   osm-polygon-eunis verify --dataset website
   osm-polygon-eunis analyze-run --log job.log --sidecars /data/sidecars/eunis
@@ -143,19 +152,13 @@ def _add_dataset(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_workdir(parser: argparse.ArgumentParser) -> None:
-    default = Path(os.environ.get("OSM_EUNIS_WORKDIR") or ".eunis-run")
     parser.add_argument(
         "--workdir",
         type=Path,
-        default=default,
-        help=f"local staging directory for shards, sidecars and cards (default: {default})",
+        default=None,
+        help="local staging directory for shards, sidecars and cards "
+        f"(default: $OSM_EUNIS_WORKDIR or {DEFAULT_WORKDIR})",
     )
-
-
-def _default_sidecar_root() -> Path:
-    configured = os.environ.get("EUNIS_SIDECAR_DIR")
-    workdir = Path(os.environ.get("OSM_EUNIS_WORKDIR") or ".eunis-run")
-    return Path(configured) if configured else workdir / "sidecars"
 
 
 def _default_reference_config() -> Path:
@@ -193,15 +196,15 @@ def _parser() -> argparse.ArgumentParser:
     release.add_argument(
         "--reference-config",
         type=Path,
-        default=_default_reference_config(),
+        default=None,
         help="EEA reference config JSON (default: the packaged EEA 2021 config)",
     )
     _add_workdir(release)
     release.add_argument(
         "--batch-size",
         type=_positive_int,
-        default=256,
-        help="Parquet rows per streamed batch (default: 256)",
+        default=DEFAULT_BATCH_SIZE,
+        help=f"Parquet rows per streamed batch (default: {DEFAULT_BATCH_SIZE})",
     )
     release.add_argument(
         "--workers",
@@ -262,8 +265,9 @@ def _parser() -> argparse.ArgumentParser:
     analyze.add_argument(
         "--sidecars",
         type=Path,
-        default=_default_sidecar_root(),
-        help=f"directory containing dataset sidecars (default: {_default_sidecar_root()})",
+        default=None,
+        help="directory containing dataset sidecars "
+        f"(default: $EUNIS_SIDECAR_DIR or <workdir>/sidecars, workdir default {DEFAULT_WORKDIR})",
     )
     analyze.add_argument(
         "--slowest-shards",
@@ -316,10 +320,16 @@ def _parser() -> argparse.ArgumentParser:
         "--job-type", default=None, help="optional OAR job type such as day or night"
     )
     grid_submit.add_argument(
-        "--cores", type=_positive_int, default=16, help="cores on one host (default: 16)"
+        "--cores",
+        type=_positive_int,
+        default=DEFAULT_GRID_CORES,
+        help=f"cores on one host (default: {DEFAULT_GRID_CORES})",
     )
     grid_submit.add_argument(
-        "--workers", type=_positive_int, default=16, help="geometry workers (default: 16)"
+        "--workers",
+        type=_positive_int,
+        default=DEFAULT_GRID_WORKERS,
+        help=f"geometry workers (default: {DEFAULT_GRID_WORKERS})",
     )
     grid_submit.add_argument(
         "--walltime", default="1:00:00", help="OAR walltime in HH:MM:SS (default: 1:00:00)"
@@ -327,8 +337,8 @@ def _parser() -> argparse.ArgumentParser:
     grid_submit.add_argument(
         "--batch-size",
         type=_positive_int,
-        default=256,
-        help="Parquet rows per batch (default: 256)",
+        default=DEFAULT_BATCH_SIZE,
+        help=f"Parquet rows per batch (default: {DEFAULT_BATCH_SIZE})",
     )
     grid_submit.add_argument(
         "--dry-run",
@@ -522,7 +532,18 @@ def main(
         _reset_logging()
 
 
+def _resolve_defaults(args: argparse.Namespace) -> None:
+    """Fill environment- and filesystem-dependent defaults after parsing."""
+    if hasattr(args, "workdir") and args.workdir is None:
+        args.workdir = resolve_workdir()
+    if hasattr(args, "sidecars") and args.sidecars is None:
+        args.sidecars = resolve_sidecar_root()
+    if hasattr(args, "reference_config") and args.reference_config is None:
+        args.reference_config = _default_reference_config()
+
+
 def _run(args: argparse.Namespace, services: CliDependencies) -> int:
+    _resolve_defaults(args)
     progress = _progress_sink(args)
     _report_start(args, progress)
     if args.command == "plan":
