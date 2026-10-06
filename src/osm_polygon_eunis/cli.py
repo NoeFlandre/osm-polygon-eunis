@@ -534,12 +534,14 @@ def main(
 
 def _resolve_defaults(args: argparse.Namespace) -> None:
     """Fill environment- and filesystem-dependent defaults after parsing."""
-    if hasattr(args, "workdir") and args.workdir is None:
-        args.workdir = resolve_workdir()
-    if hasattr(args, "sidecars") and args.sidecars is None:
-        args.sidecars = resolve_sidecar_root()
-    if hasattr(args, "reference_config") and args.reference_config is None:
-        args.reference_config = _default_reference_config()
+    resolvers: dict[str, Callable[[], Path]] = {
+        "workdir": resolve_workdir,
+        "sidecars": resolve_sidecar_root,
+        "reference_config": _default_reference_config,
+    }
+    for name, resolve in resolvers.items():
+        if getattr(args, name, "unset") is None:
+            setattr(args, name, resolve())
 
 
 def _run(args: argparse.Namespace, services: CliDependencies) -> int:
