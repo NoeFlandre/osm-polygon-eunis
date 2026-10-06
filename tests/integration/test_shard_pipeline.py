@@ -11,7 +11,7 @@ from pyproj import Transformer
 from shapely.geometry import box, mapping
 from shapely.ops import transform
 
-from osm_polygon_eunis import geometry_jobs, reference_cache
+from osm_polygon_eunis import geometry_chunks, geometry_jobs, reference_cache, run_analysis
 from osm_polygon_eunis._protocols import HubApi, StreamClient
 from osm_polygon_eunis.eea import EeaGroup, RemoteAsset
 from osm_polygon_eunis.options import BatchLimits
@@ -50,56 +50,75 @@ def test_real_geometry_to_synthetic_raster_shard(tmp_path: Path, single_pixel_ra
     assert output["eunis_overlap_percentage"].to_pylist() == [pytest.approx(4.822971, abs=1e-4)]
 
 
-@pytest.mark.slow
-def test_parallel_reference_batch_processes_cached_geometry_shards(
+def _spawned_geometry_fixture(
     tmp_path: Path,
     monkeypatch,
     single_pixel_raster,
-) -> None:
+) -> tuple[
+    Path,
+    Path,
+    pa.Table,
+    Path,
+    geometry_chunks._GeometryRunOptions,
+    list[Mapping[str, object]],
+]:
     source_root = tmp_path / "source"
+    source_directory = source_root / "website"
+    source_directory.mkdir(parents=True)
     sidecar_root = tmp_path / "sidecars"
-    source_root.joinpath("website").mkdir(parents=True)
-    polygon = box(2.0, 48.0, 2.05, 48.05)
+    polygons = (box(2.0, 48.0, 2.05, 48.05), box(3.0, 49.0, 3.05, 49.05))
     source = pa.table(
         {
-            "polygon_id": ["france-test"],
-            "geometry": [json.dumps(mapping(polygon))],
+            "polygon_id": ["france-test-a", "france-test-b"],
+            "geometry": [json.dumps(mapping(polygon)) for polygon in polygons],
         }
     )
     for name in ("a", "b"):
-        pq.write_table(source, source_root / "website" / f"polygons__{name}.parquet")
+        pq.write_table(source, source_directory / f"polygons__{name}.parquet")
 
     project = Transformer.from_crs("EPSG:4326", "EPSG:3035", always_xy=True).transform
-    projected = transform(project, polygon)
-    raster_path = single_pixel_raster(tmp_path / "Prob_R11_1000m.tif", projected)
-
-    group = EeaGroup(
-        "record",
-        "raster",
-        "folder",
-        "service",
-        {"R11": "Pannonian steppe"},
-        (
-            RemoteAsset(
-                "/Prob_R11_1000m.tif",
-                "https://example.test/raster.tif",
-                raster_path.stat().st_size,
-                "etag",
-                "R11",
-                "Pannonian steppe",
-                "record",
-                "EEA-test",
-            ),
-        ),
-        None,
+    reference_inputs = (
+        ("R11", "steppe", "record-r11", polygons[0]),
+        ("R12", "moorland", "record-r12", polygons[1]),
     )
+    raster_paths: dict[str, Path] = {}
+    groups: list[EeaGroup] = []
+    for code, name, record_id, polygon in reference_inputs:
+        raster_path = single_pixel_raster(
+            tmp_path / f"Prob_{code}_1000m.tif", transform(project, polygon)
+        )
+        asset_path = f"/Prob_{code}_1000m.tif"
+        raster_paths[asset_path] = raster_path
+        groups.append(
+            EeaGroup(
+                record_id,
+                f"raster-{code.lower()}",
+                "folder",
+                "service",
+                {code: name},
+                (
+                    RemoteAsset(
+                        asset_path,
+                        f"https://example.test/{code.lower()}.tif",
+                        raster_path.stat().st_size,
+                        f"etag-{code.lower()}",
+                        code,
+                        name,
+                        record_id,
+                        "EEA-test",
+                    ),
+                ),
+                None,
+            )
+        )
 
-    def fake_download(_client, _asset, destination):
-        destination.write_bytes(raster_path.read_bytes())
-        return "sha"
+    def fake_download(_client, asset, destination):
+        destination.write_bytes(raster_paths[asset.path].read_bytes())
+        return f"sha-{asset.code.lower()}"
 
     monkeypatch.setattr(reference_cache, "download_asset", fake_download)
-    (tmp_path / "run").mkdir()
+    run_directory = tmp_path / "run"
+    run_directory.mkdir()
     plan = DatasetPlan(
         DatasetSpec("website", "source", "target", "polygons/*.parquet"),
         "revision",
@@ -108,27 +127,132 @@ def test_parallel_reference_batch_processes_cached_geometry_shards(
         (),
     )
     progress: list[Mapping[str, object]] = []
-
-    geometry_jobs._process_reference_groups(
-        geometry_jobs._GeometryRunOptions(
-            api=cast(HubApi, SimpleNamespace(endpoint="https://huggingface.co", token=None)),
-            plans=(plan,),
-            groups=(group,),
-            sidecar_root=sidecar_root,
-            source_root=source_root,
-            workdir=tmp_path / "run",
-            threshold=0,
-            checksums={},
-            limits=BatchLimits(workers=2, parquet_batch_size=1),
-            progress=progress.append,
-            http_client=cast(StreamClient, object()),
-        )
+    options = geometry_chunks._GeometryRunOptions(
+        api=cast(HubApi, SimpleNamespace(endpoint="https://huggingface.co", token=None)),
+        plans=(plan,),
+        groups=tuple(groups),
+        sidecar_root=sidecar_root,
+        source_root=source_root,
+        workdir=run_directory,
+        threshold=0,
+        checksums={},
+        limits=BatchLimits(workers=2, parquet_batch_size=1, raster_groups_per_batch=1),
+        progress=progress.append,
+        http_client=cast(StreamClient, object()),
     )
+    return source_root, source_directory, source, sidecar_root, options, progress
 
-    for name in ("a", "b"):
-        labels = pq.read_table(
-            sidecar_root / "website" / f"polygons__{name}.parquet.labels.parquet"
-        )
-        assert labels["eunis_code"].to_pylist() == ["R11"]
+
+def _json_events(log_text: str) -> list[dict[str, object]]:
+    return [json.loads(line) for line in log_text.splitlines() if line.startswith("{")]
+
+
+def _assert_timing_batches(
+    records: list[dict[str, object]],
+    expected_batches: Mapping[str, list[int]],
+) -> None:
+    timing_records = [record for record in records if record["event"] == "geometry_batch_done"]
+    actual_batches = {
+        path: [record["reference_batch"] for record in timing_records if record["path"] == path]
+        for path in expected_batches
+    }
+    assert actual_batches == expected_batches
+
+
+def _assert_checkpoint_state(
+    sidecar_root: Path,
+    name: str,
+    signature: str,
+) -> None:
+    labels = pq.read_table(sidecar_root / "website" / f"polygons__{name}.parquet.labels.parquet")
+    assert labels["eunis_code"].to_pylist() == ["R11", "R12"]
+    marker = sidecar_root / "website" / f"polygons__{name}.parquet.labels.parquet.done"
+    assert marker.read_bytes() == f'{{"signature": "{signature}", "batches": [0, 1]}}'.encode()
+
+
+def _assert_run_analysis(
+    log_text: str,
+    log_path: Path,
+    sidecar_root: Path,
+    event_count: int,
+) -> None:
+    log_path.write_text(log_text, encoding="utf-8")
+    summary = run_analysis.summarize_run((log_path,), sidecar_root)
+    assert summary["datasets"][0]["event_count"] == event_count
+    assert summary["datasets"][0]["checkpoint_batches_observed"] == 4
+    assert summary["datasets"][0]["progress"] == {
+        "geometry_shards_completed": 2,
+        "geometry_shards_total": 2,
+        "reference_batches_completed": 4,
+        "reference_batches_total": 4,
+        "reference_batches_remaining": 0,
+        "percent": 100.0,
+    }
+    assert summary["inputs"] == {
+        "log_files": 1,
+        "malformed_json_lines": 0,
+        "malformed_records": 0,
+        "repeated_plans": 0,
+        "malformed_checkpoints": 0,
+        "stale_checkpoints": 0,
+        "missing_metadata_datasets": [],
+    }
+
+
+@pytest.mark.slow
+def test_parallel_reference_batch_processes_cached_geometry_shards(
+    tmp_path: Path,
+    monkeypatch,
+    single_pixel_raster,
+    capfd,
+) -> None:
+    source_root, source_directory, source, sidecar_root, options, progress = (
+        _spawned_geometry_fixture(tmp_path, monkeypatch, single_pixel_raster)
+    )
+    geometry_jobs._process_reference_groups(options)
+    first_log = capfd.readouterr().err
+    first_records = _json_events(first_log)
+
+    expected_signatures = {
+        "polygons/a.parquet": "e407bc3fb0cc7d3ee32801346d2681a5550f7aaf5a8f13e795669af6f26d99fa",
+        "polygons/b.parquet": "9bc937f8d04edb1dd5f9079d34709cdbb4b450f997f4ddade6356190e7d07664",
+    }
+    assert [record for record in first_records if record["event"] == "geometry_run_plan"] == [
+        {
+            "event": "geometry_run_plan",
+            "dataset": "website",
+            "reference_batch_ids": [0, 1],
+            "checkpoint_signatures": expected_signatures,
+        }
+    ]
+    _assert_timing_batches(first_records, {path: [0, 1] for path in expected_signatures})
+    assert progress == [
+        {"event": "sidecar_updated", "dataset": "website", "path": path}
+        for path in expected_signatures
+    ]
+    for name, path in (("a", "polygons/a.parquet"), ("b", "polygons/b.parquet")):
+        _assert_checkpoint_state(sidecar_root, name, expected_signatures[path])
     assert not list((source_root / "website").glob("*.parquet"))
-    assert len(progress) == 2
+    _assert_run_analysis(first_log, tmp_path / "first-run.jsonl", sidecar_root, 4)
+
+    capfd.readouterr()
+    for name, path in (("a", "polygons/a.parquet"), ("b", "polygons/b.parquet")):
+        marker = sidecar_root / "website" / f"polygons__{name}.parquet.labels.parquet.done"
+        marker.write_text(
+            json.dumps({"signature": expected_signatures[path], "batches": [0]}),
+            encoding="utf-8",
+        )
+        pq.write_table(source, source_directory / f"polygons__{name}.parquet")
+    progress.clear()
+
+    geometry_jobs._process_reference_groups(options)
+    resume_log = capfd.readouterr().err
+    resume_records = _json_events(resume_log)
+    _assert_timing_batches(resume_records, {path: [1] for path in expected_signatures})
+    assert progress == [
+        {"event": "sidecar_updated", "dataset": "website", "path": path}
+        for path in expected_signatures
+    ]
+    for name, path in (("a", "polygons/a.parquet"), ("b", "polygons/b.parquet")):
+        _assert_checkpoint_state(sidecar_root, name, expected_signatures[path])
+    _assert_run_analysis(resume_log, tmp_path / "resume-run.jsonl", sidecar_root, 2)

@@ -16,7 +16,8 @@ from ._protocols import HubApi, StreamClient
 from .card_publishing import _finalize_plan, _PlanOptions
 from .domain import SchemaError
 from .eea import EeaGroup, resolve_config_data
-from .geometry_jobs import _GeometryRunOptions, _process_reference_groups
+from .geometry_chunks import _GeometryRunOptions
+from .geometry_jobs import _process_reference_groups
 from .manifest_state import (
     _compatible_manifests,
     _ExistingManifest,

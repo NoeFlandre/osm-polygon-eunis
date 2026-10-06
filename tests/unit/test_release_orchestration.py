@@ -9,7 +9,7 @@ import pytest
 
 from osm_polygon_eunis import (
     card_publishing,
-    geometry_jobs,
+    geometry_workers,
     manifest_state,
     release_orchestration,
     release_plan,
@@ -69,7 +69,7 @@ def test_process_geometry_paths_keeps_only_compact_sidecar_state(
         destination.write_bytes(downloads[path].read_bytes())
         return destination
 
-    monkeypatch.setattr(geometry_jobs, "download_to_temp", fake_download)
+    monkeypatch.setattr(geometry_workers, "download_to_temp", fake_download)
     plan = DatasetPlan(
         DatasetSpec("website", "source", "target", "polygons/*.parquet"),
         "revision",
@@ -126,7 +126,7 @@ def test_process_geometry_paths_reuses_retained_source_shard(
         destination.write_bytes(source.read_bytes())
         return destination
 
-    monkeypatch.setattr(geometry_jobs, "download_to_temp", fake_download)
+    monkeypatch.setattr(geometry_workers, "download_to_temp", fake_download)
     plan = DatasetPlan(
         DatasetSpec("website", "source", "target", "polygons/*.parquet"),
         "revision",
