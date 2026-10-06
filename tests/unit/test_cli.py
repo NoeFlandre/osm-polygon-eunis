@@ -65,6 +65,7 @@ def test_default_reference_config_resolves_outside_the_repository(
     monkeypatch.chdir(tmp_path)
 
     args = cli._parser().parse_args(["release", "--dry-run"])
+    cli._resolve_defaults(args)
 
     assert args.reference_config.is_file()
     assert args.reference_config.name == "eea-2021-reference.json"
@@ -75,6 +76,7 @@ def test_workdir_defaults_to_environment_path(monkeypatch, tmp_path: Path) -> No
     monkeypatch.setenv("OSM_EUNIS_WORKDIR", str(workdir))
 
     args = cli._parser().parse_args(["verify"])
+    cli._resolve_defaults(args)
 
     assert args.workdir == workdir
 
