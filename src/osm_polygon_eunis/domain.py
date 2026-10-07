@@ -5,6 +5,11 @@ from typing import Final
 
 from shapely.geometry.base import BaseGeometry
 
+EPSG_LAEA_EUROPE: Final = 3035
+WGS84_EPSG_CODE: Final = 4326
+EPSG_LAEA_EUROPE_CRS: Final = f"EPSG:{EPSG_LAEA_EUROPE}"
+WGS84_CRS: Final = f"EPSG:{WGS84_EPSG_CODE}"
+
 EUNIS_FIELDS: Final[tuple[str, ...]] = (
     "eunis_code",
     "eunis_name",
