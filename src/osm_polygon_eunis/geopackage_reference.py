@@ -15,14 +15,13 @@ from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 from shapely.wkb import loads as load_wkb
 
-from .domain import EunisResult, OverlapCandidate, SchemaError
+from .domain import EPSG_LAEA_EUROPE, EunisResult, OverlapCandidate, SchemaError
 from .geometry import is_usable
 from .geopackage_sql import _sql_identifier
 from .geopackage_tiles import _GeoPackageTileMethods, _TileLayer
 from .grid_overlap import WeightedCells
 from .matching import choose_winner
 
-EPSG_LAEA_EUROPE = 3035
 _GPKG_HEADER_SIZE = 8
 
 logger = logging.getLogger(__name__)

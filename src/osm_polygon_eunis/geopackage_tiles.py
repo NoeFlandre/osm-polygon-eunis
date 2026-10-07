@@ -16,11 +16,9 @@ from rasterio.transform import from_origin
 from shapely.geometry import box
 from shapely.geometry.base import BaseGeometry
 
-from .domain import SchemaError
+from .domain import EPSG_LAEA_EUROPE, SchemaError
 from .geopackage_sql import _sql_identifier
 from .grid_overlap import WeightedCells, band_row_ranges, weighted_cells
-
-EPSG_LAEA_EUROPE = 3035
 
 _GEOPACKAGE_TILE_CACHE_SIZE = 4096
 _ALPHA_BAND = 4
