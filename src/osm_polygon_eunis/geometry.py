@@ -20,7 +20,7 @@ from .domain import EPSG_LAEA_EUROPE_CRS, WGS84_CRS, WGS84_EPSG_CODE
 
 WGS84_MAX_SEGMENT_LENGTH_DEGREES = 0.01
 ANTIMERIDIAN_LONGITUDE_SPAN_DEGREES = 180.0
-OVERLAP_KERNEL_VERSION = 3
+OVERLAP_KERNEL_VERSION = 4
 __all__ = [
     "ANTIMERIDIAN_LONGITUDE_SPAN_DEGREES",
     "GEOMETRY_POLICY",
@@ -30,6 +30,7 @@ __all__ = [
     "has_antimeridian_span",
     "is_usable",
     "parse_geometry",
+    "repair_polygonal",
     "safe_area",
     "to_equal_area",
 ]
@@ -52,6 +53,18 @@ def parse_geometry(value: object) -> BaseGeometry | None:
         geometry = _decode_geometry(value)
         return _valid_polygonal_geometry(geometry)
     except (GEOSException, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def repair_polygonal(geometry: BaseGeometry | None) -> BaseGeometry | None:
+    """Repair an already-decoded geometry, retaining only its polygon parts.
+
+    Returns None when nothing positive-area polygonal remains.
+    """
+
+    try:
+        return _valid_polygonal_geometry(geometry)
+    except (GEOSException, TypeError, ValueError):
         return None
 
 
