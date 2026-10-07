@@ -14,7 +14,13 @@ from ._protocols import HubApi, StreamClient
 from .cards import DatasetCardAccumulator
 from .domain import EunisResult
 from .options import ShardContext
-from .publish import ShardExpectation, parquet_signature, upload_replacement, upload_replacements
+from .publish import (
+    ShardExpectation,
+    parquet_signature,
+    software_source_commit,
+    upload_replacement,
+    upload_replacements,
+)
 from .reference_staging import _http_client
 from .release_plan import DatasetPlan, Progress, _cached_geometry_path, _sidecar_path
 from .sources import capture_revision, download_to_temp
@@ -224,12 +230,15 @@ def _input_identity(options: FinalizeOptions, plan: DatasetPlan) -> str:
 
     Committed shards are skipped on resume only when this identity is unchanged.
     It covers the pinned source, the reference config, the software version and
+    source commit (the same commit that publication records as provenance) and
     the content of every label sidecar, so a changed input never reuses stale
-    committed shards.
+    committed shards. Raises ValueError when the source commit is unknown, so
+    progress is never reused under an unverifiable identity.
     """
 
     payload = {
         "software": __version__,
+        "software_source_commit": software_source_commit(),
         "dataset": plan.spec.name,
         "source_repo": plan.spec.source_repo,
         "output_repo": plan.spec.output_repo,

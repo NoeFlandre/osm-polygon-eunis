@@ -216,12 +216,21 @@ def _manifest_geometry_policy(
 def _software_provenance() -> dict[str, str]:
     """Return the installed package version and the best available source commit."""
 
-    commit = _environment_source_commit() or _git_source_commit()
     return {
         "name": "osm-polygon-eunis",
         "version": version("osm-polygon-eunis"),
-        "commit": _validated_source_commit(commit),
+        "commit": software_source_commit(),
     }
+
+
+def software_source_commit() -> str:
+    """Return the full SHA of the running source, or raise when it cannot be established.
+
+    The same identity is recorded in publication provenance and in the resume
+    fingerprint, so callers fail closed instead of guessing a commit.
+    """
+
+    return _validated_source_commit(_environment_source_commit() or _git_source_commit())
 
 
 def _environment_source_commit() -> str | None:
