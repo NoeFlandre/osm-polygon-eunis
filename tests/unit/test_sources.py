@@ -7,6 +7,7 @@ import pytest
 from huggingface_hub import HfApi
 
 from osm_polygon_eunis._protocols import HubApi
+from osm_polygon_eunis.fileio import DOWNLOAD_TIMEOUT
 from osm_polygon_eunis.sources import (
     capture_revision,
     dataset_spec,
@@ -196,3 +197,119 @@ def test_download_to_temp_reuses_supplied_http_client(tmp_path: Path, monkeypatc
 
     assert client.calls == 1
     assert local_path.read_bytes() == b"abc"
+
+
+class _ScriptedResponse:
+    """Response whose body yields ``chunks`` and then optionally raises ``error``."""
+
+    def __init__(self, chunks: list[bytes], content_length: str, error: Exception | None = None):
+        self._chunks = chunks
+        self._content_length = content_length
+        self._error = error
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+    def raise_for_status(self) -> None:
+        return None
+
+    @property
+    def headers(self):
+        return {"content-length": self._content_length}
+
+    def iter_bytes(self, chunk_size: int):  # noqa: ARG002
+        yield from self._chunks
+        if self._error is not None:
+            raise self._error
+
+
+class _ScriptedClient:
+    def __init__(self, response: _ScriptedResponse) -> None:
+        self.response = response
+        self.timeouts: list[object] = []
+
+    def stream(self, *_args, timeout=None, **_kwargs):
+        self.timeouts.append(timeout)
+        return self.response
+
+
+def _download(tmp_path: Path, client=None) -> Path:
+    return download_to_temp(
+        cast(HubApi, HfApi(token="hf-test")),
+        "org/source",
+        "polygons/france-latest.parquet",
+        "source-sha",
+        tmp_path,
+        client=client,
+    )
+
+
+def test_shared_client_download_applies_bounded_timeout(tmp_path: Path) -> None:
+    client = _ScriptedClient(_ScriptedResponse([b"abc"], content_length="3"))
+
+    _download(tmp_path, client=client)
+
+    assert client.timeouts == [DOWNLOAD_TIMEOUT]
+
+
+def test_download_leaves_only_final_file_on_success(tmp_path: Path) -> None:
+    client = _ScriptedClient(_ScriptedResponse([b"abc"], content_length="3"))
+
+    local_path = _download(tmp_path, client=client)
+
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == [local_path.name]
+
+
+@pytest.mark.parametrize("use_shared_client", [False, True])
+def test_download_removes_partial_file_when_stream_breaks(
+    tmp_path: Path, monkeypatch, use_shared_client: bool
+) -> None:
+    response = _ScriptedResponse(
+        [b"abc"],
+        content_length="6",
+        error=httpx.ReadError("connection reset"),
+    )
+    if use_shared_client:
+        client = _ScriptedClient(response)
+    else:
+        monkeypatch.setattr(httpx, "stream", lambda *_args, **_kwargs: response)
+        client = None
+
+    with pytest.raises(httpx.ReadError):
+        _download(tmp_path, client=client)
+
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("use_shared_client", [False, True])
+def test_download_removes_partial_file_on_length_mismatch(
+    tmp_path: Path, monkeypatch, use_shared_client: bool
+) -> None:
+    response = _ScriptedResponse([b"abc"], content_length="7")
+    if use_shared_client:
+        client = _ScriptedClient(response)
+    else:
+        monkeypatch.setattr(httpx, "stream", lambda *_args, **_kwargs: response)
+        client = None
+
+    with pytest.raises(ValueError, match="byte count"):
+        _download(tmp_path, client=client)
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_module_download_applies_bounded_timeout(tmp_path: Path, monkeypatch) -> None:
+    timeouts: list[object] = []
+
+    def fake_stream(*_args, timeout=None, **_kwargs):
+        timeouts.append(timeout)
+        return _ScriptedResponse([b"abc"], content_length="3")
+
+    monkeypatch.setattr(httpx, "stream", fake_stream)
+
+    _download(tmp_path)
+
+    assert timeouts == [DOWNLOAD_TIMEOUT]
