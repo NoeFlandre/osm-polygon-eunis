@@ -95,6 +95,17 @@ def test_parse_geometry_repairs_a_recoverable_self_intersection() -> None:
     assert safe_area(geometry) > 0
 
 
+def test_repair_polygonal_keeps_polygonal_parts_of_invalid_geometry() -> None:
+    bowtie = Polygon([(0, 0), (2, 2), (0, 2), (2, 0), (0, 0)])
+
+    repaired = geometry_module.repair_polygonal(bowtie)
+
+    assert repaired is not None
+    assert repaired.is_valid
+    assert safe_area(repaired) == pytest.approx(2.0)
+    assert geometry_module.repair_polygonal(None) is None
+
+
 def test_parse_geometry_rejects_missing_or_malformed_values() -> None:
     assert parse_geometry(None) is None
     assert parse_geometry("not-json") is None
