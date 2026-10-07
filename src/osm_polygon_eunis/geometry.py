@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from functools import lru_cache
-from typing import Any, TypeGuard
+from typing import TypeGuard
 
 from pyproj import CRS, Transformer
 from shapely import from_wkt, segmentize
@@ -60,7 +60,7 @@ def _decode_geometry(value: object) -> BaseGeometry | None:
         return load_wkb(bytes(value))
     if isinstance(value, str):
         try:
-            payload: Any = json.loads(value)
+            payload: object = json.loads(value)
         except json.JSONDecodeError:
             return from_wkt(value)
     else:
