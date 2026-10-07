@@ -102,8 +102,6 @@ max-args = 6
 "benchmarks/**" = ["S101", "D"]
 # These test fixtures assert that ephemeral local paths are rejected.
 "tests/unit/test_grid5000.py" = ["S108"]
-# Internal type-narrowing invariants, not input validation.
-"src/osm_polygon_eunis/matching.py" = ["S101"]
 # Keep parameter-list limits enabled for all production modules.
 "scripts/**" = ["T201"]
 "src/osm_polygon_eunis/cli.py" = ["T201"]
