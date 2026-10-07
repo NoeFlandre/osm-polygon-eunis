@@ -13,3 +13,5 @@ This file contains the release notes for this project. The version numbers are i
 - Restore the Grid'5000 sidecar checkpoints that have a checked signature. Set
   a limit on the worker reference caches.
 - Add a non-root Docker image and a CI build check.
+- Resume finalization only when the reference, sidecars, software version and
+  source revision are unchanged. A changed input now re-publishes every shard.

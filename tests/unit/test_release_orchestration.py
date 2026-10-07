@@ -370,6 +370,107 @@ def test_finalize_dataset_resumes_after_the_last_committed_group(
     assert all(sidecar.exists() for sidecar in (tmp_path / "sidecars").rglob("*.parquet"))
 
 
+@pytest.mark.parametrize("changed_input", ["sidecar", "reference", "software"])
+def test_finalize_dataset_reprocesses_committed_shards_when_inputs_change(
+    tmp_path: Path,
+    monkeypatch,
+    changed_input: str,
+) -> None:
+    sources = {
+        f"polygons/{name}.parquet": pa.table(
+            {"polygon_id": [name], "geometry": ['{"type":"Point","coordinates":[0,0]}']}
+        )
+        for name in ("a", "b")
+    }
+
+    def fake_download(api, repo_id, path, revision, directory, *, client=None):
+        del api, repo_id, revision, client
+        destination = directory / path.replace("/", "__")
+        pq.write_table(sources[path], destination)
+        return destination
+
+    commits = 0
+    interrupt = True
+    uploaded: list[tuple[str, list[str]]] = []
+
+    def fake_upload(api, repo_id, files, *, parent_commit=None):
+        nonlocal commits
+        del api, repo_id, parent_commit
+        commits += 1
+        if interrupt and commits == 2:
+            raise RuntimeError("interrupted")
+        for path, local in files:
+            uploaded.append((path, pq.read_table(local)["eunis_code"].to_pylist()))
+        return SimpleNamespace(oid=f"commit-{commits}")
+
+    monkeypatch.setattr(shard_processing, "download_to_temp", fake_download)
+    monkeypatch.setattr(shard_processing, "upload_replacements", fake_upload)
+    monkeypatch.setattr(shard_processing, "_COMMIT_MAX_SHARDS", 1)
+    plan = DatasetPlan(
+        DatasetSpec("website", "source", "target", "polygons/*.parquet"),
+        "source-revision",
+        tuple(sources),
+        tuple(sources),
+        (),
+    )
+
+    def write_sidecars(code: str, version: str) -> None:
+        for path in plan.geometry_paths:
+            sidecar = release_plan._sidecar_path(tmp_path / "sidecars", plan.spec, path)
+            sidecar.parent.mkdir(parents=True, exist_ok=True)
+            pq.write_table(
+                pa.table(
+                    {
+                        "eunis_code": [code],
+                        "eunis_name": ["steppe"],
+                        "eunis_overlap_percentage": [75.0],
+                        "eunis_source_version": [version],
+                    }
+                ),
+                sidecar,
+            )
+
+    def run(reference_version: str) -> None:
+        card = DatasetCardAccumulator()
+        shard_processing.finalize_dataset(
+            cast(HubApi, object()),
+            plan,
+            shard_processing.FinalizeOptions(
+                sidecar_root=tmp_path / "sidecars",
+                local_root=tmp_path / "final",
+                batch_size=10,
+                parent_commit="base",
+                progress=None,
+                card=card,
+                source_cache_root=None,
+                http_client=cast(StreamClient, object()),
+                reference_info={"source_version": reference_version},
+            ),
+        )
+
+    write_sidecars("R11", "EEA-v1")
+    with pytest.raises(RuntimeError, match="interrupted"):
+        run("EEA-v1")
+    # Shard "a" is committed with the v1 labels before the interruption.
+    assert uploaded == [("polygons/a.parquet", ["R11"])]
+
+    uploaded.clear()
+    interrupt = False
+    expected_code = "R11"
+    reference_version = "EEA-v1"
+    if changed_input == "sidecar":
+        write_sidecars("C22", "EEA-v2")
+        expected_code = "C22"
+    elif changed_input == "reference":
+        reference_version = "EEA-v2"
+    else:
+        monkeypatch.setattr(shard_processing, "__version__", "next-release")
+    run(reference_version)
+
+    assert ("polygons/a.parquet", [expected_code]) in uploaded
+    assert ("polygons/b.parquet", [expected_code]) in uploaded
+
+
 def test_planning_manifest_and_shared_blobs_are_deterministic(monkeypatch) -> None:
     entries = {
         "NoeFlandre/osm-polygon-website-tag": (

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from ._protocols import HubApi, StreamClient
 from .cards import DatasetCardAccumulator
 from .domain import EunisResult
@@ -44,6 +46,7 @@ class FinalizeOptions:
     card: DatasetCardAccumulator
     source_cache_root: Path | None
     http_client: StreamClient | None = None
+    reference_info: Mapping[str, object] | None = None
 
 
 def _commit_id(result: Any) -> str | None:
@@ -71,6 +74,7 @@ class _PendingCommit:
     expectations: list[ShardExpectation]
     geometry_paths: list[str]
     scratch: list[Path]
+    identity: str
     size: int = 0
 
     def is_full(self) -> bool:
@@ -107,9 +111,10 @@ def _finalize_dataset_with_client(
 ) -> tuple[tuple[ShardExpectation, ...], str]:
     options.local_root.mkdir(parents=True, exist_ok=True)
     link_by_filename = {Path(link_path).name: link_path for link_path in plan.link_paths}
-    expectations, committed = _load_progress(options, plan)
+    identity = _input_identity(options, plan)
+    expectations, committed = _load_progress(options, plan, identity)
     current_commit = options.parent_commit
-    pending = _new_pending(options.card)
+    pending = _new_pending(options.card, identity)
     for geometry_path in plan.geometry_paths:
         if geometry_path in committed:
             _report_uploaded(options, plan, geometry_path)
@@ -121,7 +126,7 @@ def _finalize_dataset_with_client(
             current_commit = _commit_pending(
                 api, plan, options, pending, expectations, current_commit
             )
-            pending = _new_pending(options.card)
+            pending = _new_pending(options.card, identity)
     current_commit = _commit_remaining(api, plan, options, pending, expectations, current_commit)
     return tuple(expectations), current_commit
 
@@ -139,8 +144,8 @@ def _commit_remaining(
     return _commit_pending(api, plan, options, pending, expectations, current_commit)
 
 
-def _new_pending(card: DatasetCardAccumulator) -> _PendingCommit:
-    return _PendingCommit(card.spawn(), [], [], [], [])
+def _new_pending(card: DatasetCardAccumulator, identity: str) -> _PendingCommit:
+    return _PendingCommit(card.spawn(), [], [], [], [], identity)
 
 
 def _prepare_shard(
@@ -195,7 +200,7 @@ def _commit_pending(
     current_commit = _advance_commit(api, plan.spec.output_repo, result)
     options.card.merge(pending.card)
     expectations.extend(pending.expectations)
-    _save_progress(options, plan, expectations)
+    _save_progress(options, plan, pending.identity, expectations)
     for path in pending.scratch:
         path.unlink(missing_ok=True)
     for geometry_path in pending.geometry_paths:
@@ -214,13 +219,50 @@ def _progress_path(options: FinalizeOptions, plan: DatasetPlan) -> Path:
     return options.local_root / f"{plan.spec.name}.finalize.json"
 
 
+def _input_identity(options: FinalizeOptions, plan: DatasetPlan) -> str:
+    """Fingerprint every input that decides what a finalized shard contains.
+
+    Committed shards are skipped on resume only when this identity is unchanged.
+    It covers the pinned source, the reference config, the software version and
+    the content of every label sidecar, so a changed input never reuses stale
+    committed shards.
+    """
+
+    payload = {
+        "software": __version__,
+        "dataset": plan.spec.name,
+        "source_repo": plan.spec.source_repo,
+        "output_repo": plan.spec.output_repo,
+        "source_revision": plan.source_revision,
+        "reference": options.reference_info,
+        "sidecars": {
+            path: _file_digest(_sidecar_path(options.sidecar_root, plan.spec, path))
+            for path in plan.geometry_paths
+        },
+    }
+    encoded = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _file_digest(path: Path) -> str:
+    if not path.is_file():
+        return "missing"
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _save_progress(
     options: FinalizeOptions,
     plan: DatasetPlan,
+    identity: str,
     expectations: list[ShardExpectation],
 ) -> None:
     payload = {
         "source_revision": plan.source_revision,
+        "identity": identity,
         "expectations": [[e.path, e.rows, e.schema] for e in expectations],
         "card": options.card.snapshot(),
     }
@@ -230,19 +272,24 @@ def _save_progress(
     temporary.replace(path)
 
 
-def _progress_payload(options: FinalizeOptions, plan: DatasetPlan) -> dict[str, Any] | None:
+def _progress_payload(
+    options: FinalizeOptions,
+    plan: DatasetPlan,
+    identity: str,
+) -> dict[str, Any] | None:
     path = _progress_path(options, plan)
     if not path.is_file():
         return None
     payload = json.loads(path.read_text(encoding="utf-8"))
-    return payload if payload.get("source_revision") == plan.source_revision else None
+    return payload if payload.get("identity") == identity else None
 
 
 def _load_progress(
     options: FinalizeOptions,
     plan: DatasetPlan,
+    identity: str,
 ) -> tuple[list[ShardExpectation], set[str]]:
-    payload = _progress_payload(options, plan)
+    payload = _progress_payload(options, plan, identity)
     if payload is None:
         return [], set()
     options.card.restore(payload["card"])
