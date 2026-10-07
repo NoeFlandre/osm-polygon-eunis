@@ -133,10 +133,12 @@ def _boundary_areas(
     """Exact polygon area inside each listed cell.
 
     The polygon is narrowed hierarchically (row strip, then block) so each
-    rectangle clip only sees the vertices near its cells.
+    exact intersection only sees the vertices near its cells.
     """
 
     areas = np.zeros(len(rows), dtype=np.float64)
+    if not len(rows):
+        return areas
     for strip in _groups(rows // _STRIP_CELLS):
         areas[strip] = _strip_areas(polygon, transform, rows[strip], cols[strip])
     return areas
@@ -170,13 +172,20 @@ def _clip_to_cells(
     cols: np.ndarray,
 ) -> BaseGeometry:
     bounds = shapely.bounds(_cell_boxes(transform, rows, cols))
-    return shapely.clip_by_rect(
-        polygon,
-        float(bounds[:, 0].min()),
-        float(bounds[:, 1].min()),
-        float(bounds[:, 2].max()),
-        float(bounds[:, 3].max()),
-    )
+    x_min = float(bounds[:, 0].min())
+    y_min = float(bounds[:, 1].min())
+    x_max = float(bounds[:, 2].max())
+    y_max = float(bounds[:, 3].max())
+    polygon_bounds = shapely.bounds(polygon)
+    if (
+        polygon_bounds[0] >= x_min
+        and polygon_bounds[1] >= y_min
+        and polygon_bounds[2] <= x_max
+        and polygon_bounds[3] <= y_max
+    ):
+        return polygon
+    clip_box = shapely.box(x_min, y_min, x_max, y_max)
+    return shapely.intersection(polygon, clip_box)
 
 
 def _cell_areas(
@@ -185,18 +194,17 @@ def _cell_areas(
     rows: np.ndarray,
     cols: np.ndarray,
 ) -> np.ndarray:
-    """Polygon area per cell: whole cells by predicate, crossing cells by rectangle clip."""
+    """Polygon area per cell: whole cells by predicate, crossing cells by exact overlay."""
 
     boxes = _cell_boxes(transform, rows, cols)
-    bounds = shapely.bounds(boxes)
     if polygon.is_empty:
         return np.zeros(len(rows), dtype=np.float64)
     shapely.prepare(polygon)
     inside = shapely.contains(polygon, boxes)
     areas = np.where(inside, shapely.area(boxes), 0.0)
-    for index in np.flatnonzero(shapely.intersects(polygon, boxes) & ~inside):
-        x_min, y_min, x_max, y_max = bounds[index]
-        areas[index] = shapely.area(shapely.clip_by_rect(polygon, x_min, y_min, x_max, y_max))
+    crossing = np.flatnonzero(shapely.intersects(polygon, boxes) & ~inside)
+    if len(crossing):
+        areas[crossing] = shapely.area(shapely.intersection(boxes[crossing], polygon))
     return np.asarray(areas, dtype=np.float64)
 
 

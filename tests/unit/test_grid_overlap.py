@@ -7,11 +7,13 @@ import pytest
 import shapely
 from rasterio.io import DatasetReader
 from rasterio.transform import Affine, from_origin
-from shapely.geometry import Point, Polygon, box
+from shapely.geometry import MultiPolygon, Point, Polygon, box
+from shapely.geometry.base import BaseGeometry
 
 from osm_polygon_eunis.grid_overlap import (
     _burn,
     _cell_areas,
+    _clip_to_cells,
     _dilate,
     _groups,
     band_row_ranges,
@@ -353,3 +355,108 @@ def test_tile_window_is_clipped_at_the_raster_edge() -> None:
 )
 def test_is_square_north_up(transform: Affine, expected: bool) -> None:
     assert is_square_north_up(transform) is expected
+
+
+def _exact_cell_areas(
+    polygon: BaseGeometry, transform: Affine, rows: tuple[int, int], cols: tuple[int, int]
+) -> dict[tuple[int, int], float]:
+    result: dict[tuple[int, int], float] = {}
+    for row in range(*rows):
+        for col in range(*cols):
+            x0 = transform.c + col * transform.a
+            x1 = transform.c + (col + 1) * transform.a
+            y0 = transform.f + row * transform.e
+            y1 = transform.f + (row + 1) * transform.e
+            cell = box(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+            area = polygon.intersection(cell).area
+            if area > 0.0:
+                result[(row, col)] = area
+    return result
+
+
+@pytest.mark.parametrize(
+    ("polygon", "transform", "rows", "cols"),
+    [
+        (
+            Polygon(
+                [(0, 0), (40, 0), (40, 40), (0, 40)],
+                [[(10, 10), (21, 21), (22, 15), (24, 40)]],
+            ),
+            from_origin(0, 40, 5, 5),
+            (0, 8),
+            (0, 8),
+        ),
+        (
+            Polygon(
+                [(0, 0), (40, 0), (40, 100), (0, 100)],
+                [[(10, 70), (21, 81), (22, 75), (24, 100)]],
+            ),
+            from_origin(0, 100, 1, 1),
+            (0, 100),
+            (0, 40),
+        ),
+        (
+            MultiPolygon([box(0, 0, 4, 4), box(4, 4, 8, 8)]),
+            from_origin(0, 8, 1, 1),
+            (0, 8),
+            (0, 8),
+        ),
+        (
+            Polygon([(0.25, 0.5), (8.75, 1.25), (7.5, 8.5), (1.5, 7.75)]),
+            from_origin(0, 10, 1, 1),
+            (0, 10),
+            (0, 10),
+        ),
+        (box(100, 100, 101, 101), from_origin(0, 10, 1, 1), (0, 10), (0, 10)),
+        (
+            box(126.25, 126.25, 129.75, 129.75),
+            from_origin(0, 256, 1, 1),
+            (126, 131),
+            (126, 131),
+        ),
+    ],
+    ids=[
+        "touching-hole",
+        "touching-hole-strip-and-block-clips",
+        "touching-multipolygon-parts",
+        "ordinary",
+        "empty",
+        "tile-boundary",
+    ],
+)
+def test_weighted_cells_conserve_exact_intersection_area(
+    polygon: BaseGeometry,
+    transform: Affine,
+    rows: tuple[int, int],
+    cols: tuple[int, int],
+) -> None:
+    assert polygon.is_valid
+    cells = weighted_cells(polygon, transform, rows, cols)
+    found = _cells(cells)
+    expected = _exact_cell_areas(polygon, transform, rows, cols)
+
+    assert found.keys() == expected.keys()
+    assert all(found[key] == pytest.approx(expected[key], rel=1e-9) for key in expected)
+    x0 = transform.c + cols[0] * transform.a
+    x1 = transform.c + cols[1] * transform.a
+    y0 = transform.f + rows[0] * transform.e
+    y1 = transform.f + rows[1] * transform.e
+    grid = box(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+    assert sum(found.values()) == pytest.approx(polygon.intersection(grid).area, rel=1e-9)
+
+
+def test_strip_and_block_clips_preserve_touching_hole_intersections() -> None:
+    transform = from_origin(0, 12, 1, 1)
+    polygon = Polygon(
+        [(0, 0), (12, 0), (12, 12), (0, 12)],
+        [[(6, 2), (10, 6), (6, 10), (2, 6)]],
+    )
+    strip = _clip_to_cells(polygon, transform, np.array([0, 0, 11, 11]), np.array([5, 9, 5, 9]))
+    expected_strip = polygon.intersection(box(5, 0, 10, 12))
+    block = _clip_to_cells(strip, transform, np.array([9, 9, 11, 11]), np.array([5, 6, 5, 6]))
+    expected_block = polygon.intersection(box(5, 0, 7, 3))
+
+    assert strip.is_valid
+    assert strip.symmetric_difference(expected_strip).area == pytest.approx(0.0)
+    assert block.is_valid
+    assert block.symmetric_difference(expected_block).area == pytest.approx(0.0)

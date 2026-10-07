@@ -13,7 +13,7 @@ import rasterio
 from pyproj import CRS, Transformer
 from rasterio.io import MemoryFile
 from rasterio.transform import from_origin
-from shapely.geometry import box
+from shapely.geometry import Polygon, box
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import transform as transform_geometry
 from shapely.wkb import dumps
@@ -717,3 +717,34 @@ def test_square_grid_detection_rejects_rotated_and_stretched_transforms() -> Non
     assert not _is_square_north_up(Affine(10, 0, 0, 0, -20, 0))
     assert not _is_square_north_up(Affine(10, 1, 0, 0, -10, 0))
     assert not _is_square_north_up(Affine(10, 0, 0, 1, -10, 0))
+
+
+def test_raster_overlap_is_100_percent_for_an_all_100_grid_with_a_touching_hole(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "Prob_R11_5m.tif"
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        width=8,
+        height=8,
+        count=1,
+        dtype="uint8",
+        crs="EPSG:3035",
+        transform=from_origin(0, 40, 5, 5),
+        nodata=0,
+    ) as dataset:
+        dataset.write(np.full((8, 8), 100, dtype="uint8"), 1)
+    polygon = Polygon(
+        [(0, 0), (40, 0), (40, 40), (0, 40)],
+        [[(10, 10), (21, 21), (22, 15), (24, 40)]],
+    )
+    assert polygon.is_valid
+    reference = RasterReference((RasterLayer("R11", "Steppe", path, "EEA-test"),))
+
+    with reference:
+        result = reference.overlap(polygon)
+
+    assert result.code == "R11"
+    assert result.overlap_percentage == pytest.approx(100.0)
