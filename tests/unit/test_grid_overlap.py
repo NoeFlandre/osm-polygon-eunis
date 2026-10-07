@@ -379,7 +379,7 @@ def test_cell_areas_falls_back_when_fast_clip_is_invalid(
 
     monkeypatch.setattr(shapely, "clip_by_rect", clip_to_invalid_geometry)
 
-    areas = _cell_areas(polygon, transform, rows, cols, allow_rect_clip=True)
+    areas = _cell_areas(polygon, transform, rows, cols, source_allows_rect_clip=True)
     expected = [
         polygon.intersection(box(col, 9 - row, col + 1, 10 - row)).area
         for row, col in zip(rows, cols, strict=True)
@@ -673,7 +673,7 @@ def test_invalid_rectangle_clips_fall_back_to_exact_intersections(
         transform,
         np.array([0, 9]),
         np.array([0, 9]),
-        allow_rect_clip=True,
+        source_allows_rect_clip=True,
     )
     window = box(0, 0, 10, 10)
     expected_clip = polygon.intersection(window)

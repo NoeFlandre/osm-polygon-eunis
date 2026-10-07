@@ -133,11 +133,14 @@ def _boundary_areas(
     areas = np.zeros(len(rows), dtype=np.float64)
     if not len(rows):
         return areas
-    # Preserve the source geometry's eligibility through strip/block clips.
-    allow_rect_clip = _simple_polygon_without_holes(polygon)
+    source_allows_rect_clip = _simple_polygon_without_holes(polygon)
     for strip in _groups(rows // _STRIP_CELLS):
         areas[strip] = _strip_areas(
-            polygon, transform, rows[strip], cols[strip], allow_rect_clip=allow_rect_clip
+            polygon,
+            transform,
+            rows[strip],
+            cols[strip],
+            source_allows_rect_clip=source_allows_rect_clip,
         )
     return areas
 
@@ -148,24 +151,26 @@ def _strip_areas(
     rows: np.ndarray,
     cols: np.ndarray,
     *,
-    allow_rect_clip: bool,
+    source_allows_rect_clip: bool,
 ) -> np.ndarray:
     areas = np.zeros(len(rows), dtype=np.float64)
-    strip_polygon = _clip_to_cells(polygon, transform, rows, cols, allow_rect_clip=allow_rect_clip)
+    strip_polygon = _clip_to_cells(
+        polygon, transform, rows, cols, source_allows_rect_clip=source_allows_rect_clip
+    )
     for block in _groups(cols // _BLOCK_CELLS):
         block_polygon = _clip_to_cells(
             strip_polygon,
             transform,
             rows[block],
             cols[block],
-            allow_rect_clip=allow_rect_clip,
+            source_allows_rect_clip=source_allows_rect_clip,
         )
         areas[block] = _cell_areas(
             block_polygon,
             transform,
             rows[block],
             cols[block],
-            allow_rect_clip=allow_rect_clip,
+            source_allows_rect_clip=source_allows_rect_clip,
         )
     return areas
 
@@ -183,12 +188,12 @@ def _clip_to_cells(
     rows: np.ndarray,
     cols: np.ndarray,
     *,
-    allow_rect_clip: bool = False,
+    source_allows_rect_clip: bool = False,
 ) -> BaseGeometry:
     clip_bounds = _cell_bounds(transform, rows, cols)
     if _bounds_contain(clip_bounds, shapely.bounds(polygon)):
         return polygon
-    if allow_rect_clip:
+    if source_allows_rect_clip:
         clipped = shapely.clip_by_rect(polygon, *clip_bounds)
         if clipped.is_valid:
             return clipped
@@ -225,10 +230,8 @@ def _cell_areas(
     rows: np.ndarray,
     cols: np.ndarray,
     *,
-    allow_rect_clip: bool = False,
+    source_allows_rect_clip: bool = False,
 ) -> np.ndarray:
-    """Area per cell using containment and the safe fast clip or exact overlay."""
-
     boxes = _cell_boxes(transform, rows, cols)
     if polygon.is_empty:
         return np.zeros(len(rows))
@@ -238,7 +241,7 @@ def _cell_areas(
     crossing = np.flatnonzero(shapely.intersects(polygon, boxes) & ~inside)
     if len(crossing):
         areas[crossing] = _crossing_cell_areas(
-            polygon, boxes, crossing, allow_rect_clip=allow_rect_clip
+            polygon, boxes, crossing, source_allows_rect_clip=source_allows_rect_clip
         )
     return areas
 
@@ -248,9 +251,9 @@ def _crossing_cell_areas(
     boxes: np.ndarray,
     crossing: np.ndarray,
     *,
-    allow_rect_clip: bool,
+    source_allows_rect_clip: bool,
 ) -> np.ndarray:
-    if not allow_rect_clip:
+    if not source_allows_rect_clip:
         return shapely.area(shapely.intersection(boxes[crossing], polygon))
 
     bounds = shapely.bounds(boxes[crossing])
