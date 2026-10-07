@@ -1,4 +1,6 @@
 import logging
+import subprocess
+import sys
 
 import pytest
 from hypothesis import given
@@ -9,6 +11,7 @@ from osm_polygon_eunis.domain import EunisResult, OverlapCandidate
 from osm_polygon_eunis.matching import (
     _exact_intersection_area,
     _percentage,
+    _rank,
     _usable_polygon,
     choose_winner,
     prefer_result,
@@ -214,6 +217,76 @@ def test_prefer_result_handles_unequal_percentages_and_version_mismatch() -> Non
     assert prefer_result(current, same_code_tie) is current
     with pytest.raises(ValueError) as error:
         prefer_result(current, EunisResult("R12", "other", 50.0, "other"))
+    assert str(error.value) == "cannot merge EUNIS results from different source versions"
+
+
+@pytest.mark.parametrize("percentages", [(None, 25.0), (25.0, None), (None, None)])
+def test_prefer_result_rejects_missing_overlap(percentages) -> None:
+    current = EunisResult("R11", "current", percentages[0], "test")
+    candidate = EunisResult("R12", "candidate", percentages[1], "test")
+
+    with pytest.raises(ValueError) as error:
+        prefer_result(current, candidate)
+
+    assert str(error.value) == "EUNIS rank requires a code and overlap percentage"
+
+
+@pytest.mark.parametrize("percentage", [None, 25.0])
+def test_rank_rejects_missing_code(percentage) -> None:
+    with pytest.raises(ValueError) as error:
+        _rank(EunisResult(None, None, percentage, "test"))
+
+    assert str(error.value) == "EUNIS rank requires a code and overlap percentage"
+
+
+def test_prefer_result_rejects_missing_overlap_with_optimized_python() -> None:
+    script = """
+import sys
+from osm_polygon_eunis.domain import EunisResult
+from osm_polygon_eunis.matching import prefer_result
+
+if sys.flags.optimize != 1:
+    raise RuntimeError("optimized Python is required")
+for current_percentage, candidate_percentage in [(None, 25.0), (25.0, None), (None, None)]:
+    current = EunisResult("R11", "current", current_percentage, "test")
+    candidate = EunisResult("R12", "candidate", candidate_percentage, "test")
+    try:
+        prefer_result(current, candidate)
+    except ValueError as error:
+        if str(error) != "EUNIS rank requires a code and overlap percentage":
+            raise
+    else:
+        raise RuntimeError("accepted a result without an overlap percentage")
+print("rejected all three malformed pairs")
+"""
+    result = subprocess.run(  # noqa: S603
+        [sys.executable, "-O", "-c", script], capture_output=True, text=True, check=False
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "rejected all three malformed pairs\n"
+
+
+def test_prefer_result_preserves_zero_overlap_and_empty_fast_paths() -> None:
+    zero = EunisResult("R11", "zero", 0.0, "test")
+    higher_code = EunisResult("R12", "tie", 0.0, "test")
+    empty = EunisResult(None, None, None, None)
+    malformed = EunisResult("R13", "malformed", None, "test")
+
+    assert prefer_result(zero, higher_code) is zero
+    assert prefer_result(higher_code, zero) is zero
+    assert prefer_result(empty, malformed) is malformed
+    assert prefer_result(malformed, empty) is malformed
+    assert prefer_result(empty, empty) is empty
+
+
+def test_prefer_result_checks_source_version_before_rank() -> None:
+    current = EunisResult("R11", "current", None, "test")
+    candidate = EunisResult("R12", "candidate", None, "other")
+
+    with pytest.raises(ValueError) as error:
+        prefer_result(current, candidate)
+
     assert str(error.value) == "cannot merge EUNIS results from different source versions"
 
 

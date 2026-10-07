@@ -121,8 +121,8 @@ def _outranks(candidate: tuple[float, str], current: tuple[float, str]) -> bool:
 
 
 def _rank(result: EunisResult) -> tuple[float, str]:
-    assert result.overlap_percentage is not None
-    assert result.code is not None
+    if result.code is None or result.overlap_percentage is None:
+        raise ValueError("EUNIS rank requires a code and overlap percentage")
     return result.overlap_percentage, result.code
 
 
