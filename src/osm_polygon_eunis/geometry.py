@@ -16,9 +16,10 @@ from shapely.ops import transform, unary_union
 from shapely.validation import make_valid
 from shapely.wkb import loads as load_wkb
 
+from .domain import EPSG_LAEA_EUROPE_CRS, WGS84_CRS, WGS84_EPSG_CODE
+
 WGS84_MAX_SEGMENT_LENGTH_DEGREES = 0.01
 ANTIMERIDIAN_LONGITUDE_SPAN_DEGREES = 180.0
-WGS84_EPSG_CODE = 4326
 OVERLAP_KERNEL_VERSION = 3
 __all__ = [
     "ANTIMERIDIAN_LONGITUDE_SPAN_DEGREES",
@@ -134,8 +135,8 @@ def has_antimeridian_span(geometry: BaseGeometry) -> bool:
 
 def to_equal_area(
     geometry: BaseGeometry | None,
-    source_crs: str = "EPSG:4326",
-    target_crs: str = "EPSG:3035",
+    source_crs: str = WGS84_CRS,
+    target_crs: str = EPSG_LAEA_EUROPE_CRS,
 ) -> BaseGeometry | None:
     """Densify WGS84 edges, then project areal input to the EEA equal-area CRS.
 

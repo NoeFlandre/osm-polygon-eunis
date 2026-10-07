@@ -29,7 +29,6 @@ from .grid_overlap import (
     weighted_cells,
 )
 from .matching import choose_winner
-from .raster_geometry import EPSG_LAEA_EUROPE as _EPSG_LAEA_EUROPE
 from .raster_geometry import (
     _is_epsg_3035,
     wgs84_envelope,
@@ -39,7 +38,6 @@ logger = logging.getLogger(__name__)
 
 _LAYER_CODE = re.compile(r"^Prob_(?P<code>[A-Z][A-Z0-9.]+)_\d+m\.tif$")
 _DEFAULT_RASTER_TILE_CACHE_BYTES = 1536 * 1024 * 1024
-EPSG_LAEA_EUROPE = _EPSG_LAEA_EUROPE
 
 
 @dataclass(frozen=True, slots=True)
