@@ -57,6 +57,7 @@ def _finalize_plan(
         card=card,
         source_cache_root=options.source_cache_root,
         http_client=options.http_client,
+        reference_info=options.reference_info,
     )
     expectations, current_commit = finalize_dataset(api, plan, finalize_options)
     _enforce_intersection_error_limit(card, plan, options.max_intersection_errors)

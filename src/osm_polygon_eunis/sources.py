@@ -188,22 +188,28 @@ def download_to_temp(
         endpoint=api.endpoint,
     )
     headers = build_hf_headers(token=api.token)
-    if client is None:
-        with httpx.stream(
-            "GET",
-            url,
-            headers=headers,
-            follow_redirects=True,
-            timeout=DOWNLOAD_TIMEOUT,
-        ) as response:
-            written, expected = _write_response(response, destination)
-    else:
-        written, expected = _download_with_client(client, url, headers, destination)
-    if expected is not None and written != int(expected):
-        destination.unlink(missing_ok=True)
-        raise ValueError(
-            f"downloaded byte count {written} does not match Content-Length {expected}",
-        )
+    # Write to a sibling partial file so a failed or truncated transfer never
+    # leaves anything at the final path.
+    partial = destination.with_name(f"{destination.name}.part")
+    try:
+        if client is None:
+            with httpx.stream(
+                "GET",
+                url,
+                headers=headers,
+                follow_redirects=True,
+                timeout=DOWNLOAD_TIMEOUT,
+            ) as response:
+                written, expected = _write_response(response, partial)
+        else:
+            written, expected = _download_with_client(client, url, headers, partial)
+        if expected is not None and written != int(expected):
+            raise ValueError(
+                f"downloaded byte count {written} does not match Content-Length {expected}",
+            )
+        partial.replace(destination)
+    finally:
+        partial.unlink(missing_ok=True)
     return destination
 
 
@@ -218,7 +224,7 @@ def _download_with_client(
         url,
         headers=headers,
         follow_redirects=True,
-        timeout=None,
+        timeout=DOWNLOAD_TIMEOUT,
     ) as response:
         return _write_response(response, destination)
 
