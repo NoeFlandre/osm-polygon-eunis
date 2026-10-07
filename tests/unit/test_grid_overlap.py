@@ -10,6 +10,7 @@ from rasterio.transform import Affine, from_origin
 from shapely.geometry import MultiPolygon, Point, Polygon, box
 from shapely.geometry.base import BaseGeometry
 
+from osm_polygon_eunis import grid_overlap
 from osm_polygon_eunis.grid_overlap import (
     _burn,
     _cell_areas,
@@ -325,6 +326,165 @@ def test_cell_areas_split_whole_crossing_and_missed_cells() -> None:
     assert empty.tolist() == [0.0, 0.0, 0.0, 0.0]
 
 
+def test_cell_areas_batches_exact_intersections_without_rectangle_clips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transform = from_origin(0.0, 4.0, 1.0, 1.0)
+    polygon = box(-0.1, -0.1, 3.1, 3.1)
+    rows = np.repeat(np.arange(4), 4)
+    cols = np.tile(np.arange(4), 4)
+    expected = [
+        polygon.intersection(box(col, 3 - row, col + 1, 4 - row)).area
+        for row, col in zip(rows, cols, strict=True)
+    ]
+    exact_intersection = shapely.intersection
+    intersection_arrays: list[np.ndarray] = []
+
+    def unexpected_rectangle_clip(*_args: object) -> Polygon:
+        pytest.fail("cell areas must use exact intersections")
+
+    def counted_intersection(left: object, right: object) -> object:
+        if isinstance(left, np.ndarray):
+            intersection_arrays.append(left)
+        if isinstance(right, np.ndarray):
+            intersection_arrays.append(right)
+        return exact_intersection(left, right)
+
+    monkeypatch.setattr(shapely, "clip_by_rect", unexpected_rectangle_clip)
+    monkeypatch.setattr(shapely, "intersection", counted_intersection)
+
+    areas = _cell_areas(polygon, transform, rows, cols)
+
+    np.testing.assert_allclose(areas, expected, rtol=1e-9, atol=0.0)
+    assert len(intersection_arrays) == 1
+    assert intersection_arrays[0].size == 7
+    assert shapely.is_prepared(polygon)
+
+
+def test_cell_areas_falls_back_when_fast_clip_is_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transform = from_origin(0, 10, 1, 1)
+    polygon = Polygon([(-1, -1), (12, 2), (7, 12), (-1, 12)])
+    invalid_clip = Polygon([(0, 0), (2, 2), (0, 2), (2, 0)])
+    assert polygon.is_valid and not invalid_clip.is_valid
+    rows = np.repeat(np.arange(10), 10)
+    cols = np.tile(np.arange(10), 10)
+    clip_calls = 0
+
+    def clip_to_invalid_geometry(*_args: object) -> Polygon:
+        nonlocal clip_calls
+        clip_calls += 1
+        return invalid_clip
+
+    monkeypatch.setattr(shapely, "clip_by_rect", clip_to_invalid_geometry)
+
+    areas = _cell_areas(polygon, transform, rows, cols, allow_rect_clip=True)
+    expected = [
+        polygon.intersection(box(col, 9 - row, col + 1, 10 - row)).area
+        for row, col in zip(rows, cols, strict=True)
+    ]
+
+    assert clip_calls > 0
+    np.testing.assert_allclose(areas, expected, rtol=1e-9, atol=0.0)
+
+
+def test_boundary_areas_keeps_original_clipping_eligibility_across_stages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transform = from_origin(0.0, 2.0, 1.0, 1.0)
+    polygon = box(-1.0, -65.0, 20.0, 3.0)
+    rows = np.array([0, 0, 64, 64])
+    cols = np.array([0, 16, 0, 16])
+    rectangle_clip = shapely.clip_by_rect
+    clip_input_types: list[str] = []
+
+    def return_multipolygon_after_source_clip(
+        geometry: BaseGeometry, x_min: float, y_min: float, x_max: float, y_max: float
+    ) -> BaseGeometry:
+        clip_input_types.append(geometry.geom_type)
+        if isinstance(geometry, Polygon):
+            return MultiPolygon(
+                [
+                    box(x_min + 0.1, y_min + 0.1, x_min + 0.4, y_max - 0.1),
+                    box(x_min + 0.6, y_min + 0.1, x_min + 0.9, y_max - 0.1),
+                ]
+            )
+        return rectangle_clip(geometry, x_min, y_min, x_max, y_max)
+
+    monkeypatch.setattr(shapely, "clip_by_rect", return_multipolygon_after_source_clip)
+
+    grid_overlap._boundary_areas(polygon, transform, rows, cols)
+
+    assert clip_input_types.count("Polygon") == 2
+    assert clip_input_types.count("MultiPolygon") >= 2
+
+
+def test_boundary_areas_matches_oracle_after_simple_clip_splits_multipolygon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transform = from_origin(0.0, 4.0, 1.0, 1.0)
+    polygon = Polygon([(0, 0), (0, 4), (1.5, 4), (1.5, 1), (3.5, 1), (3.5, 4), (5, 4), (5, 0)])
+    rows = np.array([0, 0, 1, 1])
+    cols = np.array([1, 3, 1, 3])
+    rectangle_clip = shapely.clip_by_rect
+    input_types: list[str] = []
+    output_types: list[str] = []
+
+    def record_clips(
+        geometry: BaseGeometry, x_min: float, y_min: float, x_max: float, y_max: float
+    ) -> BaseGeometry:
+        input_types.append(geometry.geom_type)
+        clipped = rectangle_clip(geometry, x_min, y_min, x_max, y_max)
+        output_types.append(clipped.geom_type)
+        return clipped
+
+    monkeypatch.setattr(shapely, "clip_by_rect", record_clips)
+
+    areas = grid_overlap._boundary_areas(polygon, transform, rows, cols)
+    expected = np.array(
+        [
+            polygon.intersection(box(col, 3 - row, col + 1, 4 - row)).area
+            for row, col in zip(rows, cols, strict=True)
+        ]
+    )
+
+    np.testing.assert_allclose(areas, expected, rtol=1e-9, atol=0.0)
+    assert output_types[0] == "MultiPolygon"
+    assert "MultiPolygon" in input_types
+
+
+def test_boundary_areas_reuses_strip_and_block_clips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transform = from_origin(0.0, 2.0, 1.0, 1.0)
+    polygon = box(-0.5, -63.5, 17.5, 1.5)
+    rows = np.repeat(np.array([0, 1, 64, 65]), 4)
+    cols = np.tile(np.array([0, 1, 16, 17]), 4)
+    rectangle_clip = shapely.clip_by_rect
+    clip_bounds: list[tuple[float, float, float, float]] = []
+
+    def count_rectangle_clips(
+        geometry: BaseGeometry, x_min: float, y_min: float, x_max: float, y_max: float
+    ) -> BaseGeometry:
+        clip_bounds.append((x_min, y_min, x_max, y_max))
+        return rectangle_clip(geometry, x_min, y_min, x_max, y_max)
+
+    monkeypatch.setattr(shapely, "clip_by_rect", count_rectangle_clips)
+
+    areas = grid_overlap._boundary_areas(polygon, transform, rows, cols)
+    expected = [
+        polygon.intersection(box(col, 1 - row, col + 1, 2 - row)).area
+        for row, col in zip(rows, cols, strict=True)
+    ]
+
+    np.testing.assert_allclose(areas, expected, rtol=1e-9, atol=0.0)
+    group_clips = [bounds for bounds in clip_bounds if bounds[2] - bounds[0] > 1]
+    cell_clips = [bounds for bounds in clip_bounds if bounds[2] - bounds[0] == 1]
+    assert len(group_clips) == 6
+    assert cell_clips
+
+
 def test_stack_bytes_adds_the_array_size_to_the_entry_overhead() -> None:
     assert stack_bytes(None) == 256
     assert stack_bytes(np.zeros(10, dtype=np.float64)) == 256 + 80
@@ -420,6 +580,15 @@ def _exact_cell_areas(
             (126, 131),
             (126, 131),
         ),
+        (box(0, 2, 4, 8), from_origin(0, 10, 1, 1), (0, 10), (0, 10)),
+        (box(2, 0, 8, 4), from_origin(0, 10, 1, 1), (0, 10), (0, 10)),
+        (box(6, 2, 10, 8), from_origin(0, 10, 1, 1), (0, 10), (0, 10)),
+        (box(2, 6, 8, 10), from_origin(0, 10, 1, 1), (0, 10), (0, 10)),
+        (box(0, 0, 10, 10), from_origin(0, 10, 1, 1), (0, 10), (0, 10)),
+        (box(-3, 1, 6, 9), from_origin(0, 10, 1, 1), (0, 10), (0, 10)),
+        (box(3, 1, 13, 9), from_origin(0, 10, 1, 1), (0, 10), (0, 10)),
+        (box(1, -3, 9, 6), from_origin(0, 10, 1, 1), (0, 10), (0, 10)),
+        (box(1, 3, 9, 13), from_origin(0, 10, 1, 1), (0, 10), (0, 10)),
     ],
     ids=[
         "touching-hole",
@@ -429,6 +598,15 @@ def _exact_cell_areas(
         "ordinary-concave",
         "empty",
         "tile-boundary",
+        "equal-left-bound",
+        "equal-bottom-bound",
+        "equal-right-bound",
+        "equal-top-bound",
+        "equal-all-bounds",
+        "left-protrusion",
+        "right-protrusion",
+        "bottom-protrusion",
+        "top-protrusion",
     ],
 )
 def test_weighted_cells_conserve_exact_intersection_area(
@@ -450,6 +628,27 @@ def test_weighted_cells_conserve_exact_intersection_area(
     y1 = transform.f + rows[1] * transform.e
     grid = box(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
     assert sum(found.values()) == pytest.approx(polygon.intersection(grid).area, rel=1e-9)
+
+
+def test_simple_polygon_fast_clips_match_independent_intersection_oracle() -> None:
+    transform = from_origin(0, 32, 1, 1)
+    rows = (2, 30)
+    cols = (2, 30)
+    angles = np.linspace(0.0, 2.0 * np.pi, 24, endpoint=False)
+    rng = np.random.default_rng(129)
+
+    for _ in range(12):
+        radii = rng.uniform(2.0, 12.0, size=len(angles))
+        polygon = Polygon(
+            np.column_stack((16.0 + radii * np.cos(angles), 16.0 + radii * np.sin(angles)))
+        )
+        assert polygon.is_valid and not polygon.interiors
+
+        found = _cells(weighted_cells(polygon, transform, rows, cols))
+        expected = _exact_cell_areas(polygon, transform, rows, cols)
+
+        assert found.keys() == expected.keys()
+        assert all(found[key] == pytest.approx(expected[key], rel=1e-9) for key in expected)
 
 
 def test_invalid_rectangle_clips_fall_back_to_exact_intersections(
@@ -481,15 +680,40 @@ def test_invalid_rectangle_clips_fall_back_to_exact_intersections(
     assert clip_calls == 1
     assert clipped.symmetric_difference(expected_clip).area == pytest.approx(0.0)
 
-    rows = np.repeat(np.arange(10), 10)
-    cols = np.tile(np.arange(10), 10)
-    areas = _cell_areas(polygon, transform, rows, cols, allow_rect_clip=True)
-    expected = [
-        polygon.intersection(box(col, 9 - row, col + 1, 10 - row)).area
-        for row, col in zip(rows, cols, strict=True)
-    ]
-    assert clip_calls > 1
-    np.testing.assert_allclose(areas, expected, rtol=1e-9, atol=0.0)
+
+@pytest.mark.parametrize(
+    ("polygon", "transform", "expected"),
+    [
+        (box(-1, 0.5, 1, 1.5), Affine(2, 0, 0, 0, -2, 2), box(0, 0.5, 1, 1.5)),
+        (box(0.5, 1.5, 1.5, 3), Affine(2, 0, 0, 0, -2, 2), box(0.5, 1.5, 1.5, 2)),
+        (box(0.5, -1, 1.5, 1), Affine(2, 0, 0, 0, -2, 2), box(0.5, 0, 1.5, 1)),
+        (box(1, 0.5, 3, 1.5), Affine(2, 0, 0, 0, -2, 2), box(1, 0.5, 2, 1.5)),
+    ],
+    ids=["left", "top", "bottom", "right"],
+)
+def test_clip_to_cells_clips_each_protruding_bound(
+    polygon: BaseGeometry,
+    transform: Affine,
+    expected: BaseGeometry,
+) -> None:
+    clipped = _clip_to_cells(polygon, transform, np.array([0]), np.array([0]))
+
+    assert clipped.symmetric_difference(expected).area == pytest.approx(0.0)
+
+
+def test_clip_to_cells_skips_overlay_when_all_bounds_are_equal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    polygon = box(10, 0, 12, 2)
+
+    def unexpected_intersection(*_args: object) -> BaseGeometry:
+        pytest.fail("a polygon on the cell envelope should not need overlay")
+
+    monkeypatch.setattr(shapely, "intersection", unexpected_intersection)
+
+    clipped = _clip_to_cells(polygon, Affine(2, 0, 10, 0, 2, 0), np.array([0]), np.array([0]))
+
+    assert clipped.equals(polygon)
 
 
 def test_strip_and_block_clips_preserve_touching_hole_intersections() -> None:

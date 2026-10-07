@@ -1,11 +1,4 @@
-"""Exact polygon/cell overlap areas on a regular raster grid, without vectorizing cells.
-
-For a polygon and a grid of equal square cells, every cell the polygon covers
-completely contributes the whole cell area, and only the cells crossed by the
-polygon boundary need a geometric intersection. The boundary cells are the same
-for every habitat layer on the grid, so their exact areas are computed once per
-polygon and each layer only selects the cells it marks as habitat.
-"""
+"""Exact polygon overlap areas for raster cells."""
 
 from __future__ import annotations
 
@@ -140,6 +133,7 @@ def _boundary_areas(
     areas = np.zeros(len(rows), dtype=np.float64)
     if not len(rows):
         return areas
+    # Preserve the source geometry's eligibility through strip/block clips.
     allow_rect_clip = _simple_polygon_without_holes(polygon)
     for strip in _groups(rows // _STRIP_CELLS):
         areas[strip] = _strip_areas(
@@ -191,25 +185,38 @@ def _clip_to_cells(
     *,
     allow_rect_clip: bool = False,
 ) -> BaseGeometry:
-    bounds = shapely.bounds(_cell_boxes(transform, rows, cols))
-    x_min = float(bounds[:, 0].min())
-    y_min = float(bounds[:, 1].min())
-    x_max = float(bounds[:, 2].max())
-    y_max = float(bounds[:, 3].max())
-    polygon_bounds = shapely.bounds(polygon)
-    if (
-        polygon_bounds[0] >= x_min
-        and polygon_bounds[1] >= y_min
-        and polygon_bounds[2] <= x_max
-        and polygon_bounds[3] <= y_max
-    ):
+    clip_bounds = _cell_bounds(transform, rows, cols)
+    if _bounds_contain(clip_bounds, shapely.bounds(polygon)):
         return polygon
     if allow_rect_clip:
-        clipped = shapely.clip_by_rect(polygon, x_min, y_min, x_max, y_max)
+        clipped = shapely.clip_by_rect(polygon, *clip_bounds)
         if clipped.is_valid:
             return clipped
-    clip_box = shapely.box(x_min, y_min, x_max, y_max)
-    return shapely.intersection(polygon, clip_box)
+    return shapely.intersection(polygon, shapely.box(*clip_bounds))
+
+
+def _cell_bounds(
+    transform: Affine, rows: np.ndarray, cols: np.ndarray
+) -> tuple[float, float, float, float]:
+    bounds = shapely.bounds(_cell_boxes(transform, rows, cols))
+    return (
+        float(bounds[:, 0].min()),
+        float(bounds[:, 1].min()),
+        float(bounds[:, 2].max()),
+        float(bounds[:, 3].max()),
+    )
+
+
+def _bounds_contain(
+    container: tuple[float, float, float, float],
+    bounds: tuple[float, float, float, float],
+) -> bool:
+    return (
+        bounds[0] >= container[0]
+        and bounds[1] >= container[1]
+        and bounds[2] <= container[2]
+        and bounds[3] <= container[3]
+    )
 
 
 def _cell_areas(
@@ -220,27 +227,40 @@ def _cell_areas(
     *,
     allow_rect_clip: bool = False,
 ) -> np.ndarray:
-    """Polygon area per cell: whole cells by predicate, crossing cells by exact overlay."""
+    """Area per cell using containment and the safe fast clip or exact overlay."""
 
     boxes = _cell_boxes(transform, rows, cols)
     if polygon.is_empty:
-        return np.zeros(len(rows), dtype=np.float64)
+        return np.zeros(len(rows))
     shapely.prepare(polygon)
     inside = shapely.contains(polygon, boxes)
     areas = np.where(inside, shapely.area(boxes), 0.0)
     crossing = np.flatnonzero(shapely.intersects(polygon, boxes) & ~inside)
     if len(crossing):
-        if allow_rect_clip:
-            bounds = shapely.bounds(boxes[crossing])
-            for index, (x_min, y_min, x_max, y_max) in zip(crossing, bounds, strict=True):
-                clipped = shapely.clip_by_rect(polygon, x_min, y_min, x_max, y_max)
-                if clipped.is_valid:
-                    areas[index] = shapely.area(clipped)
-                else:
-                    areas[index] = shapely.area(shapely.intersection(boxes[index], polygon))
-        else:
-            areas[crossing] = shapely.area(shapely.intersection(boxes[crossing], polygon))
-    return np.asarray(areas, dtype=np.float64)
+        areas[crossing] = _crossing_cell_areas(
+            polygon, boxes, crossing, allow_rect_clip=allow_rect_clip
+        )
+    return areas
+
+
+def _crossing_cell_areas(
+    polygon: BaseGeometry,
+    boxes: np.ndarray,
+    crossing: np.ndarray,
+    *,
+    allow_rect_clip: bool,
+) -> np.ndarray:
+    if not allow_rect_clip:
+        return shapely.area(shapely.intersection(boxes[crossing], polygon))
+
+    bounds = shapely.bounds(boxes[crossing])
+    clipped = [shapely.clip_by_rect(polygon, *bounds[offset]) for offset in range(len(crossing))]
+    areas = shapely.area(clipped)
+    invalid = np.flatnonzero(~shapely.is_valid(clipped))
+    if len(invalid):
+        invalid_cells = crossing[invalid]
+        areas[invalid] = shapely.area(shapely.intersection(boxes[invalid_cells], polygon))
+    return areas
 
 
 def _simple_polygon_without_holes(polygon: BaseGeometry) -> bool:
