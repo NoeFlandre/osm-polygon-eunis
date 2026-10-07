@@ -71,6 +71,57 @@ def test_manifest_expectations_rejects_incomplete_or_malformed_tables(
     assert manifest_state._manifest_expectations(manifest) is None
 
 
+@pytest.mark.parametrize(
+    ("rows", "schema"),
+    [
+        (True, "schema"),
+        (False, "schema"),
+        (3.9, "schema"),
+        (1.0, "schema"),
+        ("5", "schema"),
+        (None, "schema"),
+        (-1, "schema"),
+        ([], "schema"),
+        ({}, "schema"),
+        (1, None),
+        (1, True),
+        (1, 5),
+        (1, 3.9),
+        (1, []),
+        (1, {}),
+    ],
+)
+def test_manifest_expectations_rejects_invalid_field_types(rows: object, schema: object) -> None:
+    manifest: dict[str, object] = {
+        "rows_by_path": {"polygons/a.parquet": 0, "polygons/b.parquet": rows},
+        "schema_by_path": {"polygons/a.parquet": "schema", "polygons/b.parquet": schema},
+        "changed_paths": ["polygons/a.parquet", "polygons/b.parquet"],
+        "added_paths": [],
+        "card": {
+            "readme_path": "README.md",
+            "readme_sha256": "readme",
+            "map_path": "eunis/world-map.svg",
+            "map_sha256": "map",
+        },
+    }
+
+    assert manifest_state._manifest_expectations(manifest) is None
+    with pytest.raises(VerificationError, match="incomplete for no-op verification"):
+        manifest_state._required_no_op_parts(manifest)
+
+
+def test_manifest_expectations_preserves_valid_json_fields_and_path_order() -> None:
+    manifest = json.loads(
+        '{"rows_by_path": {"z.parquet": 9007199254740993, "a.parquet": 0}, '
+        '"schema_by_path": {"z.parquet": "None", "a.parquet": ""}}'
+    )
+
+    assert manifest_state._manifest_expectations(manifest) == (
+        ShardExpectation("a.parquet", 0, ""),
+        ShardExpectation("z.parquet", 9007199254740993, "None"),
+    )
+
+
 def test_existing_manifest_ignores_non_object_json(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
