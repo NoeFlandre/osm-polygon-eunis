@@ -6,15 +6,15 @@ import fnmatch
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import httpx
 from huggingface_hub import hf_hub_url
 from huggingface_hub.utils import build_hf_headers
 
-from ._protocols import HubApi
+from ._protocols import HubApi, RepoFileEntry
 from ._protocols import InventoryApi as _InventoryApi
 from ._protocols import StreamClient as _StreamClient
+from ._protocols import StreamResponse as _StreamResponse
 from .fileio import DOWNLOAD_TIMEOUT, write_chunks
 
 __all__ = [
@@ -111,7 +111,7 @@ def list_parquet_files(api: _InventoryApi, repo_id: str, revision: str) -> tuple
     return tuple(sorted(paths))
 
 
-def list_repo_files(api: _InventoryApi, repo_id: str, revision: str) -> tuple[Any, ...]:
+def list_repo_files(api: _InventoryApi, repo_id: str, revision: str) -> tuple[RepoFileEntry, ...]:
     """List file entries in a pinned Hub revision, excluding directory entries."""
 
     entries = api.list_repo_tree(
@@ -223,7 +223,7 @@ def _download_with_client(
         return _write_response(response, destination)
 
 
-def _write_response(response: Any, destination: Path) -> tuple[int, str | None]:
+def _write_response(response: _StreamResponse, destination: Path) -> tuple[int, str | None]:
     response.raise_for_status()
     with destination.open("wb") as output:
         written = write_chunks(response.iter_bytes(chunk_size=8 * 1024 * 1024), output)

@@ -6,6 +6,17 @@ from collections.abc import Callable, Iterable, Mapping
 from contextlib import AbstractContextManager
 from typing import Any, Protocol
 
+import httpx
+
+
+class Hasher(Protocol):
+    def update(self, data: bytes, /) -> object: ...
+
+
+class RepoFileEntry(Protocol):
+    @property
+    def path(self) -> str: ...
+
 
 class HttpResponse(Protocol):
     @property
@@ -53,7 +64,7 @@ class StreamClient(Protocol):
         *,
         headers: Mapping[str, str] = ...,
         follow_redirects: bool = ...,  # noqa: V107
-        timeout: Any = ...,  # noqa: V107
+        timeout: httpx.Timeout | float | None = ...,  # noqa: V107
     ) -> AbstractContextManager[StreamResponse]: ...
 
 
