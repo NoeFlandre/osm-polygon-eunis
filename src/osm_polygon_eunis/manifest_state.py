@@ -185,10 +185,14 @@ def _manifest_table_fields(
     return rows, schemas
 
 
-def _manifest_expectation(path: object, rows: Any, schema: Any) -> ShardExpectation:
+def _manifest_expectation(path: object, rows: object, schema: object) -> ShardExpectation:
     if not isinstance(path, str):
         raise TypeError("manifest shard path must be a string")
-    return ShardExpectation(path, int(rows), str(schema))
+    if type(rows) is not int or rows < 0:
+        raise TypeError("manifest shard rows must be a non-negative integer")
+    if not isinstance(schema, str):
+        raise TypeError("manifest shard schema must be a string")
+    return ShardExpectation(path, rows, schema)
 
 
 def _manifest_artifacts(manifest: Mapping[str, object]) -> Mapping[str, str] | None:
