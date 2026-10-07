@@ -16,7 +16,7 @@ from shapely.ops import unary_union
 from shapely.wkb import loads as load_wkb
 
 from .domain import EPSG_LAEA_EUROPE, EunisResult, OverlapCandidate, SchemaError
-from .geometry import is_usable
+from .geometry import is_usable, repair_polygonal
 from .geopackage_sql import _sql_identifier
 from .geopackage_tiles import _GeoPackageTileMethods, _TileLayer
 from .grid_overlap import WeightedCells
@@ -194,8 +194,14 @@ class GeoPackageReference(_GeoPackageTileMethods):
     ) -> tuple[str, BaseGeometry] | None:
         code = _vector_code(row[0], self._labels)
         blob = _vector_blob(row[1])
-        geometry = self.decode_geometry(blob)
-        return (code, geometry) if is_usable(geometry) else None
+        geometry: BaseGeometry | None = self.decode_geometry(blob)
+        if not is_usable(geometry):
+            geometry = repair_polygonal(geometry)
+        if is_usable(geometry):
+            return (code, geometry)
+        logger.warning("skipping unrepairable EUNIS reference geometry for %s", code)
+        self._count_intersection_error()
+        return None
 
     def _tile_areas(
         self,

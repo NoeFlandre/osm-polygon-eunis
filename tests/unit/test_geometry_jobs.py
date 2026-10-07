@@ -33,7 +33,7 @@ def test_reference_signature_is_order_independent_and_uses_current_kernel() -> N
         {
             "checksums": {"a": "1", "b": "2"},
             "threshold": 4,
-            "kernel": 3,
+            "kernel": 4,
             "reference_groups": [],
         },
         sort_keys=True,
