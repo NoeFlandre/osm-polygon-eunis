@@ -11,6 +11,7 @@ from osm_polygon_eunis import (
     card_publishing,
     geometry_workers,
     manifest_state,
+    publish,
     release_orchestration,
     release_plan,
     shard_processing,
@@ -296,6 +297,7 @@ def test_finalize_dataset_resumes_after_the_last_committed_group(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    monkeypatch.setenv("EUNIS_SOURCE_COMMIT", "a" * 40)
     sources = {}
     for name in ("a", "b"):
         sources[f"polygons/{name}.parquet"] = pa.table(
@@ -309,9 +311,11 @@ def test_finalize_dataset_resumes_after_the_last_committed_group(
         return destination
 
     commits: list[list[str]] = []
+    parents: list[str | None] = []
 
     def fake_upload(api, repo_id, files, *, parent_commit=None):
-        del api, repo_id, parent_commit
+        del api, repo_id
+        parents.append(parent_commit)
         commits.append([path for path, _ in files])
         if len(commits) == 2:
             raise RuntimeError("interrupted")
@@ -342,7 +346,7 @@ def test_finalize_dataset_resumes_after_the_last_committed_group(
             sidecar,
         )
 
-    def run() -> tuple[DatasetCardAccumulator, tuple]:
+    def run(parent_commit: str) -> tuple[DatasetCardAccumulator, tuple]:
         card = DatasetCardAccumulator()
         expectations, _ = shard_processing.finalize_dataset(
             cast(HubApi, object()),
@@ -351,7 +355,7 @@ def test_finalize_dataset_resumes_after_the_last_committed_group(
                 sidecar_root=tmp_path / "sidecars",
                 local_root=tmp_path / "final",
                 batch_size=10,
-                parent_commit="base",
+                parent_commit=parent_commit,
                 progress=None,
                 card=card,
                 source_cache_root=None,
@@ -361,21 +365,24 @@ def test_finalize_dataset_resumes_after_the_last_committed_group(
         return card, expectations
 
     with pytest.raises(RuntimeError, match="interrupted"):
-        run()
-    card, expectations = run()
+        run("base")
+    card, expectations = run("commit-1")
 
     assert commits == [["polygons/a.parquet"], ["polygons/b.parquet"], ["polygons/b.parquet"]]
+    assert parents == ["base", "commit-1", "commit-1"]
     assert [e.path for e in expectations] == ["polygons/a.parquet", "polygons/b.parquet"]
     assert card.total_rows == 2
     assert all(sidecar.exists() for sidecar in (tmp_path / "sidecars").rglob("*.parquet"))
 
 
-@pytest.mark.parametrize("changed_input", ["sidecar", "reference", "software"])
+@pytest.mark.parametrize("changed_input", ["sidecar", "reference", "software", "source_commit"])
 def test_finalize_dataset_reprocesses_committed_shards_when_inputs_change(
     tmp_path: Path,
     monkeypatch,
     changed_input: str,
 ) -> None:
+    source_commit = "a" * 40
+    monkeypatch.setenv("EUNIS_SOURCE_COMMIT", source_commit)
     sources = {
         f"polygons/{name}.parquet": pa.table(
             {"polygon_id": [name], "geometry": ['{"type":"Point","coordinates":[0,0]}']}
@@ -456,19 +463,25 @@ def test_finalize_dataset_reprocesses_committed_shards_when_inputs_change(
 
     uploaded.clear()
     interrupt = False
-    expected_code = "R11"
-    reference_version = "EEA-v1"
-    if changed_input == "sidecar":
-        write_sidecars("C22", "EEA-v2")
-        expected_code = "C22"
-    elif changed_input == "reference":
-        reference_version = "EEA-v2"
-    else:
-        monkeypatch.setattr(shard_processing, "__version__", "next-release")
+    expected_code, reference_version = {
+        "sidecar": ("C22", "EEA-v1"),
+        "reference": ("R11", "EEA-v2"),
+        "software": ("R11", "EEA-v1"),
+        "source_commit": ("R11", "EEA-v1"),
+    }[changed_input]
+    change_inputs = {
+        "sidecar": lambda: write_sidecars("C22", "EEA-v2"),
+        "reference": lambda: None,
+        "software": lambda: monkeypatch.setattr(publish, "version", lambda _name: "next-release"),
+        "source_commit": lambda: monkeypatch.setenv("EUNIS_SOURCE_COMMIT", "b" * 40),
+    }
+    change_inputs[changed_input]()
     run(reference_version)
 
-    assert ("polygons/a.parquet", [expected_code]) in uploaded
-    assert ("polygons/b.parquet", [expected_code]) in uploaded
+    assert uploaded == [
+        ("polygons/a.parquet", [expected_code]),
+        ("polygons/b.parquet", [expected_code]),
+    ]
 
 
 def test_planning_manifest_and_shared_blobs_are_deterministic(monkeypatch) -> None:

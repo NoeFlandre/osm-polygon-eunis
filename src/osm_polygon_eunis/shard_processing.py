@@ -9,12 +9,17 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from . import __version__
 from ._protocols import HubApi, StreamClient
 from .cards import DatasetCardAccumulator
 from .domain import EunisResult
 from .options import ShardContext
-from .publish import ShardExpectation, parquet_signature, upload_replacement, upload_replacements
+from .publish import (
+    ShardExpectation,
+    _software_provenance,
+    parquet_signature,
+    upload_replacement,
+    upload_replacements,
+)
 from .reference_staging import _http_client
 from .release_plan import DatasetPlan, Progress, _cached_geometry_path, _sidecar_path
 from .sources import capture_revision, download_to_temp
@@ -229,7 +234,7 @@ def _input_identity(options: FinalizeOptions, plan: DatasetPlan) -> str:
     """
 
     payload = {
-        "software": __version__,
+        "software": _software_provenance(),
         "dataset": plan.spec.name,
         "source_repo": plan.spec.source_repo,
         "output_repo": plan.spec.output_repo,
