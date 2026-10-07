@@ -378,7 +378,8 @@ def _shared_blobs(
     changed_paths: set[str],
 ) -> dict[str, str]:
     return {
-        entry.path: entry.blob_id
+        entry.path: blob_id
         for entry in list_repo_files(api, plan.spec.source_repo, plan.source_revision)
-        if entry.path not in changed_paths and isinstance(getattr(entry, "blob_id", None), str)
+        if entry.path not in changed_paths
+        and isinstance(blob_id := getattr(entry, "blob_id", None), str)
     }

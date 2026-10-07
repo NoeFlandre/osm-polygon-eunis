@@ -6,9 +6,11 @@ import hashlib
 import json
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import IO, Any
+from typing import IO
 
 import httpx
+
+from ._protocols import Hasher
 
 # Bounded network timeouts for large streamed downloads. ``read`` applies per
 # chunk, not to the whole transfer, so multi-GB files still complete while a
@@ -38,7 +40,7 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def write_chunks(chunks: Iterable[bytes], output: IO[bytes], digest: Any = None) -> int:
+def write_chunks(chunks: Iterable[bytes], output: IO[bytes], digest: Hasher | None = None) -> int:
     """Write chunks to an open binary stream, optionally hashing them; return bytes written."""
 
     written = 0

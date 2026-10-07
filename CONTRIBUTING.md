@@ -22,6 +22,7 @@ The default `pytest` command skips the computational tests that have the mark
 `make test` and the full quality target run the fast tests and the slow tests.
 They use the CI Hypothesis profile. The quality target also runs these checks:
 
+- ShellCheck on the Grid'5000 shell scripts (install `shellcheck` locally)
 - the branch-aware CRAP checks
 - the architecture checks
 - Vulture
