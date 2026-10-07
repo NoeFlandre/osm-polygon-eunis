@@ -31,6 +31,9 @@ from .raster_reference import parse_layer_code
 logger = logging.getLogger(__name__)
 
 _USER_AGENT = "osm-polygon-eunis/" + ".".join(version("osm-polygon-eunis").split(".")[:2])
+# Metadata requests are small JSON/HTML fetches, so they get a flat 60 s budget
+# rather than the streamed-download timeouts in ``fileio.DOWNLOAD_TIMEOUT``.
+_METADATA_TIMEOUT_SECONDS = 60
 
 _SHARE_TOKEN = re.compile(
     r"name=[\"']sharingToken[\"']\s+value=[\"']([^\"']+)[\"']",
@@ -857,7 +860,7 @@ def resolve_config_data(config: object) -> tuple[EeaGroup, ...]:
     with httpx.Client(
         headers={"Accept": "application/json", "User-Agent": _USER_AGENT},
         follow_redirects=True,
-        timeout=60,
+        timeout=_METADATA_TIMEOUT_SECONDS,
     ) as client:
         labels = resolve_classification_labels(client, settings.classification_record)
         labels.update(settings.supplemental_labels)
