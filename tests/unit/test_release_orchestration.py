@@ -1,7 +1,8 @@
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -149,7 +150,7 @@ def test_process_geometry_paths_reuses_retained_source_shard(
         )
 
     assert calls == ["polygons/test.parquet"]
-    assert (tmp_path / "source" / "website" / "polygons__test.parquet").is_file()
+    assert (tmp_path / "source" / "website" / "revision" / "polygons__test.parquet").is_file()
 
 
 def _asset(path: str, *, code: str | None = "R11") -> RemoteAsset:
@@ -273,6 +274,7 @@ def test_finalize_dataset_enriches_polygon_and_link_shards_and_cleans_staging(
             card=DatasetCardAccumulator(),
             source_cache_root=None,
             http_client=cast(StreamClient, object()),
+            input_identity="test-input-identity",
         ),
     )
 
@@ -356,6 +358,7 @@ def test_finalize_dataset_resumes_after_the_last_committed_group(
                 card=card,
                 source_cache_root=None,
                 http_client=cast(StreamClient, object()),
+                input_identity="test-input-identity",
             ),
         )
         return card, expectations
@@ -368,6 +371,327 @@ def test_finalize_dataset_resumes_after_the_last_committed_group(
     assert [e.path for e in expectations] == ["polygons/a.parquet", "polygons/b.parquet"]
     assert card.total_rows == 2
     assert all(sidecar.exists() for sidecar in (tmp_path / "sidecars").rglob("*.parquet"))
+
+
+def _write_finalize_sidecar(sidecar_root: Path, plan: DatasetPlan, path: str, code: str) -> None:
+    sidecar = release_plan._sidecar_path(sidecar_root, plan.spec, path)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(
+        pa.table(
+            {
+                "eunis_code": [code],
+                "eunis_name": [f"name-{code}"],
+                "eunis_overlap_percentage": [75.0],
+                "eunis_source_version": ["EEA-test"],
+            }
+        ),
+        sidecar,
+    )
+
+
+def _track_card_restores(monkeypatch) -> list[Mapping[str, Any]]:
+    snapshots: list[Mapping[str, Any]] = []
+    original_restore = DatasetCardAccumulator.restore
+
+    def capture_restore(card: DatasetCardAccumulator, state: Mapping[str, Any]) -> None:
+        snapshots.append(state)
+        original_restore(card, state)
+
+    monkeypatch.setattr(DatasetCardAccumulator, "restore", capture_restore)
+    return snapshots
+
+
+def _finalize_resume_harness(tmp_path: Path, monkeypatch):
+    plan = DatasetPlan(
+        DatasetSpec("website", "source", "target", "polygons/*.parquet"),
+        "source-revision",
+        ("polygons/a.parquet", "polygons/b.parquet"),
+        ("polygons/a.parquet", "polygons/b.parquet"),
+        (),
+    )
+    source_tables = {
+        path: pa.table(
+            {
+                "polygon_id": [Path(path).stem],
+                "geometry": ['{"type":"Point","coordinates":[0,0]}'],
+            }
+        )
+        for path in plan.geometry_paths
+    }
+    sidecar_root = tmp_path / "sidecars"
+    for path in plan.geometry_paths:
+        _write_finalize_sidecar(sidecar_root, plan, path, "R11")
+
+    def fake_download(api, repo_id, path, revision, directory, *, client=None):
+        del api, repo_id, revision, client
+        destination = directory / path.replace("/", "__")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(source_tables[path], destination)
+        return destination
+
+    monkeypatch.setattr(shard_processing, "download_to_temp", fake_download)
+    monkeypatch.setattr(shard_processing, "_COMMIT_MAX_SHARDS", 1)
+
+    progress_path = tmp_path / "final" / "website.finalize.json"
+    upload_paths: list[str] = []
+    uploaded: dict[str, bytes] = {}
+    fail_next_path: list[str] = ["polygons/b.parquet"]
+    checkpoint_seen_by_upload: list[bytes | None] = []
+
+    def fake_upload(api, repo_id, files, *, parent_commit=None):
+        del api, repo_id, parent_commit
+        checkpoint_seen_by_upload.append(
+            progress_path.read_bytes() if progress_path.is_file() else None
+        )
+        staged = [(path, local_path.read_bytes()) for path, local_path in files]
+        upload_paths.extend(path for path, _ in staged)
+        if fail_next_path and any(path == fail_next_path[0] for path, _ in staged):
+            fail_next_path.clear()
+            raise RuntimeError("interrupted upload")
+        uploaded.update(staged)
+        return SimpleNamespace(oid=f"target-commit-{len(upload_paths)}")
+
+    monkeypatch.setattr(shard_processing, "upload_replacements", fake_upload)
+
+    events_by_run: list[list[dict[str, object]]] = []
+    card_rows: list[int] = []
+    restore_snapshots = _track_card_restores(monkeypatch)
+    target_revisions: list[str] = []
+
+    def capture_revision(api, repo_id):
+        del api, repo_id
+        revision = f"target-head-{len(target_revisions) + 1}"
+        target_revisions.append(revision)
+        return revision
+
+    def write_card(card, workdir, selected_plan, reference_info):
+        del workdir, selected_plan, reference_info
+        card_rows.append(card.total_rows)
+        return CardArtifacts({}, {}, {})
+
+    monkeypatch.setattr(card_publishing, "capture_revision", capture_revision)
+    monkeypatch.setattr(card_publishing, "_download_source_readme", lambda *args: None)
+    monkeypatch.setattr(card_publishing, "_write_card_artifacts", write_card)
+    monkeypatch.setattr(card_publishing, "_upload_card_artifacts", lambda *args: "card-commit")
+    monkeypatch.setattr(
+        card_publishing,
+        "_publish_dataset_manifest",
+        lambda *args, **kwargs: ({}, (), ()),
+    )
+    monkeypatch.setattr(card_publishing, "_shared_blobs", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        card_publishing,
+        "_verify_final_dataset",
+        lambda *args, **kwargs: VerificationReceipt("target", "verified", {}, (), None),
+    )
+
+    def run(
+        *,
+        reference_info: Mapping[str, object] | None = None,
+        selected_plan: DatasetPlan = plan,
+    ) -> DatasetReceipt:
+        events: list[dict[str, object]] = []
+        events_by_run.append(events)
+
+        def capture(event: Mapping[str, object]) -> None:
+            events.append(dict(event))
+
+        return card_publishing._finalize_plan(
+            cast(HubApi, object()),
+            selected_plan,
+            options=card_publishing._PlanOptions(
+                sidecar_root=sidecar_root,
+                workdir=tmp_path,
+                batch_size=1,
+                reference_info=reference_info
+                or {
+                    "source_version": "EEA-test",
+                    "assets": [{"path": "Prob_R11.tif", "sha256": "reference-a"}],
+                },
+                progress=capture,
+                http_client=cast(StreamClient, object()),
+                source_cache_root=None,
+                max_intersection_errors=None,
+            ),
+        )
+
+    return SimpleNamespace(
+        plan=plan,
+        sidecar_root=sidecar_root,
+        progress_path=progress_path,
+        run=run,
+        upload_paths=upload_paths,
+        uploaded=uploaded,
+        fail_next_path=fail_next_path,
+        checkpoint_seen_by_upload=checkpoint_seen_by_upload,
+        events_by_run=events_by_run,
+        card_rows=card_rows,
+        restore_snapshots=restore_snapshots,
+        target_revisions=target_revisions,
+    )
+
+
+def _record_partial_finalize_progress(harness) -> bytes:
+    with pytest.raises(RuntimeError, match="interrupted upload"):
+        harness.run()
+    assert harness.progress_path.is_file()
+    return harness.progress_path.read_bytes()
+
+
+def _assert_finalize_inputs_rejected_without_writes(harness, run) -> None:
+    saved_progress = harness.progress_path.read_bytes()
+    prior_upload_paths = list(harness.upload_paths)
+    prior_restore_count = len(harness.restore_snapshots)
+    with pytest.raises(RuntimeError, match=r"finalize progress.*inputs.*changed"):
+        run()
+    assert harness.progress_path.read_bytes() == saved_progress
+    assert harness.upload_paths == prior_upload_paths
+    assert harness.events_by_run[-1] == []
+    assert len(harness.restore_snapshots) == prior_restore_count
+
+
+def test_finalize_plan_resumes_unchanged_inputs_after_an_interrupted_upload(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    harness = _finalize_resume_harness(tmp_path, monkeypatch)
+
+    with pytest.raises(RuntimeError, match="interrupted upload"):
+        harness.run()
+    progress = json.loads(harness.progress_path.read_text(encoding="utf-8"))
+    assert isinstance(progress.get("input_identity"), str)
+    assert harness.upload_paths == ["polygons/a.parquet", "polygons/b.parquet"]
+
+    receipt = harness.run()
+
+    assert harness.upload_paths == [
+        "polygons/a.parquet",
+        "polygons/b.parquet",
+        "polygons/b.parquet",
+    ]
+    assert set(harness.uploaded) == set(harness.plan.geometry_paths)
+    assert [expectation.path for expectation in receipt.expectations] == list(
+        harness.plan.geometry_paths
+    )
+    assert harness.card_rows == [2]
+    assert len(harness.restore_snapshots) == 1
+    assert harness.target_revisions == ["target-head-1", "target-head-2"]
+    assert not harness.progress_path.exists()
+
+
+def test_finalize_plan_rejects_changed_committed_sidecar_before_skipping_or_uploading(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    harness = _finalize_resume_harness(tmp_path, monkeypatch)
+    _record_partial_finalize_progress(harness)
+    _write_finalize_sidecar(harness.sidecar_root, harness.plan, "polygons/a.parquet", "R12")
+
+    _assert_finalize_inputs_rejected_without_writes(harness, harness.run)
+
+
+def test_finalize_plan_rejects_changed_reference_before_skipping_or_uploading(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    harness = _finalize_resume_harness(tmp_path, monkeypatch)
+    _record_partial_finalize_progress(harness)
+
+    def run_with_new_reference():
+        return harness.run(
+            reference_info={
+                "source_version": "EEA-test",
+                "assets": [{"path": "Prob_R11.tif", "sha256": "reference-b"}],
+            }
+        )
+
+    _assert_finalize_inputs_rejected_without_writes(harness, run_with_new_reference)
+
+
+@pytest.mark.parametrize("change", ["revision", "layout"])
+def test_finalize_plan_rejects_changed_source_plan_before_skipping_or_uploading(
+    tmp_path: Path,
+    monkeypatch,
+    change: str,
+) -> None:
+    harness = _finalize_resume_harness(tmp_path, monkeypatch)
+    _record_partial_finalize_progress(harness)
+    selected_plan = harness.plan
+    if change == "revision":
+        selected_plan = DatasetPlan(
+            selected_plan.spec,
+            "source-revision-next",
+            selected_plan.source_files,
+            selected_plan.geometry_paths,
+            selected_plan.link_paths,
+        )
+    else:
+        selected_plan = DatasetPlan(
+            selected_plan.spec,
+            selected_plan.source_revision,
+            (*selected_plan.source_files, "metadata.json"),
+            selected_plan.geometry_paths,
+            selected_plan.link_paths,
+        )
+
+    def run_with_changed_plan():
+        return harness.run(selected_plan=selected_plan)
+
+    _assert_finalize_inputs_rejected_without_writes(harness, run_with_changed_plan)
+
+
+def test_finalize_plan_rejects_changed_code_identity_before_skipping_or_uploading(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    code_identity = ["code-v1"]
+    monkeypatch.setattr(
+        card_publishing,
+        "_output_code_identity",
+        lambda: code_identity[0],
+        raising=False,
+    )
+    harness = _finalize_resume_harness(tmp_path, monkeypatch)
+    _record_partial_finalize_progress(harness)
+    code_identity[0] = "code-v2"
+
+    _assert_finalize_inputs_rejected_without_writes(harness, harness.run)
+
+
+def test_output_code_identity_changes_when_the_dependency_lock_changes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project_root = tmp_path / "project"
+    package_root = project_root / "src" / "osm_polygon_eunis"
+    package_root.mkdir(parents=True)
+    (package_root / "card_publishing.py").write_text("source = 'same'\n", encoding="utf-8")
+    (project_root / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    lock = project_root / "uv.lock"
+    lock.write_text("dependency = 'one'\n", encoding="utf-8")
+    monkeypatch.setattr(card_publishing, "__file__", str(package_root / "card_publishing.py"))
+
+    original_identity = card_publishing._output_code_identity()
+    lock.write_text("dependency = 'two'\n", encoding="utf-8")
+
+    assert card_publishing._output_code_identity() != original_identity
+
+
+def test_finalize_plan_persists_identity_before_a_failed_first_upload(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    harness = _finalize_resume_harness(tmp_path, monkeypatch)
+    harness.fail_next_path[:] = ["polygons/a.parquet"]
+
+    with pytest.raises(RuntimeError, match="interrupted upload"):
+        harness.run()
+
+    assert harness.progress_path.is_file()
+    progress = json.loads(harness.progress_path.read_text(encoding="utf-8"))
+    assert isinstance(progress.get("input_identity"), str)
+    assert progress["expectations"] == []
+    assert harness.checkpoint_seen_by_upload[0] is not None
 
 
 def test_planning_manifest_and_shared_blobs_are_deterministic(monkeypatch) -> None:
@@ -510,6 +834,9 @@ def test_finalize_plan_builds_manifest_and_verifies_target(monkeypatch, tmp_path
         "_shared_blobs",
         lambda *args, **kwargs: {"README.md": "blob"},
     )
+    sidecar = release_plan._sidecar_path(tmp_path / "sidecars", plan.spec, plan.geometry_paths[0])
+    sidecar.parent.mkdir(parents=True)
+    sidecar.write_bytes(b"label sidecar")
 
     result = card_publishing._finalize_plan(
         cast(HubApi, object()),

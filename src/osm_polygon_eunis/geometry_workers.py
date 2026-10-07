@@ -90,10 +90,10 @@ def _download_geometry_source(
     retain_source: bool,
     client: StreamClient,
 ) -> Path:
-    directory = source_root / plan.spec.name if retain_source else source_root
     cached = _cached_geometry_path(source_root, plan, source_path)
     if retain_source and cached.is_file():
         return cached
+    directory = cached.parent if retain_source else source_root
     return download_to_temp(
         api,
         plan.spec.source_repo,

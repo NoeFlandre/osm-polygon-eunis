@@ -43,6 +43,7 @@ class FinalizeOptions:
     progress: Progress | None
     card: DatasetCardAccumulator
     source_cache_root: Path | None
+    input_identity: str
     http_client: StreamClient | None = None
 
 
@@ -220,6 +221,7 @@ def _save_progress(
     expectations: list[ShardExpectation],
 ) -> None:
     payload = {
+        "input_identity": options.input_identity,
         "source_revision": plan.source_revision,
         "expectations": [[e.path, e.rows, e.schema] for e in expectations],
         "card": options.card.snapshot(),
@@ -235,7 +237,12 @@ def _progress_payload(options: FinalizeOptions, plan: DatasetPlan) -> dict[str, 
     if not path.is_file():
         return None
     payload = json.loads(path.read_text(encoding="utf-8"))
-    return payload if payload.get("source_revision") == plan.source_revision else None
+    if not isinstance(payload, dict) or payload.get("input_identity") != options.input_identity:
+        raise FinalizeProgressMismatchError(
+            f"{plan.spec.name}: finalize progress inputs or output-affecting code changed; "
+            f"refusing to restore its card or skip shards. Saved progress is preserved at {path}"
+        )
+    return payload
 
 
 def _load_progress(
@@ -244,10 +251,15 @@ def _load_progress(
 ) -> tuple[list[ShardExpectation], set[str]]:
     payload = _progress_payload(options, plan)
     if payload is None:
+        _save_progress(options, plan, [])
         return [], set()
     options.card.restore(payload["card"])
     expectations = [ShardExpectation(*entry) for entry in payload["expectations"]]
     return expectations, {e.path for e in expectations}
+
+
+class FinalizeProgressMismatchError(RuntimeError):
+    """Saved finalize state belongs to different inputs or output-affecting code."""
 
 
 def clear_finalize_progress(options: FinalizeOptions, plan: DatasetPlan) -> None:

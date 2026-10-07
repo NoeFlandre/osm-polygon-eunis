@@ -111,5 +111,5 @@ def test_sidecar_and_cached_geometry_paths_flatten_the_repository_path() -> None
         "/work/wikidata/polygons__a__b.parquet.labels.parquet"
     )
     assert _cached_geometry_path(Path("/work"), plan, "polygons/a/b.parquet") == Path(
-        "/work/wikidata/polygons__a__b.parquet"
+        "/work/wikidata/revision/polygons__a__b.parquet"
     )

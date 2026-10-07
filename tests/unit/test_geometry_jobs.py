@@ -619,6 +619,45 @@ def test_geometry_job_helpers_handle_empty_and_nonempty_work(
     assert not source.exists()
 
 
+def test_geometry_source_cache_is_scoped_to_the_pinned_revision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = DatasetSpec("website", "source", "target", "polygons/*.parquet")
+    old_plan = DatasetPlan(spec, "revision-a", (), ("polygons/a.parquet",), ())
+    current_plan = replace(old_plan, source_revision="revision-b")
+    source_root = tmp_path / "sources"
+    old_cached = _cached_geometry_path(source_root, old_plan, "polygons/a.parquet")
+    old_cached.parent.mkdir(parents=True)
+    old_cached.write_bytes(b"revision-a source")
+    downloaded: list[tuple[str, str, Path]] = []
+
+    def fake_download(_api, repo_id, _source_path, revision, directory, *, client):
+        del client
+        downloaded.append((repo_id, revision, directory))
+        destination = directory / "polygons__a.parquet"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"revision-b source")
+        return destination
+
+    monkeypatch.setattr(geometry_workers, "download_to_temp", fake_download)
+
+    current_source = geometry_workers._download_geometry_source(
+        cast(HubApi, object()),
+        current_plan,
+        "polygons/a.parquet",
+        source_root,
+        retain_source=True,
+        client=cast(StreamClient, object()),
+    )
+
+    current_cached = _cached_geometry_path(source_root, current_plan, "polygons/a.parquet")
+    assert current_source == current_cached
+    assert current_source.read_bytes() == b"revision-b source"
+    assert old_cached.read_bytes() == b"revision-a source"
+    assert downloaded == [("source", "revision-b", current_cached.parent)]
+
+
 def test_parallel_reference_processing_stages_and_dispatches_geometry_work(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

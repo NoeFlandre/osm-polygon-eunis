@@ -58,7 +58,7 @@ def _sidecar_path(root: Path, spec: DatasetSpec, source_path: str) -> Path:
 
 
 def _cached_geometry_path(root: Path, plan: DatasetPlan, source_path: str) -> Path:
-    return root / plan.spec.name / flatten_repo_path(source_path)
+    return root / plan.spec.name / plan.source_revision / flatten_repo_path(source_path)
 
 
 DATASET_NAMES: tuple[str, ...] = ("website", "wikidata", "description")
