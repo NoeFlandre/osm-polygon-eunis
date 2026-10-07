@@ -389,7 +389,7 @@ def _exact_cell_areas(
         (
             Polygon(
                 [(0, 0), (40, 0), (40, 100), (0, 100)],
-                [[(10, 70), (21, 81), (22, 75), (24, 100)]],
+                [[(10, 30), (21, 41), (22, 35), (24, 100)]],
             ),
             from_origin(0, 100, 1, 1),
             (0, 100),
@@ -407,6 +407,12 @@ def _exact_cell_areas(
             (0, 10),
             (0, 10),
         ),
+        (
+            Polygon([(4, 4), (28, 4), (28, 92), (20, 92), (20, 20), (12, 20), (12, 92), (4, 92)]),
+            from_origin(0, 96, 1, 1),
+            (4, 92),
+            (4, 28),
+        ),
         (box(100, 100, 101, 101), from_origin(0, 10, 1, 1), (0, 10), (0, 10)),
         (
             box(126.25, 126.25, 129.75, 129.75),
@@ -420,6 +426,7 @@ def _exact_cell_areas(
         "touching-hole-strip-and-block-clips",
         "touching-multipolygon-parts",
         "ordinary",
+        "ordinary-concave",
         "empty",
         "tile-boundary",
     ],
@@ -443,6 +450,46 @@ def test_weighted_cells_conserve_exact_intersection_area(
     y1 = transform.f + rows[1] * transform.e
     grid = box(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
     assert sum(found.values()) == pytest.approx(polygon.intersection(grid).area, rel=1e-9)
+
+
+def test_invalid_rectangle_clips_fall_back_to_exact_intersections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    polygon = Polygon([(-1, -1), (12, 2), (7, 12), (-1, 12)])
+    transform = from_origin(0, 10, 1, 1)
+    invalid_clip = Polygon([(0, 0), (2, 2), (0, 2), (2, 0)])
+    assert polygon.is_valid
+    assert not invalid_clip.is_valid
+    clip_calls = 0
+
+    def clip_to_invalid_geometry(*_args: object) -> Polygon:
+        nonlocal clip_calls
+        clip_calls += 1
+        return invalid_clip
+
+    monkeypatch.setattr(shapely, "clip_by_rect", clip_to_invalid_geometry)
+
+    clipped = _clip_to_cells(
+        polygon,
+        transform,
+        np.array([0, 9]),
+        np.array([0, 9]),
+        allow_rect_clip=True,
+    )
+    window = box(0, 0, 10, 10)
+    expected_clip = polygon.intersection(window)
+    assert clip_calls == 1
+    assert clipped.symmetric_difference(expected_clip).area == pytest.approx(0.0)
+
+    rows = np.repeat(np.arange(10), 10)
+    cols = np.tile(np.arange(10), 10)
+    areas = _cell_areas(polygon, transform, rows, cols, allow_rect_clip=True)
+    expected = [
+        polygon.intersection(box(col, 9 - row, col + 1, 10 - row)).area
+        for row, col in zip(rows, cols, strict=True)
+    ]
+    assert clip_calls > 1
+    np.testing.assert_allclose(areas, expected, rtol=1e-9, atol=0.0)
 
 
 def test_strip_and_block_clips_preserve_touching_hole_intersections() -> None:

@@ -17,6 +17,7 @@ from rasterio.features import rasterize
 from rasterio.io import DatasetReader
 from rasterio.transform import Affine
 from rasterio.windows import Window
+from shapely.geometry import Polygon
 from shapely.geometry.base import BaseGeometry
 
 TILE_SIZE = 128
@@ -139,8 +140,11 @@ def _boundary_areas(
     areas = np.zeros(len(rows), dtype=np.float64)
     if not len(rows):
         return areas
+    allow_rect_clip = _simple_polygon_without_holes(polygon)
     for strip in _groups(rows // _STRIP_CELLS):
-        areas[strip] = _strip_areas(polygon, transform, rows[strip], cols[strip])
+        areas[strip] = _strip_areas(
+            polygon, transform, rows[strip], cols[strip], allow_rect_clip=allow_rect_clip
+        )
     return areas
 
 
@@ -149,12 +153,26 @@ def _strip_areas(
     transform: Affine,
     rows: np.ndarray,
     cols: np.ndarray,
+    *,
+    allow_rect_clip: bool,
 ) -> np.ndarray:
     areas = np.zeros(len(rows), dtype=np.float64)
-    strip_polygon = _clip_to_cells(polygon, transform, rows, cols)
+    strip_polygon = _clip_to_cells(polygon, transform, rows, cols, allow_rect_clip=allow_rect_clip)
     for block in _groups(cols // _BLOCK_CELLS):
-        block_polygon = _clip_to_cells(strip_polygon, transform, rows[block], cols[block])
-        areas[block] = _cell_areas(block_polygon, transform, rows[block], cols[block])
+        block_polygon = _clip_to_cells(
+            strip_polygon,
+            transform,
+            rows[block],
+            cols[block],
+            allow_rect_clip=allow_rect_clip,
+        )
+        areas[block] = _cell_areas(
+            block_polygon,
+            transform,
+            rows[block],
+            cols[block],
+            allow_rect_clip=allow_rect_clip,
+        )
     return areas
 
 
@@ -170,6 +188,8 @@ def _clip_to_cells(
     transform: Affine,
     rows: np.ndarray,
     cols: np.ndarray,
+    *,
+    allow_rect_clip: bool = False,
 ) -> BaseGeometry:
     bounds = shapely.bounds(_cell_boxes(transform, rows, cols))
     x_min = float(bounds[:, 0].min())
@@ -184,6 +204,10 @@ def _clip_to_cells(
         and polygon_bounds[3] <= y_max
     ):
         return polygon
+    if allow_rect_clip:
+        clipped = shapely.clip_by_rect(polygon, x_min, y_min, x_max, y_max)
+        if clipped.is_valid:
+            return clipped
     clip_box = shapely.box(x_min, y_min, x_max, y_max)
     return shapely.intersection(polygon, clip_box)
 
@@ -193,6 +217,8 @@ def _cell_areas(
     transform: Affine,
     rows: np.ndarray,
     cols: np.ndarray,
+    *,
+    allow_rect_clip: bool = False,
 ) -> np.ndarray:
     """Polygon area per cell: whole cells by predicate, crossing cells by exact overlay."""
 
@@ -204,8 +230,23 @@ def _cell_areas(
     areas = np.where(inside, shapely.area(boxes), 0.0)
     crossing = np.flatnonzero(shapely.intersects(polygon, boxes) & ~inside)
     if len(crossing):
-        areas[crossing] = shapely.area(shapely.intersection(boxes[crossing], polygon))
+        if allow_rect_clip:
+            bounds = shapely.bounds(boxes[crossing])
+            for index, (x_min, y_min, x_max, y_max) in zip(crossing, bounds, strict=True):
+                clipped = shapely.clip_by_rect(polygon, x_min, y_min, x_max, y_max)
+                if clipped.is_valid:
+                    areas[index] = shapely.area(clipped)
+                else:
+                    areas[index] = shapely.area(shapely.intersection(boxes[index], polygon))
+        else:
+            areas[crossing] = shapely.area(shapely.intersection(boxes[crossing], polygon))
     return np.asarray(areas, dtype=np.float64)
+
+
+def _simple_polygon_without_holes(polygon: BaseGeometry) -> bool:
+    """Identify a valid single-ring polygon for the rectangle-clipping fast path."""
+
+    return isinstance(polygon, Polygon) and polygon.is_valid and not polygon.interiors
 
 
 def _cell_boxes(transform: Affine, rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
