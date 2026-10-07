@@ -1,15 +1,18 @@
 UV ?= uv
 COVERAGE_JSON ?= coverage.json
 
-.PHONY: help quality lint format-check typecheck test architecture crap vulture smoke docs build docker benchmark
+.PHONY: help quality lint shellcheck format-check typecheck test architecture crap vulture smoke docs build docker benchmark
 
 help:
-	@printf '%s\n' 'Targets: quality lint format-check typecheck test architecture crap vulture smoke docs build docker benchmark'
+	@printf '%s\n' 'Targets: quality lint shellcheck format-check typecheck test architecture crap vulture smoke docs build docker benchmark'
 
-quality: lint format-check typecheck test architecture crap vulture smoke docs
+quality: lint shellcheck format-check typecheck test architecture crap vulture smoke docs
 
 lint:
 	$(UV) run ruff check src tests scripts benchmarks
+
+shellcheck:
+	shellcheck -x scripts/grid5000/*.sh
 
 format-check:
 	$(UV) run ruff format --check src tests scripts benchmarks

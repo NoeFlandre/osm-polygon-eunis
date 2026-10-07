@@ -59,7 +59,8 @@ def test_contributor_quality_task_is_shared_by_pre_commit_and_ci() -> None:
     hooks = [hook for repository in pre_commit["repos"] for hook in repository["hooks"]]
 
     assert (
-        "quality: lint format-check typecheck test architecture crap vulture smoke docs" in makefile
+        "quality: lint shellcheck format-check typecheck test architecture crap vulture smoke docs"
+        in makefile
     )
     quality_steps = [
         step.get("run", "") for step in qa_workflow["jobs"]["deterministic-quality"]["steps"]
