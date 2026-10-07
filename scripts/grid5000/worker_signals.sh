@@ -64,6 +64,7 @@ forward_pending_worker_signal() {
 handle_worker_signal() {
   local signal_name="$1"
   local exit_status="$2"
+  # shellcheck disable=SC2034  # read by the sourcing script (release.sh) in its EXIT trap
   external_signal="$signal_name"
   if [[ "$helper_launching" == true || ( -n "$active_helper_pid" && "$helper_ready" != true ) ]]; then
     pending_worker_signal="$signal_name"

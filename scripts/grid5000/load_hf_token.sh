@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 eunis_load_hf_token() {
   local token_file="$1"
   if [[ -z "${HF_TOKEN:-}" && -s "$token_file" ]]; then
