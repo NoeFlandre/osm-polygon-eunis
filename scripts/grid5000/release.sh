@@ -52,7 +52,7 @@ external_signal=none
 
 mkdir -p "$scratch" "$workdir" "$reference_cache" "$sidecars" "$logs" "$receipts"
 
-# shellcheck disable=SC2329  # invoked indirectly through the EXIT trap below
+# shellcheck disable=SC2317,SC2329  # invoked indirectly through the EXIT trap below (SC2317 on older ShellCheck)
 write_failure_receipt() {
   local exit_status=$?
   trap - EXIT
