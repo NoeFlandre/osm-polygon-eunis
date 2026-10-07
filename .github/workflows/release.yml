@@ -7,12 +7,30 @@ on:
 permissions:
   contents: write
 
+# Releases run one at a time. A running release is never cancelled.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  # A tag push does not trigger qa.yml, so run the same QA gate on the tagged commit.
+  qa:
+    uses: ./.github/workflows/qa.yml
+
   release:
+    needs: qa
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Require the tagged commit to be on main
+        run: |
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
+            echo "Tagged commit $GITHUB_SHA is not reachable from main" >&2
+            exit 1
+          }
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
