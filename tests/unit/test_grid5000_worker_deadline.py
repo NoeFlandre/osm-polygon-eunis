@@ -196,7 +196,8 @@ def test_deadline_writes_a_distinguishing_stop_marker(tmp_path: Path) -> None:
             "--walltime",
             "0:01:00",
             "--started-at",
-            str(time.time() - 28),
+            # About 0.3 seconds of runtime is left before the stop, so the test stays short.
+            str(time.time() - 28.7),
             "--stop-margin-seconds",
             "31",
             "--termination-grace-seconds",

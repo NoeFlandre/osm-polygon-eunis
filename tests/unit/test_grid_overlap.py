@@ -167,7 +167,13 @@ def _vectorized_areas(polygon, transform, shape) -> dict[tuple[int, int], float]
     x0 = transform.c + cols * transform.a
     y0 = transform.f + rows * transform.e
     boxes = shapely.box(x0, y0 + transform.e, x0 + transform.a, y0)
-    areas = shapely.area(shapely.intersection(boxes, polygon))
+    # Exact per-cell areas without clipping every cell: a cell inside the polygon keeps its
+    # full area, a cell outside has none, and only cells on the boundary need an intersection.
+    shapely.prepare(polygon)
+    inside = shapely.contains(polygon, boxes)
+    on_boundary = shapely.intersects(polygon, boxes) & ~inside
+    areas = np.where(inside, shapely.area(boxes), 0.0)
+    areas[on_boundary] = shapely.area(shapely.intersection(boxes[on_boundary], polygon))
     return {
         (int(row), int(col)): float(area)
         for row, col, area in zip(rows, cols, areas, strict=True)
@@ -520,18 +526,21 @@ def test_is_square_north_up(transform: Affine, expected: bool) -> None:
 def _exact_cell_areas(
     polygon: BaseGeometry, transform: Affine, rows: tuple[int, int], cols: tuple[int, int]
 ) -> dict[tuple[int, int], float]:
-    result: dict[tuple[int, int], float] = {}
-    for row in range(*rows):
-        for col in range(*cols):
-            x0 = transform.c + col * transform.a
-            x1 = transform.c + (col + 1) * transform.a
-            y0 = transform.f + row * transform.e
-            y1 = transform.f + (row + 1) * transform.e
-            cell = box(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
-            area = polygon.intersection(cell).area
-            if area > 0.0:
-                result[(row, col)] = area
-    return result
+    row_ids, col_ids = np.meshgrid(np.arange(*rows), np.arange(*cols), indexing="ij")
+    row_ids, col_ids = row_ids.ravel(), col_ids.ravel()
+    x0 = transform.c + col_ids * transform.a
+    x1 = transform.c + (col_ids + 1) * transform.a
+    y0 = transform.f + row_ids * transform.e
+    y1 = transform.f + (row_ids + 1) * transform.e
+    cells = shapely.box(
+        np.minimum(x0, x1), np.minimum(y0, y1), np.maximum(x0, x1), np.maximum(y0, y1)
+    )
+    areas = shapely.area(shapely.intersection(polygon, cells))
+    return {
+        (int(row), int(col)): float(area)
+        for row, col, area in zip(row_ids, col_ids, areas, strict=True)
+        if area > 0.0
+    }
 
 
 @pytest.mark.parametrize(
