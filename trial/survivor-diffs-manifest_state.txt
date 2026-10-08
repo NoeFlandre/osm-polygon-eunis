@@ -1,0 +1,415 @@
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_4
+-            group_assets.append(group.vector_asset)
++            group_assets.append(None)
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_6
+-                "record_id": asset.record_id,
++                "XXrecord_idXX": asset.record_id,
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_7
+-                "record_id": asset.record_id,
++                "RECORD_ID": asset.record_id,
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_8
+-                "path": asset.path,
++                "XXpathXX": asset.path,
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_9
+-                "path": asset.path,
++                "PATH": asset.path,
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_10
+-                "url": asset.url,
++                "XXurlXX": asset.url,
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_11
+-                "url": asset.url,
++                "URL": asset.url,
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_12
+-                "size": asset.size,
++                "XXsizeXX": asset.size,
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_13
+-                "size": asset.size,
++                "SIZE": asset.size,
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_14
+-                "etag": asset.etag,
++                "XXetagXX": asset.etag,
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_15
+-                "etag": asset.etag,
++                "ETAG": asset.etag,
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_16
+-                "code": asset.code,
++                "XXcodeXX": asset.code,
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_17
+-                "code": asset.code,
++                "CODE": asset.code,
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_18
+-                "name": asset.name,
++                "XXnameXX": asset.name,
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_19
+-                "name": asset.name,
++                "NAME": asset.name,
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_20
+-                "sha256": checksums.get(_asset_key(group, asset)),
++                "XXsha256XX": checksums.get(_asset_key(group, asset)),
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_21
+-                "sha256": checksums.get(_asset_key(group, asset)),
++                "SHA256": checksums.get(_asset_key(group, asset)),
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_22
+-                "sha256": checksums.get(_asset_key(group, asset)),
++                "sha256": checksums.get(None),
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_23
+-                "sha256": checksums.get(_asset_key(group, asset)),
++                "sha256": checksums.get(_asset_key(None, asset)),
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_24
+-                "sha256": checksums.get(_asset_key(group, asset)),
++                "sha256": checksums.get(_asset_key(group, None)),
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_25
+-                "sha256": checksums.get(_asset_key(group, asset)),
++                "sha256": checksums.get(_asset_key(asset)),
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_26
+-                "sha256": checksums.get(_asset_key(group, asset)),
++                "sha256": checksums.get(_asset_key(group, )),
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_27
+-        "source_version": source_version,
++        "XXsource_versionXX": source_version,
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_28
+-        "source_version": source_version,
++        "SOURCE_VERSION": source_version,
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_29
+-        "crs": crs,
++        "XXcrsXX": crs,
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_30
+-        "crs": crs,
++        "CRS": crs,
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_31
+-        "threshold": threshold,
++        "XXthresholdXX": threshold,
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_32
+-        "threshold": threshold,
++        "THRESHOLD": threshold,
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_33
+-        "classification_record": config.get("classification_record"),
++        "XXclassification_recordXX": config.get("classification_record"),
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_34
+-        "classification_record": config.get("classification_record"),
++        "CLASSIFICATION_RECORD": config.get("classification_record"),
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_35
+-        "classification_record": config.get("classification_record"),
++        "classification_record": config.get(None),
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_36
+-        "classification_record": config.get("classification_record"),
++        "classification_record": config.get("XXclassification_recordXX"),
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_37
+-        "classification_record": config.get("classification_record"),
++        "classification_record": config.get("CLASSIFICATION_RECORD"),
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_41
+-        "assets": sorted(assets, key=lambda asset: (str(asset["record_id"]), str(asset["path"]))),
++        "assets": sorted(assets, key=None),
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_43
+-        "assets": sorted(assets, key=lambda asset: (str(asset["record_id"]), str(asset["path"]))),
++        "assets": sorted(assets, ),
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_44
+-        "assets": sorted(assets, key=lambda asset: (str(asset["record_id"]), str(asset["path"]))),
++        "assets": sorted(assets, key=lambda asset: None),
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_45
+-        "assets": sorted(assets, key=lambda asset: (str(asset["record_id"]), str(asset["path"]))),
++        "assets": sorted(assets, key=lambda asset: (str(None), str(asset["path"]))),
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_46
+-        "assets": sorted(assets, key=lambda asset: (str(asset["record_id"]), str(asset["path"]))),
++        "assets": sorted(assets, key=lambda asset: (str(asset["XXrecord_idXX"]), str(asset["path"]))),
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_47
+-        "assets": sorted(assets, key=lambda asset: (str(asset["record_id"]), str(asset["path"]))),
++        "assets": sorted(assets, key=lambda asset: (str(asset["RECORD_ID"]), str(asset["path"]))),
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_48
+-        "assets": sorted(assets, key=lambda asset: (str(asset["record_id"]), str(asset["path"]))),
++        "assets": sorted(assets, key=lambda asset: (str(asset["record_id"]), str(None))),
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_49
+-        "assets": sorted(assets, key=lambda asset: (str(asset["record_id"]), str(asset["path"]))),
++        "assets": sorted(assets, key=lambda asset: (str(asset["record_id"]), str(asset["XXpathXX"]))),
+## osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_50
+-        "assets": sorted(assets, key=lambda asset: (str(asset["record_id"]), str(asset["path"]))),
++        "assets": sorted(assets, key=lambda asset: (str(asset["record_id"]), str(asset["PATH"]))),
+## osm_polygon_eunis.manifest_state.x__mapping_field__mutmut_4
+-    return value if isinstance(value, Mapping) else {}
++    return value if (isinstance(value, Mapping)) or True else {}
+## osm_polygon_eunis.manifest_state.x__load_existing_manifest__mutmut_3
+-        target_revision = capture_revision(api, plan.spec.output_repo)
++        target_revision = capture_revision(api, None)
+## osm_polygon_eunis.manifest_state.x__load_existing_manifest__mutmut_8
+-    paths = {entry.path for entry in list_repo_files(api, plan.spec.output_repo, target_revision)}
++    paths = {entry.path for entry in list_repo_files(api, None, target_revision)}
+## osm_polygon_eunis.manifest_state.x__load_existing_manifest__mutmut_9
+-    paths = {entry.path for entry in list_repo_files(api, plan.spec.output_repo, target_revision)}
++    paths = {entry.path for entry in list_repo_files(api, plan.spec.output_repo, None)}
+## osm_polygon_eunis.manifest_state.x__load_existing_manifest__mutmut_17
+-        api,
++        None,
+## osm_polygon_eunis.manifest_state.x__load_existing_manifest__mutmut_18
+-        plan.spec.output_repo,
++        None,
+## osm_polygon_eunis.manifest_state.x__load_existing_manifest__mutmut_19
+-        "eunis/manifest.json",
++        None,
+## osm_polygon_eunis.manifest_state.x__load_existing_manifest__mutmut_20
+-        target_revision,
++        None,
+## osm_polygon_eunis.manifest_state.x__load_existing_manifest__mutmut_22
+-        client=client,
++        client=None,
+## osm_polygon_eunis.manifest_state.x__load_existing_manifest__mutmut_28
+-        client=client,
+-    )
++        )
+## osm_polygon_eunis.manifest_state.x__load_existing_manifest__mutmut_29
+-        "eunis/manifest.json",
++        "XXeunis/manifest.jsonXX",
+## osm_polygon_eunis.manifest_state.x__load_existing_manifest__mutmut_30
+-        "eunis/manifest.json",
++        "EUNIS/MANIFEST.JSON",
+## osm_polygon_eunis.manifest_state.x__load_existing_manifest__mutmut_33
+-        payload = json.loads(local.read_text(encoding="utf-8"))
++        payload = json.loads(local.read_text(encoding=None))
+## osm_polygon_eunis.manifest_state.x__load_existing_manifest__mutmut_35
+-        payload = json.loads(local.read_text(encoding="utf-8"))
++        payload = json.loads(local.read_text(encoding="UTF-8"))
+## osm_polygon_eunis.manifest_state.x__load_existing_manifest__mutmut_36
+-        local.unlink(missing_ok=True)
++        local.unlink(missing_ok=None)
+## osm_polygon_eunis.manifest_state.x__load_existing_manifest__mutmut_37
+-        local.unlink(missing_ok=True)
++        local.unlink(missing_ok=False)
+## osm_polygon_eunis.manifest_state.x__manifest_expectations__mutmut_13
+-            _manifest_expectation(path, rows[path], schemas[path]) for path in sorted(rows, key=str)
++            _manifest_expectation(path, rows[path], schemas[path]) for path in sorted(rows, key=None)
+## osm_polygon_eunis.manifest_state.x__manifest_expectations__mutmut_15
+-            _manifest_expectation(path, rows[path], schemas[path]) for path in sorted(rows, key=str)
++            _manifest_expectation(path, rows[path], schemas[path]) for path in sorted(rows, )
+## osm_polygon_eunis.manifest_state.x__manifest_expectation__mutmut_2
+-        raise TypeError("manifest shard path must be a string")
++        raise TypeError(None)
+## osm_polygon_eunis.manifest_state.x__manifest_expectation__mutmut_3
+-        raise TypeError("manifest shard path must be a string")
++        raise TypeError("XXmanifest shard path must be a stringXX")
+## osm_polygon_eunis.manifest_state.x__manifest_expectation__mutmut_4
+-        raise TypeError("manifest shard path must be a string")
++        raise TypeError("MANIFEST SHARD PATH MUST BE A STRING")
+## osm_polygon_eunis.manifest_state.x__manifest_expectation__mutmut_10
+-        raise TypeError("manifest shard rows must be a non-negative integer")
++        raise TypeError(None)
+## osm_polygon_eunis.manifest_state.x__manifest_expectation__mutmut_11
+-        raise TypeError("manifest shard rows must be a non-negative integer")
++        raise TypeError("XXmanifest shard rows must be a non-negative integerXX")
+## osm_polygon_eunis.manifest_state.x__manifest_expectation__mutmut_12
+-        raise TypeError("manifest shard rows must be a non-negative integer")
++        raise TypeError("MANIFEST SHARD ROWS MUST BE A NON-NEGATIVE INTEGER")
+## osm_polygon_eunis.manifest_state.x__manifest_expectation__mutmut_14
+-        raise TypeError("manifest shard schema must be a string")
++        raise TypeError(None)
+## osm_polygon_eunis.manifest_state.x__manifest_expectation__mutmut_15
+-        raise TypeError("manifest shard schema must be a string")
++        raise TypeError("XXmanifest shard schema must be a stringXX")
+## osm_polygon_eunis.manifest_state.x__manifest_expectation__mutmut_16
+-        raise TypeError("manifest shard schema must be a string")
++        raise TypeError("MANIFEST SHARD SCHEMA MUST BE A STRING")
+## osm_polygon_eunis.manifest_state.x__manifest_artifacts__mutmut_19
+-        if not isinstance(path, str) or not isinstance(digest, str):
++        if not isinstance(path, str) and not isinstance(digest, str):
+## osm_polygon_eunis.manifest_state.x__required_string_list__mutmut_5
+-        raise VerificationError("matching EUNIS manifest is incomplete for no-op verification")
++        raise VerificationError("XXmatching EUNIS manifest is incomplete for no-op verificationXX")
+## osm_polygon_eunis.manifest_state.x__required_string_list__mutmut_6
+-        raise VerificationError("matching EUNIS manifest is incomplete for no-op verification")
++        raise VerificationError("matching eunis manifest is incomplete for no-op verification")
+## osm_polygon_eunis.manifest_state.x__required_string_list__mutmut_13
+-        raise VerificationError("matching EUNIS manifest is incomplete for no-op verification")
++        raise VerificationError("XXmatching EUNIS manifest is incomplete for no-op verificationXX")
+## osm_polygon_eunis.manifest_state.x__required_string_list__mutmut_14
+-        raise VerificationError("matching EUNIS manifest is incomplete for no-op verification")
++        raise VerificationError("matching eunis manifest is incomplete for no-op verification")
+## osm_polygon_eunis.manifest_state.x__required_string_list__mutmut_16
+-    return cast(tuple[str, ...], paths)
++    return cast(None, paths)
+## osm_polygon_eunis.manifest_state.x__required_no_op_parts__mutmut_9
+-        raise VerificationError("matching EUNIS manifest is incomplete for no-op verification")
++        raise VerificationError("XXmatching EUNIS manifest is incomplete for no-op verificationXX")
+## osm_polygon_eunis.manifest_state.x__required_no_op_parts__mutmut_10
+-        raise VerificationError("matching EUNIS manifest is incomplete for no-op verification")
++        raise VerificationError("matching eunis manifest is incomplete for no-op verification")
+## osm_polygon_eunis.manifest_state.x__verify_no_op_dataset__mutmut_4
+-    shared_blobs = _shared_blobs(api, plan, set(changed_paths))
++    shared_blobs = None
+## osm_polygon_eunis.manifest_state.x__verify_no_op_dataset__mutmut_5
+-    shared_blobs = _shared_blobs(api, plan, set(changed_paths))
++    shared_blobs = _shared_blobs(None, plan, set(changed_paths))
+## osm_polygon_eunis.manifest_state.x__verify_no_op_dataset__mutmut_6
+-    shared_blobs = _shared_blobs(api, plan, set(changed_paths))
++    shared_blobs = _shared_blobs(api, None, set(changed_paths))
+## osm_polygon_eunis.manifest_state.x__verify_no_op_dataset__mutmut_7
+-    shared_blobs = _shared_blobs(api, plan, set(changed_paths))
++    shared_blobs = _shared_blobs(api, plan, None)
+## osm_polygon_eunis.manifest_state.x__verify_no_op_dataset__mutmut_8
+-    shared_blobs = _shared_blobs(api, plan, set(changed_paths))
++    shared_blobs = _shared_blobs(plan, set(changed_paths))
+## osm_polygon_eunis.manifest_state.x__verify_no_op_dataset__mutmut_9
+-    shared_blobs = _shared_blobs(api, plan, set(changed_paths))
++    shared_blobs = _shared_blobs(api, set(changed_paths))
+## osm_polygon_eunis.manifest_state.x__verify_no_op_dataset__mutmut_10
+-    shared_blobs = _shared_blobs(api, plan, set(changed_paths))
++    shared_blobs = _shared_blobs(api, plan, )
+## osm_polygon_eunis.manifest_state.x__verify_no_op_dataset__mutmut_12
+-    verification = _verify_final_dataset(
+-        api,
+-        plan,
+-        options=_FinalDatasetVerificationOptions(
+-            expectations=expectations,
+-            added_paths=tuple(added_paths),
+-            expected_shared_blobs=shared_blobs,
+-            expected_manifest=manifest,
+-            expected_artifacts=artifacts,
+-            temp_dir=workdir / "verify-no-op",
+-            http_client=client,
+-        ),
+-    )
++    verification = None
+## osm_polygon_eunis.manifest_state.x__verify_no_op_dataset__mutmut_13
+-        api,
++        None,
+## osm_polygon_eunis.manifest_state.x__verify_no_op_dataset__mutmut_14
+-        plan,
++        None,
+## osm_polygon_eunis.manifest_state.x__verify_no_op_dataset__mutmut_15
+-        options=_FinalDatasetVerificationOptions(
+-            expectations=expectations,
+-            added_paths=tuple(added_paths),
+-            expected_shared_blobs=shared_blobs,
+-            expected_manifest=manifest,
+-            expected_artifacts=artifacts,
+-            temp_dir=workdir / "verify-no-op",
+-            http_client=client,
+-        ),
++        options=None,
+## osm_polygon_eunis.manifest_state.x__verify_no_op_dataset__mutmut_16
+-        api,
+## osm_polygon_eunis.manifest_state.x__verify_no_op_dataset__mutmut_17
+-        plan,
+## osm_polygon_eunis.manifest_state.x__verify_no_op_dataset__mutmut_18
+-        options=_FinalDatasetVerificationOptions(
+-            expectations=expectations,
+-            added_paths=tuple(added_paths),
+-            expected_shared_blobs=shared_blobs,
+-            expected_manifest=manifest,
+-            expected_artifacts=artifacts,
+-            temp_dir=workdir / "verify-no-op",
+-            http_client=client,
+-        ),
+-    )
++        )
+## osm_polygon_eunis.manifest_state.x__verify_no_op_dataset__mutmut_19
+-            expectations=expectations,
++            expectations=None,
+## osm_polygon_eunis.manifest_state.x__verify_no_op_dataset__mutmut_20
+-            added_paths=tuple(added_paths),
++            added_paths=None,
+## osm_polygon_eunis.manifest_state.x__verify_no_op_dataset__mutmut_21
+-            expected_shared_blobs=shared_blobs,
++            expected_shared_blobs=None,
+## osm_polygon_eunis.manifest_state.x__verify_no_op_dataset__mutmut_22
+-            expected_manifest=manifest,
++            expected_manifest=None,
+## osm_polygon_eunis.manifest_state.x__verify_no_op_dataset__mutmut_23
+-            expected_artifacts=artifacts,
++            expected_artifacts=None,
+## osm_polygon_eunis.manifest_state.x__verify_no_op_dataset__mutmut_24
+-            temp_dir=workdir / "verify-no-op",
++            temp_dir=None,
+## osm_polygon_eunis.manifest_state.x__verify_no_op_dataset__mutmut_25
+-            http_client=client,
++            http_client=None,
+## osm_polygon_eunis.manifest_state.x__verify_no_op_dataset__mutmut_35
+-            temp_dir=workdir / "verify-no-op",
++            temp_dir=workdir / "XXverify-no-opXX",
+## osm_polygon_eunis.manifest_state.x__verify_no_op_dataset__mutmut_36
+-            temp_dir=workdir / "verify-no-op",
++            temp_dir=workdir / "VERIFY-NO-OP",
+## osm_polygon_eunis.manifest_state.x__verify_no_op_dataset__mutmut_37
+-    return DatasetReceipt(plan, expectations, verification, no_op=True)
++    return DatasetReceipt(None, expectations, verification, no_op=True)
+## osm_polygon_eunis.manifest_state.x__verify_no_op_dataset__mutmut_39
+-    return DatasetReceipt(plan, expectations, verification, no_op=True)
++    return DatasetReceipt(plan, expectations, None, no_op=True)
+## osm_polygon_eunis.manifest_state.x__load_existing_manifests__mutmut_2
+-    return tuple(_load_existing_manifest(api, plan, directory, client) for plan in plans)
++    return tuple(_load_existing_manifest(None, plan, directory, client) for plan in plans)
+## osm_polygon_eunis.manifest_state.x__load_existing_manifests__mutmut_3
+-    return tuple(_load_existing_manifest(api, plan, directory, client) for plan in plans)
++    return tuple(_load_existing_manifest(api, None, directory, client) for plan in plans)
+## osm_polygon_eunis.manifest_state.x__load_existing_manifests__mutmut_4
+-    return tuple(_load_existing_manifest(api, plan, directory, client) for plan in plans)
++    return tuple(_load_existing_manifest(api, plan, None, client) for plan in plans)
+## osm_polygon_eunis.manifest_state.x__load_existing_manifests__mutmut_5
+-    return tuple(_load_existing_manifest(api, plan, directory, client) for plan in plans)
++    return tuple(_load_existing_manifest(api, plan, directory, None) for plan in plans)
+## osm_polygon_eunis.manifest_state.x__load_existing_manifests__mutmut_6
+-    return tuple(_load_existing_manifest(api, plan, directory, client) for plan in plans)
++    return tuple(_load_existing_manifest(plan, directory, client) for plan in plans)
+## osm_polygon_eunis.manifest_state.x__load_existing_manifests__mutmut_7
+-    return tuple(_load_existing_manifest(api, plan, directory, client) for plan in plans)
++    return tuple(_load_existing_manifest(api, directory, client) for plan in plans)
+## osm_polygon_eunis.manifest_state.x__load_existing_manifests__mutmut_8
+-    return tuple(_load_existing_manifest(api, plan, directory, client) for plan in plans)
++    return tuple(_load_existing_manifest(api, plan, client) for plan in plans)
+## osm_polygon_eunis.manifest_state.x__load_existing_manifests__mutmut_9
+-    return tuple(_load_existing_manifest(api, plan, directory, client) for plan in plans)
++    return tuple(_load_existing_manifest(api, plan, directory, ) for plan in plans)
+## osm_polygon_eunis.manifest_state.x__compatible_manifests__mutmut_10
+-        for plan, item in zip(plans, existing, strict=True)
++        for plan, item in zip(plans, existing, strict=None)
+## osm_polygon_eunis.manifest_state.x__compatible_manifests__mutmut_13
+-        for plan, item in zip(plans, existing, strict=True)
++        for plan, item in zip(plans, existing, )
+## osm_polygon_eunis.manifest_state.x__compatible_manifests__mutmut_14
+-        for plan, item in zip(plans, existing, strict=True)
++        for plan, item in zip(plans, existing, strict=False)
+## osm_polygon_eunis.manifest_state.x__no_op_receipts__mutmut_2
+-            api,
++            None,
+## osm_polygon_eunis.manifest_state.x__no_op_receipts__mutmut_3
+-            plan,
++            None,
+## osm_polygon_eunis.manifest_state.x__no_op_receipts__mutmut_5
+-            workdir=workdir,
++            workdir=None,
+## osm_polygon_eunis.manifest_state.x__no_op_receipts__mutmut_6
+-            client=client,
++            client=None,
+## osm_polygon_eunis.manifest_state.x__no_op_receipts__mutmut_12
+-            cast(_ExistingManifest, item),
++            cast(None, item),
+## osm_polygon_eunis.manifest_state.x__no_op_receipts__mutmut_18
+-        for plan, item in zip(plans, existing, strict=True)
++        for plan, item in zip(plans, existing, strict=None)
+## osm_polygon_eunis.manifest_state.x__no_op_receipts__mutmut_21
+-        for plan, item in zip(plans, existing, strict=True)
++        for plan, item in zip(plans, existing, )
+## osm_polygon_eunis.manifest_state.x__no_op_receipts__mutmut_22
+-        for plan, item in zip(plans, existing, strict=True)
++        for plan, item in zip(plans, existing, strict=False)
+## osm_polygon_eunis.manifest_state.x__try_no_op_release__mutmut_2
+-    existing = _load_existing_manifests(api, plans, workdir / "noop", client)
++    existing = _load_existing_manifests(None, plans, workdir / "noop", client)
+## osm_polygon_eunis.manifest_state.x__try_no_op_release__mutmut_4
+-    existing = _load_existing_manifests(api, plans, workdir / "noop", client)
++    existing = _load_existing_manifests(api, plans, None, client)
+## osm_polygon_eunis.manifest_state.x__try_no_op_release__mutmut_5
+-    existing = _load_existing_manifests(api, plans, workdir / "noop", client)
++    existing = _load_existing_manifests(api, plans, workdir / "noop", None)
+## osm_polygon_eunis.manifest_state.x__try_no_op_release__mutmut_11
+-    existing = _load_existing_manifests(api, plans, workdir / "noop", client)
++    existing = _load_existing_manifests(api, plans, workdir / "XXnoopXX", client)
+## osm_polygon_eunis.manifest_state.x__try_no_op_release__mutmut_12
+-    existing = _load_existing_manifests(api, plans, workdir / "noop", client)
++    existing = _load_existing_manifests(api, plans, workdir / "NOOP", client)
+## osm_polygon_eunis.manifest_state.x__try_no_op_release__mutmut_21
+-    receipts = _no_op_receipts(api, plans, existing, workdir=workdir, client=client)
++    receipts = _no_op_receipts(None, plans, existing, workdir=workdir, client=client)
+## osm_polygon_eunis.manifest_state.x__try_no_op_release__mutmut_24
+-    receipts = _no_op_receipts(api, plans, existing, workdir=workdir, client=client)
++    receipts = _no_op_receipts(api, plans, existing, workdir=None, client=client)
+## osm_polygon_eunis.manifest_state.x__try_no_op_release__mutmut_25
+-    receipts = _no_op_receipts(api, plans, existing, workdir=workdir, client=client)
++    receipts = _no_op_receipts(api, plans, existing, workdir=workdir, client=None)

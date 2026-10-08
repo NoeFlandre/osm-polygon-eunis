@@ -1,0 +1,2 @@
+⠋ Running stats
+Saved CI/CD stats to mutants/mutmut-cicd-stats.json

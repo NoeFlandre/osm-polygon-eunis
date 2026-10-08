@@ -1,0 +1,32 @@
+warning: The `UV_NATIVE_TLS` environment variable is deprecated and will be removed in a future release. Use `UV_SYSTEM_CERTS` instead.
+     also copying src/osm_polygon_eunis/__init__.py
+     also copying src/osm_polygon_eunis/_protocols.py
+     also copying src/osm_polygon_eunis/domain.py
+     also copying src/osm_polygon_eunis/fileio.py
+     also copying src/osm_polygon_eunis/publish.py
+     also copying src/osm_polygon_eunis/sources.py
+     also copying tests
+     also copying test
+     also copying setup.cfg
+     also copying pyproject.toml
+     also copying uv.lock
+     also copying poetry.lock
+     also copying Pipfile.lock
+     also copying pdm.lock
+src/osm_polygon_eunis/matching.py
+src/osm_polygon_eunis/geometry.py
+src/osm_polygon_eunis/grid_overlap.py
+src/osm_polygon_eunis/transform.py
+src/osm_polygon_eunis/release_plan.py
+src/osm_polygon_eunis/manifest_state.py
+src/osm_polygon_eunis/publish.py
+GENERATED mutated=7 ignored=0 unmodified=0
+MODULE geometry: 83 mutants
+MODULE grid_overlap: 450 mutants
+MODULE manifest_state: 443 mutants
+MODULE matching: 137 mutants
+MODULE publish: 501 mutants
+MODULE release_plan: 89 mutants
+MODULE transform: 473 mutants
+SAMPLE ['osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_1', 'osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_2', 'osm_polygon_eunis.manifest_state.x__reference_manifest__mutmut_3']
+SAMPLE ['osm_polygon_eunis.publish.x_target_exists__mutmut_1', 'osm_polygon_eunis.publish.x_target_exists__mutmut_2', 'osm_polygon_eunis.publish.x_target_exists__mutmut_3']

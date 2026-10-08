@@ -1,0 +1,8 @@
+mutation score: 26.84% (584/2176)
+  geometry: 0.00%
+  grid_overlap: 0.00%
+  manifest_state: 64.11%
+  matching: 0.00%
+  publish: 59.88%
+  release_plan: 0.00%
+  transform: 0.00%

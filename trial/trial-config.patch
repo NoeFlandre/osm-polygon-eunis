@@ -1,0 +1,44 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index 111fce1..d30c567 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -128,13 +128,32 @@ source_paths = [
+   "src/osm_polygon_eunis/grid_overlap.py",
+   "src/osm_polygon_eunis/transform.py",
+   "src/osm_polygon_eunis/release_plan.py",
++  "src/osm_polygon_eunis/manifest_state.py",
++  "src/osm_polygon_eunis/publish.py",
+ ]
+ also_copy = [
+   "src/osm_polygon_eunis/__init__.py",
+   "src/osm_polygon_eunis/_protocols.py",
++  "src/osm_polygon_eunis/card_publishing.py",
++  "src/osm_polygon_eunis/cards.py",
+   "src/osm_polygon_eunis/domain.py",
++  "src/osm_polygon_eunis/eea.py",
+   "src/osm_polygon_eunis/fileio.py",
++  "src/osm_polygon_eunis/geometry_checkpoints.py",
++  "src/osm_polygon_eunis/geometry_chunks.py",
++  "src/osm_polygon_eunis/geometry_jobs.py",
++  "src/osm_polygon_eunis/geometry_workers.py",
++  "src/osm_polygon_eunis/geopackage_reference.py",
++  "src/osm_polygon_eunis/geopackage_sql.py",
++  "src/osm_polygon_eunis/geopackage_tiles.py",
++  "src/osm_polygon_eunis/options.py",
+   "src/osm_polygon_eunis/publish.py",
++  "src/osm_polygon_eunis/raster_geometry.py",
++  "src/osm_polygon_eunis/raster_reference.py",
++  "src/osm_polygon_eunis/reference_cache.py",
++  "src/osm_polygon_eunis/reference_staging.py",
++  "src/osm_polygon_eunis/release_orchestration.py",
++  "src/osm_polygon_eunis/shard_processing.py",
+   "src/osm_polygon_eunis/sources.py",
+ ]
+ # The brute-force grid cross-check is marked slow but runs in under a second.
+@@ -148,4 +167,6 @@ pytest_add_cli_args_test_selection = [
+   "tests/unit/test_transform_schema.py",
+   "tests/unit/test_transform_contract.py",
+   "tests/unit/test_release_plan.py",
++  "tests/unit/test_manifest_state.py",
++  "tests/unit/test_publish.py",
+ ]

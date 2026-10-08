@@ -1,0 +1,586 @@
+## osm_polygon_eunis.publish.x_target_exists__mutmut_1
+-        api.repo_info(target_repo, repo_type="dataset")
++        api.repo_info(None, repo_type="dataset")
+## osm_polygon_eunis.publish.x_target_exists__mutmut_2
+-        api.repo_info(target_repo, repo_type="dataset")
++        api.repo_info(target_repo, repo_type=None)
+## osm_polygon_eunis.publish.x_target_exists__mutmut_3
+-        api.repo_info(target_repo, repo_type="dataset")
++        api.repo_info(repo_type="dataset")
+## osm_polygon_eunis.publish.x_target_exists__mutmut_4
+-        api.repo_info(target_repo, repo_type="dataset")
++        api.repo_info(target_repo, )
+## osm_polygon_eunis.publish.x_target_exists__mutmut_5
+-        api.repo_info(target_repo, repo_type="dataset")
++        api.repo_info(target_repo, repo_type="XXdatasetXX")
+## osm_polygon_eunis.publish.x_target_exists__mutmut_6
+-        api.repo_info(target_repo, repo_type="dataset")
++        api.repo_info(target_repo, repo_type="DATASET")
+## osm_polygon_eunis.publish.x_duplicate_source__mutmut_3
+-    if not target_exists(api, target_repo):
++    if not target_exists(api, None):
+## osm_polygon_eunis.publish.x_duplicate_source__mutmut_8
+-            repo_type="dataset",
++            repo_type=None,
+## osm_polygon_eunis.publish.x_duplicate_source__mutmut_9
+-            private=False,
++            private=None,
+## osm_polygon_eunis.publish.x_duplicate_source__mutmut_10
+-            token=token,
++            token=None,
+## osm_polygon_eunis.publish.x_duplicate_source__mutmut_11
+-            exist_ok=False,
++            exist_ok=None,
+## osm_polygon_eunis.publish.x_duplicate_source__mutmut_14
+-            repo_type="dataset",
+## osm_polygon_eunis.publish.x_duplicate_source__mutmut_15
+-            private=False,
+## osm_polygon_eunis.publish.x_duplicate_source__mutmut_16
+-            token=token,
+## osm_polygon_eunis.publish.x_duplicate_source__mutmut_17
+-            exist_ok=False,
+-        )
++            )
+## osm_polygon_eunis.publish.x_duplicate_source__mutmut_18
+-            repo_type="dataset",
++            repo_type="XXdatasetXX",
+## osm_polygon_eunis.publish.x_duplicate_source__mutmut_19
+-            repo_type="dataset",
++            repo_type="DATASET",
+## osm_polygon_eunis.publish.x_duplicate_source__mutmut_20
+-            private=False,
++            private=True,
+## osm_polygon_eunis.publish.x_duplicate_source__mutmut_21
+-            exist_ok=False,
++            exist_ok=True,
+## osm_polygon_eunis.publish.x_upload_replacement__mutmut_2
+-        raise FileNotFoundError(local_path)
++        raise FileNotFoundError(None)
+## osm_polygon_eunis.publish.x_upload_replacement__mutmut_3
+-        path_or_fileobj=local_path,
++        path_or_fileobj=None,
+## osm_polygon_eunis.publish.x_upload_replacement__mutmut_5
+-        repo_id=target_repo,
++        repo_id=None,
+## osm_polygon_eunis.publish.x_upload_replacement__mutmut_6
+-        repo_type="dataset",
++        repo_type=None,
+## osm_polygon_eunis.publish.x_upload_replacement__mutmut_7
+-        revision="main",
++        revision=None,
+## osm_polygon_eunis.publish.x_upload_replacement__mutmut_8
+-        parent_commit=parent_commit,
++        parent_commit=None,
+## osm_polygon_eunis.publish.x_upload_replacement__mutmut_9
+-        commit_message=commit_message or f"Add EUNIS labels to {path}",
++        commit_message=None,
+## osm_polygon_eunis.publish.x_upload_replacement__mutmut_10
+-        path_or_fileobj=local_path,
+## osm_polygon_eunis.publish.x_upload_replacement__mutmut_12
+-        repo_id=target_repo,
+## osm_polygon_eunis.publish.x_upload_replacement__mutmut_13
+-        repo_type="dataset",
+## osm_polygon_eunis.publish.x_upload_replacement__mutmut_14
+-        revision="main",
+## osm_polygon_eunis.publish.x_upload_replacement__mutmut_15
+-        parent_commit=parent_commit,
+## osm_polygon_eunis.publish.x_upload_replacement__mutmut_16
+-        commit_message=commit_message or f"Add EUNIS labels to {path}",
+-    )
++        )
+## osm_polygon_eunis.publish.x_upload_replacement__mutmut_17
+-        repo_type="dataset",
++        repo_type="XXdatasetXX",
+## osm_polygon_eunis.publish.x_upload_replacement__mutmut_18
+-        repo_type="dataset",
++        repo_type="DATASET",
+## osm_polygon_eunis.publish.x_upload_replacement__mutmut_19
+-        revision="main",
++        revision="XXmainXX",
+## osm_polygon_eunis.publish.x_upload_replacement__mutmut_20
+-        revision="main",
++        revision="MAIN",
+## osm_polygon_eunis.publish.x_upload_replacement__mutmut_21
+-        commit_message=commit_message or f"Add EUNIS labels to {path}",
++        commit_message=commit_message and f"Add EUNIS labels to {path}",
+## osm_polygon_eunis.publish.x_upload_replacements__mutmut_3
+-        path, local_path = files[0]
++        path, local_path = None
+## osm_polygon_eunis.publish.x_upload_replacements__mutmut_4
+-        path, local_path = files[0]
++        path, local_path = files[1]
+## osm_polygon_eunis.publish.x_upload_replacements__mutmut_5
+-            api,
++            None,
+## osm_polygon_eunis.publish.x_upload_replacements__mutmut_6
+-            target_repo,
++            None,
+## osm_polygon_eunis.publish.x_upload_replacements__mutmut_7
+-            path,
++            None,
+## osm_polygon_eunis.publish.x_upload_replacements__mutmut_8
+-            local_path,
++            None,
+## osm_polygon_eunis.publish.x_upload_replacements__mutmut_9
+-            parent_commit=parent_commit,
++            parent_commit=None,
+## osm_polygon_eunis.publish.x_upload_replacements__mutmut_10
+-            commit_message=commit_message,
++            commit_message=None,
+## osm_polygon_eunis.publish.x_upload_replacements__mutmut_11
+-            api,
+## osm_polygon_eunis.publish.x_upload_replacements__mutmut_12
+-            target_repo,
+## osm_polygon_eunis.publish.x_upload_replacements__mutmut_13
+-            path,
+## osm_polygon_eunis.publish.x_upload_replacements__mutmut_14
+-            local_path,
+## osm_polygon_eunis.publish.x_upload_replacements__mutmut_15
+-            parent_commit=parent_commit,
+## osm_polygon_eunis.publish.x_upload_replacements__mutmut_16
+-            commit_message=commit_message,
+-        )
++            )
+## osm_polygon_eunis.publish.x_upload_replacements__mutmut_17
+-        repo_id=target_repo,
++        repo_id=None,
+## osm_polygon_eunis.publish.x_upload_replacements__mutmut_18
+-        repo_type="dataset",
++        repo_type=None,
+## osm_polygon_eunis.publish.x_upload_replacements__mutmut_19
+-        revision="main",
++        revision=None,
+## osm_polygon_eunis.publish.x_upload_replacements__mutmut_22
+-        commit_message=commit_message or f"Add EUNIS labels to {len(files)} shards",
++        commit_message=None,
+## osm_polygon_eunis.publish.x_upload_replacements__mutmut_23
+-        repo_id=target_repo,
+## osm_polygon_eunis.publish.x_upload_replacements__mutmut_24
+-        repo_type="dataset",
+## osm_polygon_eunis.publish.x_upload_replacements__mutmut_25
+-        revision="main",
+## osm_polygon_eunis.publish.x_upload_replacements__mutmut_28
+-        commit_message=commit_message or f"Add EUNIS labels to {len(files)} shards",
+-    )
++        )
+## osm_polygon_eunis.publish.x_upload_replacements__mutmut_29
+-        repo_type="dataset",
++        repo_type="XXdatasetXX",
+## osm_polygon_eunis.publish.x_upload_replacements__mutmut_30
+-        repo_type="dataset",
++        repo_type="DATASET",
+## osm_polygon_eunis.publish.x_upload_replacements__mutmut_31
+-        revision="main",
++        revision="XXmainXX",
+## osm_polygon_eunis.publish.x_upload_replacements__mutmut_32
+-        revision="main",
++        revision="MAIN",
+## osm_polygon_eunis.publish.x_upload_replacements__mutmut_38
+-        commit_message=commit_message or f"Add EUNIS labels to {len(files)} shards",
++        commit_message=commit_message and f"Add EUNIS labels to {len(files)} shards",
+## osm_polygon_eunis.publish.x__manifest_bytes__mutmut_3
+-    return (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode()
++    return (json.dumps(manifest, sort_keys=None, separators=(",", ":")) + "\n").encode()
+## osm_polygon_eunis.publish.x__manifest_bytes__mutmut_6
+-    return (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode()
++    return (json.dumps(manifest, separators=(",", ":")) + "\n").encode()
+## osm_polygon_eunis.publish.x__manifest_bytes__mutmut_8
+-    return (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode()
++    return (json.dumps(manifest, sort_keys=False, separators=(",", ":")) + "\n").encode()
+## osm_polygon_eunis.publish.x__manifest_bytes__mutmut_9
+-    return (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode()
++    return (json.dumps(manifest, sort_keys=True, separators=("XX,XX", ":")) + "\n").encode()
+## osm_polygon_eunis.publish.x_upload_manifest__mutmut_3
+-        repo_id=target_repo,
++        repo_id=None,
+## osm_polygon_eunis.publish.x_upload_manifest__mutmut_4
+-        repo_type="dataset",
++        repo_type=None,
+## osm_polygon_eunis.publish.x_upload_manifest__mutmut_5
+-        revision="main",
++        revision=None,
+## osm_polygon_eunis.publish.x_upload_manifest__mutmut_6
+-        parent_commit=parent_commit,
++        parent_commit=None,
+## osm_polygon_eunis.publish.x_upload_manifest__mutmut_7
+-        commit_message="Record EUNIS enrichment manifest",
++        commit_message=None,
+## osm_polygon_eunis.publish.x_upload_manifest__mutmut_10
+-        repo_id=target_repo,
+## osm_polygon_eunis.publish.x_upload_manifest__mutmut_11
+-        repo_type="dataset",
+## osm_polygon_eunis.publish.x_upload_manifest__mutmut_12
+-        revision="main",
+## osm_polygon_eunis.publish.x_upload_manifest__mutmut_13
+-        parent_commit=parent_commit,
+## osm_polygon_eunis.publish.x_upload_manifest__mutmut_14
+-        commit_message="Record EUNIS enrichment manifest",
+-    )
++        )
+## osm_polygon_eunis.publish.x_upload_manifest__mutmut_18
+-        repo_type="dataset",
++        repo_type="XXdatasetXX",
+## osm_polygon_eunis.publish.x_upload_manifest__mutmut_19
+-        repo_type="dataset",
++        repo_type="DATASET",
+## osm_polygon_eunis.publish.x_upload_manifest__mutmut_20
+-        revision="main",
++        revision="XXmainXX",
+## osm_polygon_eunis.publish.x_upload_manifest__mutmut_21
+-        revision="main",
++        revision="MAIN",
+## osm_polygon_eunis.publish.x_upload_manifest__mutmut_22
+-        commit_message="Record EUNIS enrichment manifest",
++        commit_message="XXRecord EUNIS enrichment manifestXX",
+## osm_polygon_eunis.publish.x_upload_manifest__mutmut_23
+-        commit_message="Record EUNIS enrichment manifest",
++        commit_message="record eunis enrichment manifest",
+## osm_polygon_eunis.publish.x_upload_manifest__mutmut_24
+-        commit_message="Record EUNIS enrichment manifest",
++        commit_message="RECORD EUNIS ENRICHMENT MANIFEST",
+## osm_polygon_eunis.publish.x__software_provenance__mutmut_9
+-        "version": version("osm-polygon-eunis"),
++        "version": version("OSM-POLYGON-EUNIS"),
+## osm_polygon_eunis.publish.x__environment_source_commit__mutmut_3
+-    for name in ("EUNIS_SOURCE_COMMIT", "GRID5000_SOURCE_REVISION", "GITHUB_SHA"):
++    for name in ("EUNIS_SOURCE_COMMIT", "XXGRID5000_SOURCE_REVISIONXX", "GITHUB_SHA"):
+## osm_polygon_eunis.publish.x__environment_source_commit__mutmut_4
+-    for name in ("EUNIS_SOURCE_COMMIT", "GRID5000_SOURCE_REVISION", "GITHUB_SHA"):
++    for name in ("EUNIS_SOURCE_COMMIT", "grid5000_source_revision", "GITHUB_SHA"):
+## osm_polygon_eunis.publish.x__environment_source_commit__mutmut_5
+-    for name in ("EUNIS_SOURCE_COMMIT", "GRID5000_SOURCE_REVISION", "GITHUB_SHA"):
++    for name in ("EUNIS_SOURCE_COMMIT", "GRID5000_SOURCE_REVISION", "XXGITHUB_SHAXX"):
+## osm_polygon_eunis.publish.x__environment_source_commit__mutmut_6
+-    for name in ("EUNIS_SOURCE_COMMIT", "GRID5000_SOURCE_REVISION", "GITHUB_SHA"):
++    for name in ("EUNIS_SOURCE_COMMIT", "GRID5000_SOURCE_REVISION", "github_sha"):
+## osm_polygon_eunis.publish.x__git_source_commit__mutmut_2
+-    git = shutil.which("git")
++    git = shutil.which(None)
+## osm_polygon_eunis.publish.x__git_source_commit__mutmut_3
+-    git = shutil.which("git")
++    git = shutil.which("XXgitXX")
+## osm_polygon_eunis.publish.x__git_source_commit__mutmut_4
+-    git = shutil.which("git")
++    git = shutil.which("GIT")
+## osm_polygon_eunis.publish.x__git_source_commit__mutmut_6
+-    source_root = Path(__file__).resolve().parents[2]
++    source_root = None
+## osm_polygon_eunis.publish.x__git_source_commit__mutmut_8
+-    source_root = Path(__file__).resolve().parents[2]
++    source_root = Path(__file__).resolve().parents[3]
+## osm_polygon_eunis.publish.x__git_source_commit__mutmut_10
+-    status = _git_command_output(git, ("status", "--porcelain"), source_root)
++    status = _git_command_output(None, ("status", "--porcelain"), source_root)
+## osm_polygon_eunis.publish.x__git_source_commit__mutmut_12
+-    status = _git_command_output(git, ("status", "--porcelain"), source_root)
++    status = _git_command_output(git, ("status", "--porcelain"), None)
+## osm_polygon_eunis.publish.x__git_source_commit__mutmut_22
+-            "source checkout is dirty; commit changes or set EUNIS_SOURCE_COMMIT "
++            "XXsource checkout is dirty; commit changes or set EUNIS_SOURCE_COMMIT XX"
+## osm_polygon_eunis.publish.x__git_source_commit__mutmut_23
+-            "source checkout is dirty; commit changes or set EUNIS_SOURCE_COMMIT "
++            "source checkout is dirty; commit changes or set eunis_source_commit "
+## osm_polygon_eunis.publish.x__git_source_commit__mutmut_25
+-            "to a full commit SHA"
++            "XXto a full commit SHAXX"
+## osm_polygon_eunis.publish.x__git_source_commit__mutmut_26
+-            "to a full commit SHA"
++            "to a full commit sha"
+## osm_polygon_eunis.publish.x__git_source_commit__mutmut_27
+-            "to a full commit SHA"
++            "TO A FULL COMMIT SHA"
+## osm_polygon_eunis.publish.x__git_source_commit__mutmut_29
+-    return _git_command_output(git, ("rev-parse", "HEAD"), source_root) or None
++    return _git_command_output(None, ("rev-parse", "HEAD"), source_root) or None
+## osm_polygon_eunis.publish.x__git_source_commit__mutmut_31
+-    return _git_command_output(git, ("rev-parse", "HEAD"), source_root) or None
++    return _git_command_output(git, ("rev-parse", "HEAD"), None) or None
+## osm_polygon_eunis.publish.x__git_source_commit__mutmut_35
+-    return _git_command_output(git, ("rev-parse", "HEAD"), source_root) or None
++    return _git_command_output(git, ("XXrev-parseXX", "HEAD"), source_root) or None
+## osm_polygon_eunis.publish.x__git_source_commit__mutmut_36
+-    return _git_command_output(git, ("rev-parse", "HEAD"), source_root) or None
++    return _git_command_output(git, ("REV-PARSE", "HEAD"), source_root) or None
+## osm_polygon_eunis.publish.x__git_source_commit__mutmut_37
+-    return _git_command_output(git, ("rev-parse", "HEAD"), source_root) or None
++    return _git_command_output(git, ("rev-parse", "XXHEADXX"), source_root) or None
+## osm_polygon_eunis.publish.x__git_source_commit__mutmut_38
+-    return _git_command_output(git, ("rev-parse", "HEAD"), source_root) or None
++    return _git_command_output(git, ("rev-parse", "head"), source_root) or None
+## osm_polygon_eunis.publish.x__git_command_output__mutmut_3
+-            cwd=cwd,
++            cwd=None,
+## osm_polygon_eunis.publish.x__git_command_output__mutmut_4
+-            capture_output=True,
++            capture_output=None,
+## osm_polygon_eunis.publish.x__git_command_output__mutmut_5
+-            check=False,
++            check=None,
+## osm_polygon_eunis.publish.x__git_command_output__mutmut_6
+-            text=True,
++            text=None,
+## osm_polygon_eunis.publish.x__git_command_output__mutmut_8
+-            cwd=cwd,
+## osm_polygon_eunis.publish.x__git_command_output__mutmut_9
+-            capture_output=True,
+## osm_polygon_eunis.publish.x__git_command_output__mutmut_10
+-            check=False,
+## osm_polygon_eunis.publish.x__git_command_output__mutmut_11
+-            text=True,
+-        )
++            )
+## osm_polygon_eunis.publish.x__git_command_output__mutmut_12
+-            capture_output=True,
++            capture_output=False,
+## osm_polygon_eunis.publish.x__git_command_output__mutmut_13
+-            check=False,
++            check=True,
+## osm_polygon_eunis.publish.x__git_command_output__mutmut_14
+-            text=True,
++            text=False,
+## osm_polygon_eunis.publish.x__validated_source_commit__mutmut_3
+-        raise ValueError("source commit unavailable; set EUNIS_SOURCE_COMMIT to a full commit SHA")
++        raise ValueError("XXsource commit unavailable; set EUNIS_SOURCE_COMMIT to a full commit SHAXX")
+## osm_polygon_eunis.publish.x__validated_source_commit__mutmut_4
+-        raise ValueError("source commit unavailable; set EUNIS_SOURCE_COMMIT to a full commit SHA")
++        raise ValueError("source commit unavailable; set eunis_source_commit to a full commit sha")
+## osm_polygon_eunis.publish.x__validated_source_commit__mutmut_11
+-    if re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", commit) is None:
++    if re.fullmatch(r"[0-9a-fa-f]{40}|[0-9a-fa-f]{64}", commit) is None:
+## osm_polygon_eunis.publish.x__validated_source_commit__mutmut_15
+-        raise ValueError("source commit must be a 40- or 64-character hexadecimal SHA")
++        raise ValueError("XXsource commit must be a 40- or 64-character hexadecimal SHAXX")
+## osm_polygon_eunis.publish.x_build_manifest__mutmut_20
+-        "source_repo": options.source_repo,
++        "XXsource_repoXX": options.source_repo,
+## osm_polygon_eunis.publish.x_build_manifest__mutmut_21
+-        "source_repo": options.source_repo,
++        "SOURCE_REPO": options.source_repo,
+## osm_polygon_eunis.publish.x_build_manifest__mutmut_22
+-        "target_repo": options.target_repo,
++        "XXtarget_repoXX": options.target_repo,
+## osm_polygon_eunis.publish.x_build_manifest__mutmut_23
+-        "target_repo": options.target_repo,
++        "TARGET_REPO": options.target_repo,
+## osm_polygon_eunis.publish.x_build_manifest__mutmut_24
+-        "source_revision": options.source_revision,
++        "XXsource_revisionXX": options.source_revision,
+## osm_polygon_eunis.publish.x_build_manifest__mutmut_25
+-        "source_revision": options.source_revision,
++        "SOURCE_REVISION": options.source_revision,
+## osm_polygon_eunis.publish.x_build_manifest__mutmut_38
+-        "rows_by_path": {path: options.rows_by_path[path] for path in sorted(options.rows_by_path)},
++        "XXrows_by_pathXX": {path: options.rows_by_path[path] for path in sorted(options.rows_by_path)},
+## osm_polygon_eunis.publish.x_build_manifest__mutmut_39
+-        "rows_by_path": {path: options.rows_by_path[path] for path in sorted(options.rows_by_path)},
++        "ROWS_BY_PATH": {path: options.rows_by_path[path] for path in sorted(options.rows_by_path)},
+## osm_polygon_eunis.publish.x_build_manifest__mutmut_46
+-        "reference": dict(options.reference_manifest),
++        "XXreferenceXX": dict(options.reference_manifest),
+## osm_polygon_eunis.publish.x_build_manifest__mutmut_47
+-        "reference": dict(options.reference_manifest),
++        "REFERENCE": dict(options.reference_manifest),
+## osm_polygon_eunis.publish.x__validate_manifest_paths__mutmut_10
+-        raise ValueError("changed paths are not a subset of source paths")
++        raise ValueError("XXchanged paths are not a subset of source pathsXX")
+## osm_polygon_eunis.publish.x__validate_manifest_paths__mutmut_14
+-        raise ValueError("a path cannot be both changed and added")
++        raise ValueError("XXa path cannot be both changed and addedXX")
+## osm_polygon_eunis.publish.x__validate_manifest_paths__mutmut_18
+-        raise ValueError("added paths already exist in source paths")
++        raise ValueError("XXadded paths already exist in source pathsXX")
+## osm_polygon_eunis.publish.x__remote_files__mutmut_2
+-        repo_id,
++        None,
+## osm_polygon_eunis.publish.x__remote_files__mutmut_3
+-        path_in_repo="",
++        path_in_repo=None,
+## osm_polygon_eunis.publish.x__remote_files__mutmut_4
+-        recursive=True,
++        recursive=None,
+## osm_polygon_eunis.publish.x__remote_files__mutmut_5
+-        revision=revision,
++        revision=None,
+## osm_polygon_eunis.publish.x__remote_files__mutmut_6
+-        repo_type="dataset",
++        repo_type=None,
+## osm_polygon_eunis.publish.x__remote_files__mutmut_7
+-        repo_id,
+## osm_polygon_eunis.publish.x__remote_files__mutmut_8
+-        path_in_repo="",
+## osm_polygon_eunis.publish.x__remote_files__mutmut_9
+-        recursive=True,
+## osm_polygon_eunis.publish.x__remote_files__mutmut_10
+-        revision=revision,
+## osm_polygon_eunis.publish.x__remote_files__mutmut_11
+-        repo_type="dataset",
+-    )
++        )
+## osm_polygon_eunis.publish.x__remote_files__mutmut_12
+-        path_in_repo="",
++        path_in_repo="XXXX",
+## osm_polygon_eunis.publish.x__remote_files__mutmut_13
+-        recursive=True,
++        recursive=False,
+## osm_polygon_eunis.publish.x__remote_files__mutmut_14
+-        repo_type="dataset",
++        repo_type="XXdatasetXX",
+## osm_polygon_eunis.publish.x__remote_files__mutmut_15
+-        repo_type="dataset",
++        repo_type="DATASET",
+## osm_polygon_eunis.publish.x__remote_files__mutmut_16
+-        if not hasattr(entry, "tree_id") and isinstance(getattr(entry, "path", None), str)
++        if not hasattr(entry, "tree_id") or isinstance(getattr(entry, "path", None), str)
+## osm_polygon_eunis.publish.x__remote_files__mutmut_18
+-        if not hasattr(entry, "tree_id") and isinstance(getattr(entry, "path", None), str)
++        if not hasattr(None, "tree_id") and isinstance(getattr(entry, "path", None), str)
+## osm_polygon_eunis.publish.x__remote_files__mutmut_22
+-        if not hasattr(entry, "tree_id") and isinstance(getattr(entry, "path", None), str)
++        if not hasattr(entry, "XXtree_idXX") and isinstance(getattr(entry, "path", None), str)
+## osm_polygon_eunis.publish.x__remote_files__mutmut_23
+-        if not hasattr(entry, "tree_id") and isinstance(getattr(entry, "path", None), str)
++        if not hasattr(entry, "TREE_ID") and isinstance(getattr(entry, "path", None), str)
+## osm_polygon_eunis.publish.x_verify_dataset__mutmut_3
+-    revision = capture_revision(api, target_repo)
++    revision = capture_revision(api, None)
+## osm_polygon_eunis.publish.x_verify_dataset__mutmut_8
+-    remote = _remote_files(api, target_repo, revision)
++    remote = _remote_files(api, None, revision)
+## osm_polygon_eunis.publish.x_verify_dataset__mutmut_9
+-    remote = _remote_files(api, target_repo, revision)
++    remote = _remote_files(api, target_repo, None)
+## osm_polygon_eunis.publish.x_verify_dataset__mutmut_21
+-    if options.temp_dir is None:
++    if options.temp_dir is not None:
+## osm_polygon_eunis.publish.x_verify_dataset__mutmut_22
+-        temporary = TemporaryDirectory(prefix="osm-polygon-eunis-verify-")
++        temporary = None
+## osm_polygon_eunis.publish.x_verify_dataset__mutmut_23
+-        temporary = TemporaryDirectory(prefix="osm-polygon-eunis-verify-")
++        temporary = TemporaryDirectory(prefix=None)
+## osm_polygon_eunis.publish.x_verify_dataset__mutmut_24
+-        temporary = TemporaryDirectory(prefix="osm-polygon-eunis-verify-")
++        temporary = TemporaryDirectory(prefix="XXosm-polygon-eunis-verify-XX")
+## osm_polygon_eunis.publish.x_verify_dataset__mutmut_25
+-        temporary = TemporaryDirectory(prefix="osm-polygon-eunis-verify-")
++        temporary = TemporaryDirectory(prefix="OSM-POLYGON-EUNIS-VERIFY-")
+## osm_polygon_eunis.publish.x_verify_dataset__mutmut_26
+-        directory = Path(temporary.name)
++        directory = None
+## osm_polygon_eunis.publish.x_verify_dataset__mutmut_27
+-        directory = Path(temporary.name)
++        directory = Path(None)
+## osm_polygon_eunis.publish.x_verify_dataset__mutmut_30
+-    rows_by_path: dict[str, int] = {}
++    rows_by_path: dict[str, int] = None
+## osm_polygon_eunis.publish.x_verify_dataset__mutmut_32
+-            api,
++            None,
+## osm_polygon_eunis.publish.x_verify_dataset__mutmut_33
+-            target_repo,
++            None,
+## osm_polygon_eunis.publish.x_verify_dataset__mutmut_34
+-            revision,
++            None,
+## osm_polygon_eunis.publish.x_verify_dataset__mutmut_37
+-            options.http_client,
++            None,
+## osm_polygon_eunis.publish.x_verify_dataset__mutmut_45
+-            api,
++            None,
+## osm_polygon_eunis.publish.x_verify_dataset__mutmut_46
+-            target_repo,
++            None,
+## osm_polygon_eunis.publish.x_verify_dataset__mutmut_47
+-            revision,
++            None,
+## osm_polygon_eunis.publish.x_verify_dataset__mutmut_50
+-            options.http_client,
++            None,
+## osm_polygon_eunis.publish.x_verify_dataset__mutmut_57
+-            api,
++            None,
+## osm_polygon_eunis.publish.x_verify_dataset__mutmut_58
+-            target_repo,
++            None,
+## osm_polygon_eunis.publish.x_verify_dataset__mutmut_59
+-            revision,
++            None,
+## osm_polygon_eunis.publish.x_verify_dataset__mutmut_62
+-            options.http_client,
++            None,
+## osm_polygon_eunis.publish.x_verify_dataset__mutmut_69
+-        shared_paths = tuple(sorted(options.expected_shared_blobs or {}))
++        shared_paths = None
+## osm_polygon_eunis.publish.x_verify_dataset__mutmut_72
+-        shared_paths = tuple(sorted(options.expected_shared_blobs or {}))
++        shared_paths = tuple(sorted(options.expected_shared_blobs and {}))
+## osm_polygon_eunis.publish.x_verify_dataset__mutmut_73
+-        return VerificationReceipt(target_repo, revision, rows_by_path, shared_paths, manifest)
++        return VerificationReceipt(None, revision, rows_by_path, shared_paths, manifest)
+## osm_polygon_eunis.publish.x_verify_dataset__mutmut_76
+-        return VerificationReceipt(target_repo, revision, rows_by_path, shared_paths, manifest)
++        return VerificationReceipt(target_repo, revision, rows_by_path, None, manifest)
+## osm_polygon_eunis.publish.x__verify_shared_blobs__mutmut_7
+-        actual_blob = getattr(remote[path], "blob_id", None)
++        actual_blob = getattr(remote[path], "blob_id", )
+## osm_polygon_eunis.publish.x__verify_expectations__mutmut_3
+-            api,
++            None,
+## osm_polygon_eunis.publish.x__verify_expectations__mutmut_4
+-            target_repo,
++            None,
+## osm_polygon_eunis.publish.x__verify_expectations__mutmut_6
+-            revision,
++            None,
+## osm_polygon_eunis.publish.x__verify_expectations__mutmut_8
+-            client=http_client,
++            client=None,
+## osm_polygon_eunis.publish.x__verify_expectations__mutmut_14
+-            client=http_client,
+-        )
++            )
+## osm_polygon_eunis.publish.x__verify_expectations__mutmut_17
+-        if rows != expectation.rows or schema != expectation.schema:
++        if rows != expectation.rows and schema != expectation.schema:
+## osm_polygon_eunis.publish.x__verify_manifest__mutmut_3
+-        api,
++        None,
+## osm_polygon_eunis.publish.x__verify_manifest__mutmut_4
+-        target_repo,
++        None,
+## osm_polygon_eunis.publish.x__verify_manifest__mutmut_6
+-        revision,
++        None,
+## osm_polygon_eunis.publish.x__verify_manifest__mutmut_8
+-        client=http_client,
++        client=None,
+## osm_polygon_eunis.publish.x__verify_manifest__mutmut_14
+-        client=http_client,
+-    )
++        )
+## osm_polygon_eunis.publish.x__verify_manifest__mutmut_19
+-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
++    manifest = json.loads(manifest_path.read_text(encoding=None))
+## osm_polygon_eunis.publish.x__verify_manifest__mutmut_21
+-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
++    manifest = json.loads(manifest_path.read_text(encoding="UTF-8"))
+## osm_polygon_eunis.publish.x__verify_manifest__mutmut_25
+-        raise VerificationError("remote EUNIS manifest does not match expected manifest")
++        raise VerificationError("XXremote EUNIS manifest does not match expected manifestXX")
+## osm_polygon_eunis.publish.x__verify_artifacts__mutmut_3
+-            api,
++            None,
+## osm_polygon_eunis.publish.x__verify_artifacts__mutmut_4
+-            target_repo,
++            None,
+## osm_polygon_eunis.publish.x__verify_artifacts__mutmut_6
+-            revision,
++            None,
+## osm_polygon_eunis.publish.x__verify_artifacts__mutmut_8
+-            client=http_client,
++            client=None,
+## osm_polygon_eunis.publish.x__verify_artifacts__mutmut_14
+-            client=http_client,
+-        )
++            )
