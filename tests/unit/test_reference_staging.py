@@ -230,6 +230,32 @@ def test_worker_reference_batch_closes_opened_groups_on_failure(
     assert reference_staging._WORKER_REFERENCES == {}
 
 
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
+def test_worker_reference_batch_closes_opened_groups_and_reraises_interrupts(
+    tmp_path: Path, monkeypatch, interrupt: type[BaseException]
+) -> None:
+    opened: list[_TrackedReference] = []
+
+    def fake_reference(*args, **kwargs):
+        if opened:
+            raise interrupt()
+        opened.append(_TrackedReference(*args, **kwargs))
+        return opened[-1]
+
+    monkeypatch.setattr(reference_staging, "RasterReference", fake_reference)
+    raster_group = EeaGroup(
+        "raster-record", "raster", "folder", "service", {}, (_asset("/Prob_R11.tif"),), None
+    )
+
+    with pytest.raises(interrupt):
+        reference_staging._worker_reference_batch(
+            (raster_group, raster_group), tmp_path, 0, start_index=0
+        )
+
+    assert [reference.closed for reference in opened] == [True]
+    assert reference_staging._WORKER_REFERENCES == {}
+
+
 def test_reference_assets_for_staging_rejects_assetless_group() -> None:
     group = EeaGroup("empty", "empty", "folder", "service", {}, (), None)
 

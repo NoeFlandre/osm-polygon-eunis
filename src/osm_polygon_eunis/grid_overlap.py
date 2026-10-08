@@ -1,11 +1,4 @@
-"""Exact polygon/cell overlap areas on a regular raster grid, without vectorizing cells.
-
-For a polygon and a grid of equal square cells, every cell the polygon covers
-completely contributes the whole cell area, and only the cells crossed by the
-polygon boundary need a geometric intersection. The boundary cells are the same
-for every habitat layer on the grid, so their exact areas are computed once per
-polygon and each layer only selects the cells it marks as habitat.
-"""
+"""Exact polygon overlap areas for raster cells."""
 
 from __future__ import annotations
 
@@ -17,6 +10,7 @@ from rasterio.features import rasterize
 from rasterio.io import DatasetReader
 from rasterio.transform import Affine
 from rasterio.windows import Window
+from shapely.geometry import Polygon
 from shapely.geometry.base import BaseGeometry
 
 TILE_SIZE = 128
@@ -133,12 +127,21 @@ def _boundary_areas(
     """Exact polygon area inside each listed cell.
 
     The polygon is narrowed hierarchically (row strip, then block) so each
-    rectangle clip only sees the vertices near its cells.
+    exact intersection only sees the vertices near its cells.
     """
 
     areas = np.zeros(len(rows), dtype=np.float64)
+    if not len(rows):
+        return areas
+    source_allows_rect_clip = _simple_polygon_without_holes(polygon)
     for strip in _groups(rows // _STRIP_CELLS):
-        areas[strip] = _strip_areas(polygon, transform, rows[strip], cols[strip])
+        areas[strip] = _strip_areas(
+            polygon,
+            transform,
+            rows[strip],
+            cols[strip],
+            source_allows_rect_clip=source_allows_rect_clip,
+        )
     return areas
 
 
@@ -147,12 +150,28 @@ def _strip_areas(
     transform: Affine,
     rows: np.ndarray,
     cols: np.ndarray,
+    *,
+    source_allows_rect_clip: bool,
 ) -> np.ndarray:
     areas = np.zeros(len(rows), dtype=np.float64)
-    strip_polygon = _clip_to_cells(polygon, transform, rows, cols)
+    strip_polygon = _clip_to_cells(
+        polygon, transform, rows, cols, source_allows_rect_clip=source_allows_rect_clip
+    )
     for block in _groups(cols // _BLOCK_CELLS):
-        block_polygon = _clip_to_cells(strip_polygon, transform, rows[block], cols[block])
-        areas[block] = _cell_areas(block_polygon, transform, rows[block], cols[block])
+        block_polygon = _clip_to_cells(
+            strip_polygon,
+            transform,
+            rows[block],
+            cols[block],
+            source_allows_rect_clip=source_allows_rect_clip,
+        )
+        areas[block] = _cell_areas(
+            block_polygon,
+            transform,
+            rows[block],
+            cols[block],
+            source_allows_rect_clip=source_allows_rect_clip,
+        )
     return areas
 
 
@@ -168,14 +187,40 @@ def _clip_to_cells(
     transform: Affine,
     rows: np.ndarray,
     cols: np.ndarray,
+    *,
+    source_allows_rect_clip: bool = False,
 ) -> BaseGeometry:
+    clip_bounds = _cell_bounds(transform, rows, cols)
+    if _bounds_contain(clip_bounds, shapely.bounds(polygon)):
+        return polygon
+    if source_allows_rect_clip:
+        clipped = shapely.clip_by_rect(polygon, *clip_bounds)
+        if clipped.is_valid:
+            return clipped
+    return shapely.intersection(polygon, shapely.box(*clip_bounds))
+
+
+def _cell_bounds(
+    transform: Affine, rows: np.ndarray, cols: np.ndarray
+) -> tuple[float, float, float, float]:
     bounds = shapely.bounds(_cell_boxes(transform, rows, cols))
-    return shapely.clip_by_rect(
-        polygon,
+    return (
         float(bounds[:, 0].min()),
         float(bounds[:, 1].min()),
         float(bounds[:, 2].max()),
         float(bounds[:, 3].max()),
+    )
+
+
+def _bounds_contain(
+    container: tuple[float, float, float, float],
+    bounds: tuple[float, float, float, float],
+) -> bool:
+    return (
+        bounds[0] >= container[0]
+        and bounds[1] >= container[1]
+        and bounds[2] <= container[2]
+        and bounds[3] <= container[3]
     )
 
 
@@ -184,20 +229,47 @@ def _cell_areas(
     transform: Affine,
     rows: np.ndarray,
     cols: np.ndarray,
+    *,
+    source_allows_rect_clip: bool = False,
 ) -> np.ndarray:
-    """Polygon area per cell: whole cells by predicate, crossing cells by rectangle clip."""
-
     boxes = _cell_boxes(transform, rows, cols)
-    bounds = shapely.bounds(boxes)
     if polygon.is_empty:
-        return np.zeros(len(rows), dtype=np.float64)
+        return np.zeros(len(rows))
     shapely.prepare(polygon)
     inside = shapely.contains(polygon, boxes)
     areas = np.where(inside, shapely.area(boxes), 0.0)
-    for index in np.flatnonzero(shapely.intersects(polygon, boxes) & ~inside):
-        x_min, y_min, x_max, y_max = bounds[index]
-        areas[index] = shapely.area(shapely.clip_by_rect(polygon, x_min, y_min, x_max, y_max))
-    return np.asarray(areas, dtype=np.float64)
+    crossing = np.flatnonzero(shapely.intersects(polygon, boxes) & ~inside)
+    if len(crossing):
+        areas[crossing] = _crossing_cell_areas(
+            polygon, boxes, crossing, source_allows_rect_clip=source_allows_rect_clip
+        )
+    return areas
+
+
+def _crossing_cell_areas(
+    polygon: BaseGeometry,
+    boxes: np.ndarray,
+    crossing: np.ndarray,
+    *,
+    source_allows_rect_clip: bool,
+) -> np.ndarray:
+    if not source_allows_rect_clip:
+        return shapely.area(shapely.intersection(boxes[crossing], polygon))
+
+    bounds = shapely.bounds(boxes[crossing])
+    clipped = [shapely.clip_by_rect(polygon, *bounds[offset]) for offset in range(len(crossing))]
+    areas = shapely.area(clipped)
+    invalid = np.flatnonzero(~shapely.is_valid(clipped))
+    if len(invalid):
+        invalid_cells = crossing[invalid]
+        areas[invalid] = shapely.area(shapely.intersection(boxes[invalid_cells], polygon))
+    return areas
+
+
+def _simple_polygon_without_holes(polygon: BaseGeometry) -> bool:
+    """Identify a valid single-ring polygon for the rectangle-clipping fast path."""
+
+    return isinstance(polygon, Polygon) and polygon.is_valid and not polygon.interiors
 
 
 def _cell_boxes(transform: Affine, rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
