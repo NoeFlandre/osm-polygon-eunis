@@ -102,12 +102,13 @@ ALLOWED_MUTANTS: dict[str, str] = {
         "x__strip_areas__mutmut_5",
         "x__cell_areas__mutmut_11",
         "x__cell_areas__mutmut_13",
+        "x__cell_areas__mutmut_9",
     ),
     **_equivalent(
         "Equivalent: asarray keeps a float64 array, so the explicit dtype is redundant.",
         "grid_overlap",
-        "x__cell_areas__mutmut_50",
-        "x__cell_areas__mutmut_52",
+        "x__cell_areas__mutmut_42",
+        "x__cell_areas__mutmut_44",
     ),
     **_equivalent(
         "Equivalent: grouping by float block keys only splits blocks further, so every cell "
