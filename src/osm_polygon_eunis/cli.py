@@ -12,7 +12,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
-from typing import cast
+from typing import Final, cast
 
 import httpx
 from huggingface_hub import HfApi
@@ -27,6 +27,7 @@ from .grid5000 import (
     Grid5000Submission,
     resolve_source_revision,
     submit_grid5000,
+    validate_walltime,
 )
 from .options import (
     DEFAULT_BATCH_SIZE,
@@ -66,6 +67,14 @@ def _positive_int(value: str) -> int:
     if number <= 0:
         raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}")
     return number
+
+
+def _walltime(value: str) -> str:
+    try:
+        validate_walltime(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+    return value
 
 
 def _non_negative_int(value: str) -> int:
@@ -332,7 +341,10 @@ def _parser() -> argparse.ArgumentParser:
         help=f"geometry workers (default: {DEFAULT_GRID_WORKERS})",
     )
     grid_submit.add_argument(
-        "--walltime", default="1:00:00", help="OAR walltime in HH:MM:SS (default: 1:00:00)"
+        "--walltime",
+        type=_walltime,
+        default="1:00:00",
+        help="OAR walltime in HH:MM:SS, above 5 minutes and at most 1 hour (default: 1:00:00)",
     )
     grid_submit.add_argument(
         "--batch-size",
@@ -573,9 +585,41 @@ def _run(args: argparse.Namespace, services: CliDependencies) -> int:
     return _run_release(args, progress, services)
 
 
+# Options that may appear in the verbose start record. Anything else stays out of it.
+# Endpoint URLs are left out on purpose: a URL can carry credentials.
+_START_RECORD_FIELDS: Final = (
+    "command",
+    "grid_action",
+    "dataset",
+    "reference_config",
+    "workdir",
+    "batch_size",
+    "workers",
+    "max_intersection_errors",
+    "receipt",
+    "dry_run",
+    "log",
+    "sidecars",
+    "slowest_shards",
+    "site",
+    "frontend",
+    "cluster",
+    "persistent_root",
+    "exclude_site",
+    "state",
+    "queue",
+    "job_type",
+    "cores",
+    "walltime",
+)
+
+
 def _report_start(args: argparse.Namespace, progress: Progress | None) -> None:
     if args.verbose and progress is not None:
-        progress({"event": "start", "command": args.command, "arguments": vars(args)})
+        arguments = {
+            name: getattr(args, name) for name in _START_RECORD_FIELDS if hasattr(args, name)
+        }
+        progress({"event": "start", "command": args.command, "arguments": arguments})
 
 
 def _run_grid5000_submit(args: argparse.Namespace, services: CliDependencies) -> int:

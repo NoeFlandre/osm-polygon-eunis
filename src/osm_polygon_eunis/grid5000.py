@@ -250,7 +250,7 @@ def _validate_config_values(config: Grid5000Config) -> None:
     _validate_positive("workers", config.workers)
     if config.workers > config.cores:
         raise ValueError("workers must not exceed cores")
-    _validate_walltime(config.walltime)
+    validate_walltime(config.walltime)
     _validate_positive("batch_size", config.batch_size)
     for field_name in ("site", "cluster", "queue"):
         _validate_host(getattr(config, field_name), field_name)
@@ -259,7 +259,9 @@ def _validate_config_values(config: Grid5000Config) -> None:
     _validate_config_exclusions(config)
 
 
-def _validate_walltime(walltime: str) -> None:
+def validate_walltime(walltime: str) -> None:
+    """Raise ValueError unless walltime is HH:MM:SS, within one hour, above the stop margin."""
+
     match = _WALLTIME_PATTERN.fullmatch(walltime)
     if match is None:
         raise ValueError("walltime must use HH:MM:SS")

@@ -50,13 +50,38 @@ def _dependencies(**overrides: object) -> CliDependencies:
 
 def test_report_start_emits_arguments_only_when_verbose() -> None:
     events: list[Mapping[str, object]] = []
-    verbose_args = argparse.Namespace(verbose=True, command="plan", marker="value")
-    quiet_args = argparse.Namespace(verbose=False, command="plan", marker="value")
+    verbose_args = argparse.Namespace(verbose=True, command="plan", dataset=["website"])
+    quiet_args = argparse.Namespace(verbose=False, command="plan", dataset=["website"])
 
     cli._report_start(verbose_args, events.append)
     cli._report_start(quiet_args, events.append)
 
-    assert events == [{"event": "start", "command": "plan", "arguments": vars(verbose_args)}]
+    assert events == [
+        {
+            "event": "start",
+            "command": "plan",
+            "arguments": {"command": "plan", "dataset": ["website"]},
+        }
+    ]
+
+
+def test_report_start_omits_fields_outside_the_allow_list() -> None:
+    events: list[Mapping[str, object]] = []
+    args = argparse.Namespace(
+        verbose=True,
+        command="plan",
+        dataset=None,
+        hf_token="hf_secret_value",
+        marker="value",
+    )
+
+    cli._report_start(args, events.append)
+
+    start = events[0]
+    arguments = cast(Mapping[str, object], start["arguments"])
+    assert "hf_token" not in arguments
+    assert "marker" not in arguments
+    assert "hf_secret_value" not in json.dumps(start)
 
 
 def test_default_reference_config_resolves_outside_the_repository(
@@ -267,6 +292,18 @@ def test_subcommand_help_lists_options(argv: list[str], options: list[str], caps
         (["release", "--dataset", "unknown"], "argument --dataset: invalid choice: 'unknown'"),
         (["verify", "--dataset", "unknown"], "argument --dataset: invalid choice: 'unknown'"),
         (["bogus"], "argument command: invalid choice: 'bogus'"),
+        (
+            ["grid5000", "submit", "--walltime", "forever"],
+            "argument --walltime: walltime must use HH:MM:SS",
+        ),
+        (
+            ["grid5000", "submit", "--walltime", "1:00:01"],
+            "argument --walltime: walltime must be positive and no longer than one hour",
+        ),
+        (
+            ["grid5000", "submit", "--walltime", "0:05:00"],
+            "argument --walltime: walltime must exceed the default 300-second stop margin",
+        ),
         ([], "the following arguments are required: command"),
     ],
 )
