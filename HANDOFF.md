@@ -6,7 +6,7 @@
 
 | Branch | Commit | What it is |
 |---|---|---|
-| `claude/atomic-write-mutation-coverage-go783s` | `35ce838a444e787bc91432586916b9be6a205ef9` (unchanged) | Base. No commits added. Left as it was. |
+| `main` | `35ce838a444e787bc91432586916b9be6a205ef9` (unchanged) | Base. Nothing was committed or changed. The local branch `claude/atomic-write-mutation-coverage-go783s` had no commits of its own. Its remote copy was pruned earlier, so it is not on GitHub. Use `main`. |
 | `handoff/second-master/issue-108-notes-35ce838` | Orphan branch; this file is at its root. Full SHA: see the commit link returned with this handoff. | Notes only. No code. Trial configuration, baseline, results, survivor classification, first-batch proposal. |
 
 Nothing is pushed to `main`. No PR is open.
@@ -15,7 +15,7 @@ Nothing is pushed to `main`. No PR is open.
 
 ```
 git clone --branch handoff/second-master/issue-108-notes-35ce838 https://github.com/NoeFlandre/osm-polygon-eunis notes
-git clone --branch claude/atomic-write-mutation-coverage-go783s https://github.com/NoeFlandre/osm-polygon-eunis code
+git clone --branch main https://github.com/NoeFlandre/osm-polygon-eunis code
 git -C code rev-parse HEAD          # must print 35ce838a444e787bc91432586916b9be6a205ef9
 git -C code apply --check ../notes/trial/trial-config.patch   # confirms the trial patch applies to the base
 ```
