@@ -79,12 +79,13 @@ def _polygons_with_holes(draw: st.DrawFn) -> BaseGeometry:
     """A rectangle minus an inner rectangle, which may touch the outer edge."""
 
     x0, y0 = draw(_X_EIGHTHS), draw(_Y_EIGHTHS)
-    width = draw(st.integers(min_value=4, max_value=64))
-    height = draw(st.integers(min_value=4, max_value=48))
-    hole_x0 = draw(st.integers(min_value=0, max_value=width - 2))
-    hole_x1 = draw(st.integers(min_value=hole_x0 + 1, max_value=width))
-    hole_y0 = draw(st.integers(min_value=0, max_value=height - 2))
-    hole_y1 = draw(st.integers(min_value=hole_y0 + 1, max_value=height))
+    width = draw(st.integers(min_value=48, max_value=160))
+    height = draw(st.integers(min_value=48, max_value=128))
+    # Holes span at least four cells, so a window can contain cells lying fully inside one.
+    hole_x0 = draw(st.integers(min_value=0, max_value=width - 32))
+    hole_x1 = draw(st.integers(min_value=hole_x0 + 32, max_value=width))
+    hole_y0 = draw(st.integers(min_value=0, max_value=height - 32))
+    hole_y1 = draw(st.integers(min_value=hole_y0 + 32, max_value=height))
     outer = box(x0 / 8, y0 / 8, (x0 + width) / 8, (y0 + height) / 8)
     hole = box((x0 + hole_x0) / 8, (y0 + hole_y0) / 8, (x0 + hole_x1) / 8, (y0 + hole_y1) / 8)
     return outer.difference(hole)
@@ -168,6 +169,9 @@ def _assert_matches_cell_boxes(
     assert (cells.areas > -NOISE).all()
     assert ((cells.rows >= rows[0]) & (cells.rows < rows[1])).all()
     assert ((cells.cols >= cols[0]) & (cells.cols < cols[1])).all()
+    # A repeated cell would overwrite its twin in the dict below and hide a double count.
+    keys = list(zip(cells.rows.tolist(), cells.cols.tolist(), strict=True))
+    assert len(set(keys)) == len(keys)
 
     found = _significant(cells)
     expected = _cell_box_areas(polygon, rows, cols)
