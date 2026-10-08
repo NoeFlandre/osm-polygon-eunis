@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import os
 from unittest.mock import patch
 
 import numpy as np
 import pytest
 import shapely
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 from rasterio.transform import from_origin
 from shapely.geometry import CAP_STYLE, LineString, MultiPoint, Polygon, box
@@ -19,6 +20,11 @@ COLS = 16
 TRANSFORM = from_origin(0.0, float(ROWS), 1.0, 1.0)
 # Areas below this are floating-point noise from edges that only touch a cell.
 NOISE = 1e-9
+# The default pytest run has a twelve-second budget (.github/workflows/qa.yml), so outside
+# the ci profile these properties run 50 examples. `make test` (HYPOTHESIS_PROFILE=ci) keeps 300.
+_PROPERTY_SETTINGS = (
+    settings() if os.environ.get("HYPOTHESIS_PROFILE") == "ci" else settings(max_examples=50)
+)
 
 # Coordinates are drawn in eighths of a cell so edges often land on cell borders.
 _X_EIGHTHS = st.integers(min_value=-8, max_value=136)
@@ -174,6 +180,7 @@ def _assert_matches_cell_boxes(
 
 
 @pytest.mark.property
+@_PROPERTY_SETTINGS
 @given(polygon=_POLYGONS, window=_windows())
 def test_weighted_cells_match_explicit_cell_box_intersections(
     polygon: BaseGeometry,
@@ -187,6 +194,7 @@ def test_weighted_cells_match_explicit_cell_box_intersections(
 
 
 @pytest.mark.property
+@_PROPERTY_SETTINGS
 @given(polygon=_POLYGONS)
 def test_weighted_cells_match_explicit_cell_box_intersections_in_each_band(
     polygon: BaseGeometry,
