@@ -12,12 +12,11 @@ from multiprocessing import get_context
 from pathlib import Path
 from typing import cast
 
-import httpx
 from huggingface_hub import HfApi
 
 from ._protocols import HubApi, StreamClient
 from .eea import EeaGroup
-from .fileio import DOWNLOAD_TIMEOUT
+from .fileio import download_client
 from .geometry_checkpoints import (
     _completed_batches,
     _geometry_checkpoint_signature,
@@ -143,7 +142,7 @@ def _process_geometry_chunk(chunk: _GeometryChunk) -> tuple[tuple[str, str], ...
         limits=chunk.limits,
     )
     try:
-        with httpx.Client(follow_redirects=True, timeout=DOWNLOAD_TIMEOUT) as client:
+        with download_client() as client:
             _process_geometry_micro_batches(
                 _GeometryWorker(
                     chunk=chunk,

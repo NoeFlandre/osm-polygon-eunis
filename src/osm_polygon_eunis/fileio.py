@@ -18,6 +18,12 @@ from ._protocols import Hasher
 DOWNLOAD_TIMEOUT = httpx.Timeout(connect=30.0, read=300.0, write=300.0, pool=30.0)
 
 
+def download_client() -> httpx.Client:
+    """Return a redirect-following client configured with the bounded download timeouts."""
+
+    return httpx.Client(follow_redirects=True, timeout=DOWNLOAD_TIMEOUT)
+
+
 def write_json_atomic(path: Path, payload: Mapping[str, object]) -> None:
     """Write sorted, indented JSON through a sibling temporary file."""
 
