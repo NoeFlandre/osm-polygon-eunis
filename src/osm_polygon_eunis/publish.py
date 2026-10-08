@@ -245,10 +245,25 @@ def _git_source_commit() -> str | None:
     git = shutil.which("git")
     if git is None:
         return None
+    source_root = Path(__file__).resolve().parents[2]
+    status = _git_command_output(git, ("status", "--porcelain"), source_root)
+    if status is None:
+        return None
+    if status:
+        raise ValueError(
+            "source checkout is dirty; commit changes or set EUNIS_SOURCE_COMMIT "
+            "to a full commit SHA"
+        )
+    return _git_command_output(git, ("rev-parse", "HEAD"), source_root) or None
+
+
+def _git_command_output(git: str, arguments: tuple[str, ...], cwd: Path) -> str | None:
+    """Run a fixed Git query and return stdout only when it succeeds."""
+
     try:
         result = subprocess.run(  # noqa: S603 - resolved Git executable and fixed arguments
-            (git, "rev-parse", "HEAD"),
-            cwd=Path(__file__).resolve().parents[2],
+            (git, *arguments),
+            cwd=cwd,
             capture_output=True,
             check=False,
             text=True,
@@ -257,7 +272,7 @@ def _git_source_commit() -> str | None:
         return None
     if result.returncode != 0:
         return None
-    return result.stdout.strip() or None
+    return result.stdout.strip()
 
 
 def _validated_source_commit(commit: str | None) -> str:
