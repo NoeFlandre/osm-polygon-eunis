@@ -5,6 +5,8 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # Called by release.yml, so a release tag must pass the same gate.
+  workflow_call:
 
 # One run per PR (or per main commit); a newer push cancels the older run.
 concurrency:

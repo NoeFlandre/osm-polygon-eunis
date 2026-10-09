@@ -13,6 +13,11 @@ on:
     - cron: "23 3 * * 1"
   workflow_dispatch:
 
+# One run per PR; a newer push cancels the older run. Scheduled and manual runs are not cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 

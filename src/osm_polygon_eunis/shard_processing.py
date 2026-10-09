@@ -12,7 +12,6 @@ from typing import Any
 from . import __version__
 from ._protocols import HubApi, StreamClient
 from .cards import DatasetCardAccumulator
-from .domain import EunisResult
 from .options import ShardContext
 from .publish import (
     ShardExpectation,
@@ -337,7 +336,7 @@ def _enrich_geometry_shard(
     return (
         sidecar,
         local_output,
-        ShardExpectation(geometry_path, rows, _schema_signature(local_output)),
+        ShardExpectation(geometry_path, rows, parquet_signature(local_output)[1]),
     )
 
 
@@ -390,17 +389,17 @@ def _build_link_output(
     )
     local_link_output = options.local_root / f"{link_path.replace('/', '__')}.enriched.parquet"
     local_link_output.unlink(missing_ok=True)
-    link_rows = _enrich_link(
+    link_rows = enrich_link_shard(
         local_link_source,
         local_link_output,
-        labels,
+        labels_by_polygon_id=labels,
         batch_size=options.batch_size,
     )
     return _LinkOutput(
         link_path,
         local_link_source,
         local_link_output,
-        ShardExpectation(link_path, link_rows, _schema_signature(local_link_output)),
+        ShardExpectation(link_path, link_rows, parquet_signature(local_link_output)[1]),
     )
 
 
@@ -412,40 +411,12 @@ def _upload_file(
     parent_commit: str,
     commit_message: str | None = None,
 ) -> str:
-    if commit_message is None:
-        result = upload_replacement(
-            api,
-            target_repo,
-            path,
-            local_path,
-            parent_commit=parent_commit,
-        )
-    else:
-        result = upload_replacement(
-            api,
-            target_repo,
-            path,
-            local_path,
-            parent_commit=parent_commit,
-            commit_message=commit_message,
-        )
-    return _advance_commit(api, target_repo, result)
-
-
-def _schema_signature(path: Path) -> str:
-    return parquet_signature(path)[1]
-
-
-def _enrich_link(
-    source: Path,
-    destination: Path,
-    labels: Mapping[str, EunisResult],
-    *,
-    batch_size: int,
-) -> int:
-    return enrich_link_shard(
-        source,
-        destination,
-        labels_by_polygon_id=labels,
-        batch_size=batch_size,
+    result = upload_replacement(
+        api,
+        target_repo,
+        path,
+        local_path,
+        parent_commit=parent_commit,
+        commit_message=commit_message,
     )
+    return _advance_commit(api, target_repo, result)

@@ -82,7 +82,13 @@ def test_contributor_quality_task_is_shared_by_pre_commit_and_ci() -> None:
 
 def test_docker_runtime_installs_rasterio_shared_library_dependencies() -> None:
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
-    runtime = dockerfile.split("FROM python:3.12-slim-bookworm AS runtime", maxsplit=1)[1]
+    runtime_stage = re.search(
+        r"^FROM python:3\.12-slim-bookworm(?:@sha256:[0-9a-f]{64})? AS runtime$",
+        dockerfile,
+        flags=re.MULTILINE,
+    )
+    assert runtime_stage is not None
+    runtime = dockerfile[runtime_stage.end() :]
 
     assert "apt-get update" in runtime
     assert "libexpat1" in runtime
