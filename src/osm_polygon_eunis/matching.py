@@ -76,6 +76,8 @@ def _intersection_area(
     on_error: Callable[[], None],
 ) -> float | None:
     if not is_usable(candidate.geometry):
+        logger.warning("skipping unusable EUNIS candidate %s", candidate.code)
+        on_error()
         return None
     try:
         area = _exact_intersection_area(polygon, candidate)

@@ -7,7 +7,6 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-import httpx
 from huggingface_hub import hf_hub_url
 from huggingface_hub.utils import build_hf_headers
 
@@ -15,7 +14,7 @@ from ._protocols import HubApi, RepoFileEntry
 from ._protocols import InventoryApi as _InventoryApi
 from ._protocols import StreamClient as _StreamClient
 from ._protocols import StreamResponse as _StreamResponse
-from .fileio import DOWNLOAD_TIMEOUT, write_chunks
+from .fileio import DOWNLOAD_TIMEOUT, download_client, write_chunks
 
 __all__ = [
     "DatasetSpec",
@@ -193,14 +192,8 @@ def download_to_temp(
     partial = destination.with_name(f"{destination.name}.part")
     try:
         if client is None:
-            with httpx.stream(
-                "GET",
-                url,
-                headers=headers,
-                follow_redirects=True,
-                timeout=DOWNLOAD_TIMEOUT,
-            ) as response:
-                written, expected = _write_response(response, partial)
+            with download_client() as owned_client:
+                written, expected = _download_with_client(owned_client, url, headers, partial)
         else:
             written, expected = _download_with_client(client, url, headers, partial)
         if expected is not None and written != int(expected):

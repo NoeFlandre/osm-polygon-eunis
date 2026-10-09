@@ -12,9 +12,14 @@ from typing import Any
 from . import __version__
 from ._protocols import HubApi, StreamClient
 from .cards import DatasetCardAccumulator
-from .domain import EunisResult
 from .options import ShardContext
-from .publish import ShardExpectation, parquet_signature, upload_replacement, upload_replacements
+from .publish import (
+    ShardExpectation,
+    parquet_signature,
+    software_source_commit,
+    upload_replacement,
+    upload_replacements,
+)
 from .reference_staging import _http_client
 from .release_plan import DatasetPlan, Progress, _cached_geometry_path, _sidecar_path
 from .sources import capture_revision, download_to_temp
@@ -224,12 +229,15 @@ def _input_identity(options: FinalizeOptions, plan: DatasetPlan) -> str:
 
     Committed shards are skipped on resume only when this identity is unchanged.
     It covers the pinned source, the reference config, the software version and
+    source commit (the same commit that publication records as provenance) and
     the content of every label sidecar, so a changed input never reuses stale
-    committed shards.
+    committed shards. Raises ValueError when the source commit is unknown, so
+    progress is never reused under an unverifiable identity.
     """
 
     payload = {
         "software": __version__,
+        "software_source_commit": software_source_commit(),
         "dataset": plan.spec.name,
         "source_repo": plan.spec.source_repo,
         "output_repo": plan.spec.output_repo,
@@ -328,7 +336,7 @@ def _enrich_geometry_shard(
     return (
         sidecar,
         local_output,
-        ShardExpectation(geometry_path, rows, _schema_signature(local_output)),
+        ShardExpectation(geometry_path, rows, parquet_signature(local_output)[1]),
     )
 
 
@@ -381,17 +389,17 @@ def _build_link_output(
     )
     local_link_output = options.local_root / f"{link_path.replace('/', '__')}.enriched.parquet"
     local_link_output.unlink(missing_ok=True)
-    link_rows = _enrich_link(
+    link_rows = enrich_link_shard(
         local_link_source,
         local_link_output,
-        labels,
+        labels_by_polygon_id=labels,
         batch_size=options.batch_size,
     )
     return _LinkOutput(
         link_path,
         local_link_source,
         local_link_output,
-        ShardExpectation(link_path, link_rows, _schema_signature(local_link_output)),
+        ShardExpectation(link_path, link_rows, parquet_signature(local_link_output)[1]),
     )
 
 
@@ -403,40 +411,12 @@ def _upload_file(
     parent_commit: str,
     commit_message: str | None = None,
 ) -> str:
-    if commit_message is None:
-        result = upload_replacement(
-            api,
-            target_repo,
-            path,
-            local_path,
-            parent_commit=parent_commit,
-        )
-    else:
-        result = upload_replacement(
-            api,
-            target_repo,
-            path,
-            local_path,
-            parent_commit=parent_commit,
-            commit_message=commit_message,
-        )
-    return _advance_commit(api, target_repo, result)
-
-
-def _schema_signature(path: Path) -> str:
-    return parquet_signature(path)[1]
-
-
-def _enrich_link(
-    source: Path,
-    destination: Path,
-    labels: Mapping[str, EunisResult],
-    *,
-    batch_size: int,
-) -> int:
-    return enrich_link_shard(
-        source,
-        destination,
-        labels_by_polygon_id=labels,
-        batch_size=batch_size,
+    result = upload_replacement(
+        api,
+        target_repo,
+        path,
+        local_path,
+        parent_commit=parent_commit,
+        commit_message=commit_message,
     )
+    return _advance_commit(api, target_repo, result)

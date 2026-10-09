@@ -189,6 +189,12 @@ def test_child_exit_124_is_not_marked_as_a_deadline(tmp_path: Path) -> None:
 def test_deadline_writes_a_distinguishing_stop_marker(tmp_path: Path) -> None:
     helper = Path(__file__).resolve().parents[2] / "scripts/grid5000/worker_deadline.py"
     stop_marker = tmp_path / "worker-stop-state"
+    child_started = tmp_path / "child-started"
+    child = (
+        "import os, pathlib, sys, time; "
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()), encoding='utf-8'); "
+        "time.sleep(30)"
+    )
     result = subprocess.run(  # noqa: S603
         [
             sys.executable,
@@ -196,6 +202,7 @@ def test_deadline_writes_a_distinguishing_stop_marker(tmp_path: Path) -> None:
             "--walltime",
             "0:01:00",
             "--started-at",
+            # About one second of runtime is left before the stop, enough for the child to start.
             str(time.time() - 28),
             "--stop-margin-seconds",
             "31",
@@ -206,7 +213,8 @@ def test_deadline_writes_a_distinguishing_stop_marker(tmp_path: Path) -> None:
             "--",
             sys.executable,
             "-c",
-            "import time; time.sleep(30)",
+            child,
+            str(child_started),
         ],
         capture_output=True,
         check=False,
@@ -215,6 +223,10 @@ def test_deadline_writes_a_distinguishing_stop_marker(tmp_path: Path) -> None:
 
     assert result.returncode == 124
     assert stop_marker.read_text(encoding="utf-8").strip() == "deadline"
+    # The child wrote its pid before sleeping, so it ran; the deadline then terminated it.
+    assert child_started.exists()
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(child_started.read_text(encoding="utf-8")), 0)
 
 
 def test_worker_deadline_returns_shell_status_for_external_sigterm(tmp_path: Path) -> None:

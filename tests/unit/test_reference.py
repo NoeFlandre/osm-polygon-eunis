@@ -13,7 +13,7 @@ import rasterio
 from pyproj import CRS, Transformer
 from rasterio.io import MemoryFile
 from rasterio.transform import from_origin
-from shapely.geometry import box
+from shapely.geometry import Polygon, box
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import transform as transform_geometry
 from shapely.wkb import dumps
@@ -431,6 +431,38 @@ def test_geopackage_bbox_touch_is_not_an_intersection(tmp_path: Path) -> None:
     assert result.is_empty
 
 
+def test_geopackage_repairs_invalid_reference_geometry(tmp_path: Path) -> None:
+    database = tmp_path / "habitats.gpkg"
+    bowtie = Polygon([(0, 0), (10, 0), (0, 10), (10, 10)])
+    _write_geopackage(database, (("R11", bowtie),))
+    reference = GeoPackageReference(database, {"R11": "steppe"}, source_version="EEA-test")
+
+    with reference:
+        result = reference.overlap(box(1, 0.1, 9, 1))
+
+    assert result.code == "R11"
+    assert result.overlap_percentage == 100.0
+    assert reference.intersection_errors == 0
+
+
+def test_geopackage_counts_and_logs_unrepairable_reference_geometry(
+    tmp_path: Path,
+    caplog,
+) -> None:
+    database = tmp_path / "habitats.gpkg"
+    collapsed = Polygon([(0, 0), (5, 5), (10, 10), (0, 0)])
+    assert not collapsed.is_valid
+    _write_geopackage(database, (("R11", collapsed),))
+    reference = GeoPackageReference(database, {"R11": "steppe"}, source_version="EEA-test")
+
+    with caplog.at_level(logging.WARNING, logger=geopackage_module.__name__), reference:
+        result = reference.overlap(box(1, 1, 9, 9))
+
+    assert result.is_empty
+    assert reference.intersection_errors == 1
+    assert "unrepairable EUNIS reference geometry for R11" in caplog.text
+
+
 def test_geopackage_geometry_header_round_trip() -> None:
     geometry = box(1, 2, 3, 4)
     blob = b"GP" + bytes((0, 1)) + struct.pack("<i", 3035) + dumps(geometry)
@@ -717,3 +749,34 @@ def test_square_grid_detection_rejects_rotated_and_stretched_transforms() -> Non
     assert not _is_square_north_up(Affine(10, 0, 0, 0, -20, 0))
     assert not _is_square_north_up(Affine(10, 1, 0, 0, -10, 0))
     assert not _is_square_north_up(Affine(10, 0, 0, 1, -10, 0))
+
+
+def test_raster_overlap_is_100_percent_for_an_all_100_grid_with_a_touching_hole(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "Prob_R11_5m.tif"
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        width=8,
+        height=8,
+        count=1,
+        dtype="uint8",
+        crs="EPSG:3035",
+        transform=from_origin(0, 40, 5, 5),
+        nodata=0,
+    ) as dataset:
+        dataset.write(np.full((8, 8), 100, dtype="uint8"), 1)
+    polygon = Polygon(
+        [(0, 0), (40, 0), (40, 40), (0, 40)],
+        [[(10, 10), (21, 21), (22, 15), (24, 40)]],
+    )
+    assert polygon.is_valid
+    reference = RasterReference((RasterLayer("R11", "Steppe", path, "EEA-test"),))
+
+    with reference:
+        result = reference.overlap(polygon)
+
+    assert result.code == "R11"
+    assert result.overlap_percentage == pytest.approx(100.0)

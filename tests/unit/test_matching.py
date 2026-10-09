@@ -192,6 +192,22 @@ def test_invalid_candidate_and_sub_unit_overlap_are_ignored() -> None:
     assert result.code == "R12"
 
 
+def test_unusable_candidate_is_reported_through_error_hook(caplog) -> None:
+    errors: list[str] = []
+    invalid = Polygon([(0, 0), (2, 2), (0, 2), (2, 0), (0, 0)])
+    with caplog.at_level(logging.WARNING):
+        result = choose_winner(
+            box(0, 0, 1, 1),
+            (OverlapCandidate("R11", "invalid", invalid),),
+            source_version="test",
+            on_error=lambda: errors.append("R11"),
+        )
+
+    assert result.is_empty
+    assert errors == ["R11"]
+    assert "skipping unusable EUNIS candidate R11" in caplog.messages
+
+
 def test_prefer_result_merges_reference_groups_by_percentage_then_code() -> None:
     first = choose_winner(
         box(0, 0, 10, 10),

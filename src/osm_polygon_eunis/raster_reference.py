@@ -38,6 +38,9 @@ logger = logging.getLogger(__name__)
 
 _LAYER_CODE = re.compile(r"^Prob_(?P<code>[A-Z][A-Z0-9.]+)_\d+m\.tif$")
 _DEFAULT_RASTER_TILE_CACHE_BYTES = 1536 * 1024 * 1024
+# GDAL's block cache per open raster reference, in MiB (``GDAL_CACHEMAX``).
+# Sized independently of ``_DEFAULT_RASTER_TILE_CACHE_BYTES`` above.
+_GDAL_CACHE_MAX_MB = 256
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,7 +152,7 @@ class RasterReference:
         if self._stack is not None:
             raise RuntimeError("raster reference is already open")
         stack = ExitStack()
-        stack.enter_context(rasterio.Env(GDAL_CACHEMAX=256))
+        stack.enter_context(rasterio.Env(GDAL_CACHEMAX=_GDAL_CACHE_MAX_MB))
         datasets: list[tuple[RasterLayer, rasterio.DatasetReader]] = []
         for layer in self._layers:
             dataset = stack.enter_context(rasterio.open(layer.path))
@@ -189,7 +192,7 @@ class RasterReference:
 
     def _overlap_closed(self, polygon: BaseGeometry) -> EunisResult:
         with ExitStack() as stack:
-            stack.enter_context(rasterio.Env(GDAL_CACHEMAX=256))
+            stack.enter_context(rasterio.Env(GDAL_CACHEMAX=_GDAL_CACHE_MAX_MB))
             datasets = self._open_datasets(stack)
             return self._overlap_open(polygon, tuple(datasets))
 

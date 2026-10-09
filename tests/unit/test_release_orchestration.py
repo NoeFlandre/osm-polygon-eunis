@@ -11,6 +11,7 @@ from osm_polygon_eunis import (
     card_publishing,
     geometry_workers,
     manifest_state,
+    publish,
     release_orchestration,
     release_plan,
     shard_processing,
@@ -370,12 +371,16 @@ def test_finalize_dataset_resumes_after_the_last_committed_group(
     assert all(sidecar.exists() for sidecar in (tmp_path / "sidecars").rglob("*.parquet"))
 
 
-@pytest.mark.parametrize("changed_input", ["sidecar", "reference", "software"])
+@pytest.mark.parametrize(
+    "changed_input",
+    ["sidecar", "reference", "software", "source_commit"],
+)
 def test_finalize_dataset_reprocesses_committed_shards_when_inputs_change(
     tmp_path: Path,
     monkeypatch,
     changed_input: str,
 ) -> None:
+    monkeypatch.setenv("EUNIS_SOURCE_COMMIT", "a" * 40)
     sources = {
         f"polygons/{name}.parquet": pa.table(
             {"polygon_id": [name], "geometry": ['{"type":"Point","coordinates":[0,0]}']}
@@ -464,11 +469,48 @@ def test_finalize_dataset_reprocesses_committed_shards_when_inputs_change(
     elif changed_input == "reference":
         reference_version = "EEA-v2"
     else:
-        monkeypatch.setattr(shard_processing, "__version__", "next-release")
+        _change_software_identity(monkeypatch, changed_input)
     run(reference_version)
 
     assert ("polygons/a.parquet", [expected_code]) in uploaded
     assert ("polygons/b.parquet", [expected_code]) in uploaded
+
+
+def _change_software_identity(monkeypatch, changed_input: str) -> None:
+    """Change one software identity while the package version and inputs stay put."""
+    if changed_input == "software":
+        monkeypatch.setattr(shard_processing, "__version__", "next-release")
+    else:
+        monkeypatch.setenv("EUNIS_SOURCE_COMMIT", "b" * 40)
+
+
+def test_finalize_dataset_refuses_to_resume_without_a_source_commit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    for name in ("EUNIS_SOURCE_COMMIT", "GRID5000_SOURCE_REVISION", "GITHUB_SHA"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(publish.shutil, "which", lambda _name: None)
+    plan = DatasetPlan(
+        DatasetSpec("website", "source", "target", "polygons/*.parquet"),
+        "source-revision",
+        ("polygons/a.parquet",),
+        ("polygons/a.parquet",),
+        (),
+    )
+    options = shard_processing.FinalizeOptions(
+        sidecar_root=tmp_path / "sidecars",
+        local_root=tmp_path / "final",
+        batch_size=10,
+        parent_commit="base",
+        progress=None,
+        card=DatasetCardAccumulator(),
+        source_cache_root=None,
+        http_client=cast(StreamClient, object()),
+    )
+
+    with pytest.raises(ValueError, match="source commit unavailable"):
+        shard_processing.finalize_dataset(cast(HubApi, object()), plan, options)
 
 
 def test_planning_manifest_and_shared_blobs_are_deterministic(monkeypatch) -> None:

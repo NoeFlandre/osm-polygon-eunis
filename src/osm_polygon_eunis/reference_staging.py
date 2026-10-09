@@ -9,11 +9,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.parse import unquote
 
-import httpx
-
 from ._protocols import StreamClient
 from .eea import EeaGroup, RemoteAsset
-from .fileio import DOWNLOAD_TIMEOUT
+from .fileio import download_client
 from .geopackage_reference import GeoPackageReference
 from .options import BatchLimits
 from .raster_reference import RasterLayer, RasterReference
@@ -71,7 +69,7 @@ def _http_client(client: StreamClient | None) -> Iterator[StreamClient]:
     if client is not None:
         yield client
         return
-    with httpx.Client(follow_redirects=True, timeout=DOWNLOAD_TIMEOUT) as owned_client:
+    with download_client() as owned_client:
         yield owned_client
 
 

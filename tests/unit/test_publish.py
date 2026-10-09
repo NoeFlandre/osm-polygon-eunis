@@ -115,13 +115,31 @@ def test_manifest_uses_git_commit_when_environment_is_empty(monkeypatch) -> None
     for name in ("EUNIS_SOURCE_COMMIT", "GRID5000_SOURCE_REVISION", "GITHUB_SHA"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(publish.shutil, "which", lambda _name: "/usr/bin/git")
-    monkeypatch.setattr(
-        publish.subprocess,
-        "run",
-        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=f"{source_commit}\n"),
-    )
+
+    def run_git(arguments, **_kwargs):
+        if tuple(arguments[1:]) == ("status", "--porcelain"):
+            return SimpleNamespace(returncode=0, stdout="")
+        return SimpleNamespace(returncode=0, stdout=f"{source_commit}\n")
+
+    monkeypatch.setattr(publish.subprocess, "run", run_git)
 
     assert publish._software_provenance()["commit"] == source_commit
+
+
+def test_manifest_rejects_dirty_git_checkout_when_falling_back_to_head(monkeypatch) -> None:
+    for name in ("EUNIS_SOURCE_COMMIT", "GRID5000_SOURCE_REVISION", "GITHUB_SHA"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(publish.shutil, "which", lambda _name: "/usr/bin/git")
+
+    def run_git(arguments, **_kwargs):
+        if tuple(arguments[1:]) == ("status", "--porcelain"):
+            return SimpleNamespace(returncode=0, stdout=" M src/osm_polygon_eunis/publish.py\n")
+        pytest.fail("a dirty checkout must be rejected before accepting HEAD")
+
+    monkeypatch.setattr(publish.subprocess, "run", run_git)
+
+    with pytest.raises(ValueError, match="source checkout is dirty"):
+        publish._software_provenance()
 
 
 @pytest.mark.parametrize("git_path", (None, "/usr/bin/git"), ids=("git-not-found", "git-failed"))

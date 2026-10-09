@@ -6,6 +6,7 @@ import httpx
 import pytest
 from huggingface_hub import HfApi
 
+from osm_polygon_eunis import sources
 from osm_polygon_eunis._protocols import HubApi
 from osm_polygon_eunis.fileio import DOWNLOAD_TIMEOUT
 from osm_polygon_eunis.sources import (
@@ -110,7 +111,7 @@ def test_download_to_temp_streams_and_verifies_length(tmp_path: Path, monkeypatc
             yield b"abc"
             yield b"def"
 
-    monkeypatch.setattr(httpx, "stream", lambda *_args, **_kwargs: FakeResponse())
+    monkeypatch.setattr(sources, "download_client", lambda: _ScriptedClient(FakeResponse()))
     local_path = download_to_temp(
         cast(HubApi, HfApi(token="hf-test")),
         "org/source",
@@ -141,7 +142,7 @@ def test_download_to_temp_rejects_wrong_length(tmp_path: Path, monkeypatch) -> N
         def iter_bytes(self, chunk_size: int):  # noqa: ARG002
             yield b"abc"
 
-    monkeypatch.setattr(httpx, "stream", lambda *_args, **_kwargs: FakeResponse())
+    monkeypatch.setattr(sources, "download_client", lambda: _ScriptedClient(FakeResponse()))
 
     with pytest.raises(ValueError, match="byte count"):
         download_to_temp(
@@ -227,9 +228,15 @@ class _ScriptedResponse:
 
 
 class _ScriptedClient:
-    def __init__(self, response: _ScriptedResponse) -> None:
+    def __init__(self, response: object) -> None:
         self.response = response
         self.timeouts: list[object] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
 
     def stream(self, *_args, timeout=None, **_kwargs):
         self.timeouts.append(timeout)
@@ -275,7 +282,7 @@ def test_download_removes_partial_file_when_stream_breaks(
     if use_shared_client:
         client = _ScriptedClient(response)
     else:
-        monkeypatch.setattr(httpx, "stream", lambda *_args, **_kwargs: response)
+        monkeypatch.setattr(sources, "download_client", lambda: _ScriptedClient(response))
         client = None
 
     with pytest.raises(httpx.ReadError):
@@ -292,7 +299,7 @@ def test_download_removes_partial_file_on_length_mismatch(
     if use_shared_client:
         client = _ScriptedClient(response)
     else:
-        monkeypatch.setattr(httpx, "stream", lambda *_args, **_kwargs: response)
+        monkeypatch.setattr(sources, "download_client", lambda: _ScriptedClient(response))
         client = None
 
     with pytest.raises(ValueError, match="byte count"):
@@ -302,14 +309,9 @@ def test_download_removes_partial_file_on_length_mismatch(
 
 
 def test_module_download_applies_bounded_timeout(tmp_path: Path, monkeypatch) -> None:
-    timeouts: list[object] = []
-
-    def fake_stream(*_args, timeout=None, **_kwargs):
-        timeouts.append(timeout)
-        return _ScriptedResponse([b"abc"], content_length="3")
-
-    monkeypatch.setattr(httpx, "stream", fake_stream)
+    client = _ScriptedClient(_ScriptedResponse([b"abc"], content_length="3"))
+    monkeypatch.setattr(sources, "download_client", lambda: client)
 
     _download(tmp_path)
 
-    assert timeouts == [DOWNLOAD_TIMEOUT]
+    assert client.timeouts == [DOWNLOAD_TIMEOUT]
