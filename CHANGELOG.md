@@ -16,5 +16,8 @@ This file contains the release notes for this project. The version numbers are i
 - Repair invalid EUNIS reference geometries with `make_valid`. Log and count
   the reference geometries that remain unusable as intersection errors. Bump
   the overlap kernel version, which invalidates resumable sidecars.
-- Resume finalization only when the reference, sidecars, software version and
-  source revision are unchanged. A changed input now re-publishes every shard.
+- Resume finalization only when the reference, sidecars, software version,
+  software source commit and source revision are unchanged. A changed input now
+  re-publishes every shard. Progress files written before this change carry no
+  source commit, so the first run after upgrading re-publishes every shard.
+  A run without a resolvable source commit fails instead of resuming.

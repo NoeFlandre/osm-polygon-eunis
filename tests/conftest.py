@@ -45,6 +45,13 @@ settings.register_profile(
 settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "deterministic"))
 
 
+@pytest.fixture(autouse=True)
+def pin_test_source_commit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep output provenance deterministic when tests run from a dirty worktree."""
+
+    monkeypatch.setenv("EUNIS_SOURCE_COMMIT", "1" * 40)
+
+
 def write_single_pixel_raster(
     path: Path,
     polygon_3035: BaseGeometry,
