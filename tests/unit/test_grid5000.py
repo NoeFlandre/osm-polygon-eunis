@@ -7,7 +7,7 @@ from typing import NotRequired, TypedDict, Unpack
 
 import pytest
 
-from osm_polygon_eunis import grid5000
+from osm_polygon_eunis import grid5000, grid5000_oar, grid5000_policy
 from osm_polygon_eunis.grid5000 import (
     Grid5000Config,
     Grid5000Job,
@@ -200,9 +200,9 @@ def test_job_id_parser_accepts_oar_output_and_rejects_ambiguous_text() -> None:
 
 
 def test_all_site_inventory_script_writes_json_without_print() -> None:
-    assert "sys.stdout.write(" in grid5000._ACTIVE_EUNIS_JOBS_SCRIPT
-    assert "json.dumps(" in grid5000._ACTIVE_EUNIS_JOBS_SCRIPT
-    assert "print(" not in grid5000._ACTIVE_EUNIS_JOBS_SCRIPT
+    assert "sys.stdout.write(" in grid5000_policy._ACTIVE_EUNIS_JOBS_SCRIPT
+    assert "json.dumps(" in grid5000_policy._ACTIVE_EUNIS_JOBS_SCRIPT
+    assert "print(" not in grid5000_policy._ACTIVE_EUNIS_JOBS_SCRIPT
 
 
 @pytest.mark.parametrize(
@@ -215,7 +215,7 @@ def test_all_site_inventory_script_writes_json_without_print() -> None:
     ],
 )
 def test_job_status_state_classifies_oar_output(output: str, state: str) -> None:
-    assert grid5000._job_status_state(output) == state
+    assert grid5000_oar.job_status_state(output) == state
 
 
 def test_live_submission_state_path_is_required_only_for_live_jobs() -> None:
@@ -596,7 +596,7 @@ def test_submit_fails_closed_when_exclusion_scope_does_not_match_request(tmp_pat
 
 
 def test_parse_active_eunis_jobs_report_returns_validated_job_lists() -> None:
-    parse_report = grid5000._parse_active_eunis_jobs_report
+    parse_report = grid5000_policy._parse_active_eunis_jobs_report
 
     active = [{"site": "nancy", "job_id": "6942984", "state": "running"}]
     errors = [{"site": "bordeaux", "error": "unreachable"}]
@@ -616,7 +616,7 @@ def test_parse_active_eunis_jobs_report_returns_validated_job_lists() -> None:
     ],
 )
 def test_parse_active_eunis_jobs_report_rejects_malformed_lists(output: str) -> None:
-    parse_report = grid5000._parse_active_eunis_jobs_report
+    parse_report = grid5000_policy._parse_active_eunis_jobs_report
 
     with pytest.raises(TypeError, match="cannot verify active EUNIS jobs"):
         parse_report(output)
@@ -761,7 +761,7 @@ def test_status_error_output_preserves_both_captured_streams() -> None:
         stderr="stderr detail",
     )
 
-    assert grid5000._status_error_output(error) == "stdout detail\nstderr detail"
+    assert grid5000_oar.status_error_output(error) == "stdout detail\nstderr detail"
 
 
 def test_submit_rejects_corrupt_or_incomplete_state(tmp_path: Path) -> None:
@@ -869,10 +869,10 @@ def test_job_status_state_reads_oar_table_state_column(letter: str, state: str) 
         f"482097     osm-polygon-eu nflandre       2026-10-01 23:24:32 {letter} default\n"
     )
 
-    assert grid5000._job_status_state(output) == state
+    assert grid5000_oar.job_status_state(output) == state
 
 
 def test_job_status_state_ignores_unknown_table_state_letters() -> None:
     output = "482097     osm-polygon-eu nflandre       2026-10-01 23:24:32 Z default\n"
 
-    assert grid5000._job_status_state(output) == "unknown"
+    assert grid5000_oar.job_status_state(output) == "unknown"
