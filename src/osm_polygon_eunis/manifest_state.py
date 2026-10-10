@@ -18,11 +18,11 @@ from .publish import (
     ShardExpectation,
     VerificationError,
     VerificationReceipt,
-    _software_provenance,
+    software_provenance,
     verify_dataset,
 )
 from .reference_staging import (
-    _asset_key,
+    asset_key,
 )
 from .release_plan import (
     DatasetPlan,
@@ -38,14 +38,14 @@ from .sources import (
 
 
 @dataclass(frozen=True, slots=True)
-class _ExistingManifest:
+class ExistingManifest:
     """A target manifest and the immutable target revision that contains it."""
 
     revision: str
     manifest: Mapping[str, object]
 
 
-def _reference_manifest(
+def reference_manifest(
     groups: tuple[EeaGroup, ...],
     checksums: Mapping[str, str],
     *,
@@ -54,6 +54,7 @@ def _reference_manifest(
     threshold: int,
     config: Mapping[str, object],
 ) -> dict[str, object]:
+    """Describe the reference assets and their checksums for the release manifest."""
     assets: list[dict[str, object]] = []
     for group in groups:
         group_assets = [*group.raster_assets]
@@ -68,7 +69,7 @@ def _reference_manifest(
                 "etag": asset.etag,
                 "code": asset.code,
                 "name": asset.name,
-                "sha256": checksums.get(_asset_key(group, asset)),
+                "sha256": checksums.get(asset_key(group, asset)),
             }
             for asset in group_assets
         )
@@ -116,7 +117,7 @@ def _manifest_matches_inputs(
             manifest.get("target_repo") == plan.spec.output_repo,
             manifest.get("source_revision") == plan.source_revision,
             manifest.get("source_paths") == list(plan.source_files),
-            manifest.get("software") == _software_provenance(),
+            manifest.get("software") == software_provenance(),
             _reference_identity(_mapping_field(manifest, "reference"))
             == _reference_identity(reference),
         )
@@ -133,7 +134,7 @@ def _load_existing_manifest(
     plan: DatasetPlan,
     directory: Path,
     client: StreamClient,
-) -> _ExistingManifest | None:
+) -> ExistingManifest | None:
     """Load a tiny target manifest without using the persistent Hub cache."""
 
     try:
@@ -157,7 +158,7 @@ def _load_existing_manifest(
         local.unlink(missing_ok=True)
     if not isinstance(payload, Mapping):
         return None
-    return _ExistingManifest(target_revision, payload)
+    return ExistingManifest(target_revision, payload)
 
 
 def _manifest_expectations(manifest: Mapping[str, object]) -> tuple[ShardExpectation, ...] | None:
@@ -242,21 +243,22 @@ def _required_no_op_parts(
     return expectations, artifacts, changed_paths, added_paths
 
 
-def _verify_no_op_dataset(
+def verify_no_op_dataset(
     api: HubApi,
     plan: DatasetPlan,
-    existing: _ExistingManifest,
+    existing: ExistingManifest,
     *,
     workdir: Path,
     client: StreamClient,
 ) -> DatasetReceipt:
+    """Verify an existing dataset manifest and return the receipt of a no-op release."""
     manifest = existing.manifest
     expectations, artifacts, changed_paths, added_paths = _required_no_op_parts(manifest)
-    shared_blobs = _shared_blobs(api, plan, set(changed_paths))
-    verification = _verify_final_dataset(
+    shared_blobs = collect_shared_blobs(api, plan, set(changed_paths))
+    verification = verify_final_dataset(
         api,
         plan,
-        options=_FinalDatasetVerificationOptions(
+        options=FinalDatasetVerificationOptions(
             expectations=expectations,
             added_paths=tuple(added_paths),
             expected_shared_blobs=shared_blobs,
@@ -269,28 +271,30 @@ def _verify_no_op_dataset(
     return DatasetReceipt(plan, expectations, verification, no_op=True)
 
 
-def _load_existing_manifests(
+def load_existing_manifests(
     api: HubApi,
     plans: tuple[DatasetPlan, ...],
     directory: Path,
     client: StreamClient,
-) -> tuple[_ExistingManifest | None, ...]:
+) -> tuple[ExistingManifest | None, ...]:
+    """Load each plan's existing dataset manifest, or None where there is none."""
     return tuple(_load_existing_manifest(api, plan, directory, client) for plan in plans)
 
 
 def _matches_existing_manifest(
     plan: DatasetPlan,
-    existing: _ExistingManifest | None,
+    existing: ExistingManifest | None,
     reference: Mapping[str, object],
 ) -> bool:
     return existing is not None and _manifest_matches_inputs(plan, existing.manifest, reference)
 
 
-def _compatible_manifests(
+def compatible_manifests(
     plans: tuple[DatasetPlan, ...],
-    existing: tuple[_ExistingManifest | None, ...],
+    existing: tuple[ExistingManifest | None, ...],
     reference: Mapping[str, object],
 ) -> bool:
+    """Return whether every existing manifest matches its plan and the reference."""
     return all(
         _matches_existing_manifest(plan, item, reference)
         for plan, item in zip(plans, existing, strict=True)
@@ -300,16 +304,16 @@ def _compatible_manifests(
 def _no_op_receipts(
     api: HubApi,
     plans: tuple[DatasetPlan, ...],
-    existing: tuple[_ExistingManifest | None, ...],
+    existing: tuple[ExistingManifest | None, ...],
     *,
     workdir: Path,
     client: StreamClient,
 ) -> tuple[DatasetReceipt, ...]:
     return tuple(
-        _verify_no_op_dataset(
+        verify_no_op_dataset(
             api,
             plan,
-            cast(_ExistingManifest, item),
+            cast(ExistingManifest, item),
             workdir=workdir,
             client=client,
         )
@@ -317,7 +321,7 @@ def _no_op_receipts(
     )
 
 
-def _try_no_op_release(
+def try_no_op_release(
     api: HubApi,
     plans: tuple[DatasetPlan, ...],
     reference: Mapping[str, object],
@@ -326,8 +330,9 @@ def _try_no_op_release(
     client: StreamClient,
     progress: Progress | None,
 ) -> ReleaseReceipt | None:
-    existing = _load_existing_manifests(api, plans, workdir / "noop", client)
-    if not _compatible_manifests(plans, existing, reference):
+    """Return the release receipt when every dataset is unchanged, else None."""
+    existing = load_existing_manifests(api, plans, workdir / "noop", client)
+    if not compatible_manifests(plans, existing, reference):
         return None
     receipts = _no_op_receipts(api, plans, existing, workdir=workdir, client=client)
     if progress is not None:
@@ -338,7 +343,9 @@ def _try_no_op_release(
 
 
 @dataclass(frozen=True, slots=True)
-class _FinalDatasetVerificationOptions:
+class FinalDatasetVerificationOptions:
+    """Expectations used to verify a dataset after it is published."""
+
     expectations: tuple[ShardExpectation, ...]
     added_paths: tuple[str, ...]
     expected_shared_blobs: Mapping[str, str]
@@ -348,11 +355,12 @@ class _FinalDatasetVerificationOptions:
     http_client: StreamClient
 
 
-def _verify_final_dataset(
+def verify_final_dataset(
     api: HubApi,
     plan: DatasetPlan,
-    options: _FinalDatasetVerificationOptions,
+    options: FinalDatasetVerificationOptions,
 ) -> VerificationReceipt:
+    """Verify a published dataset against its finalization expectations."""
     return verify_dataset(
         api,
         plan.spec.output_repo,
@@ -372,11 +380,12 @@ def _verify_final_dataset(
     )
 
 
-def _shared_blobs(
+def collect_shared_blobs(
     api: HubApi,
     plan: DatasetPlan,
     changed_paths: set[str],
 ) -> dict[str, str]:
+    """Map the source files this release leaves unchanged to their blob ids."""
     return {
         entry.path: blob_id
         for entry in list_repo_files(api, plan.spec.source_repo, plan.source_revision)

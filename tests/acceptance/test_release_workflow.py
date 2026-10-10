@@ -85,7 +85,7 @@ def _reference_for(config: Path) -> dict[str, object]:
 def _manifest_for(plan: DatasetPlan, reference: dict[str, object]) -> dict[str, object]:
     return {
         "manifest_version": manifest_state.MANIFEST_VERSION,
-        "software": manifest_state._software_provenance(),
+        "software": manifest_state.software_provenance(),
         "source_repo": plan.spec.source_repo,
         "target_repo": plan.spec.output_repo,
         "source_revision": plan.source_revision,
@@ -129,20 +129,20 @@ def _prepare_fake_release(
     monkeypatch.setattr(release_orchestration, "resolve_config_data", lambda _config: ())
     monkeypatch.setattr(release_orchestration, "_duplicate_outputs", lambda *_args: None)
     monkeypatch.setattr(
-        release_orchestration, "_process_reference_groups", lambda *_args, **_kwargs: None
+        release_orchestration, "process_reference_groups", lambda *_args, **_kwargs: None
     )
     monkeypatch.setattr(
         manifest_state,
         "_load_existing_manifest",
         lambda *_args: (
-            manifest_state._ExistingManifest("target-revision", hub.current_manifest)
+            manifest_state.ExistingManifest("target-revision", hub.current_manifest)
             if hub.current_manifest is not None
             else None
         ),
     )
     monkeypatch.setattr(
         manifest_state,
-        "_verify_no_op_dataset",
+        "verify_no_op_dataset",
         lambda _api, selected_plan, existing, **_kwargs: _receipt(
             selected_plan, cast(dict[str, object], existing.manifest["reference"]), no_op=True
         ),
@@ -160,7 +160,7 @@ def _prepare_fake_release(
         hub.current_manifest = _manifest_for(selected_plan, reference)
         return _receipt(selected_plan, reference, no_op=False)
 
-    monkeypatch.setattr(release_orchestration, "_finalize_plan", fake_finalize)
+    monkeypatch.setattr(release_orchestration, "finalize_plan", fake_finalize)
     state.update(
         hub=hub,
         plan=plan,

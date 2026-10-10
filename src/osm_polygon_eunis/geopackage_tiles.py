@@ -17,7 +17,7 @@ from shapely.geometry import box
 from shapely.geometry.base import BaseGeometry
 
 from .domain import EPSG_LAEA_EUROPE, SchemaError
-from .geopackage_sql import _sql_identifier
+from .geopackage_sql import sql_identifier
 from .grid_overlap import WeightedCells, band_row_ranges, weighted_cells
 
 _GEOPACKAGE_TILE_CACHE_SIZE = 4096
@@ -28,7 +28,9 @@ _TileMetadata = tuple[str, int, float, float, float, float, int, int, int, int, 
 
 
 @dataclass(frozen=True, slots=True)
-class _TileLayer:
+class TileLayer:
+    """Tile-matrix geometry of one GeoPackage tile layer."""
+
     table: str
     min_x: float
     min_y: float
@@ -82,13 +84,15 @@ def _validate_tile_dimensions(
         raise ValueError(f"GeoPackage tile layer {table} has invalid dimensions")
 
 
-class _GeoPackageTileMethods:
+class GeoPackageTileMethods:
+    """Tile-cache lookups shared by GeoPackage reference readers."""
+
     _labels: dict[str, str]
     _threshold: int
-    _tile_layers: tuple[_TileLayer, ...]
+    _tile_layers: tuple[TileLayer, ...]
     _tile_cache: OrderedDict[tuple[str, int, int], np.ndarray | None]
 
-    def _discover_tile_layers(self, connection: sqlite3.Connection) -> tuple[_TileLayer, ...]:
+    def _discover_tile_layers(self, connection: sqlite3.Connection) -> tuple[TileLayer, ...]:
         rows = self._tile_rows(connection)
         return tuple(self._tile_layer(row) for row in rows)
 
@@ -121,11 +125,11 @@ class _GeoPackageTileMethods:
                 return []
             raise ValueError("not a readable GeoPackage") from error
 
-    def _tile_layer(self, row: tuple[object, ...]) -> _TileLayer:
+    def _tile_layer(self, row: tuple[object, ...]) -> TileLayer:
         values = _tile_values(row)
         table = values[0]
         self._validate_tile_values(values)
-        return _TileLayer(
+        return TileLayer(
             table,
             float(values[2]),
             float(values[3]),
@@ -165,7 +169,7 @@ class _GeoPackageTileMethods:
     def _tile_layer_area(
         self,
         connection: sqlite3.Connection,
-        layer: _TileLayer,
+        layer: TileLayer,
         polygon: BaseGeometry,
         bands: dict[tuple[object, ...], list[WeightedCells]],
     ) -> float:
@@ -201,7 +205,7 @@ class _GeoPackageTileMethods:
     def _valid_cell_area(
         self,
         connection: sqlite3.Connection,
-        layer: _TileLayer,
+        layer: TileLayer,
         cells: WeightedCells,
     ) -> float:
         if not len(cells.rows):
@@ -224,7 +228,7 @@ class _GeoPackageTileMethods:
     def _tile_mask(
         self,
         connection: sqlite3.Connection,
-        layer: _TileLayer,
+        layer: TileLayer,
         tile_column: int,
         tile_row: int,
     ) -> np.ndarray | None:
@@ -242,13 +246,13 @@ class _GeoPackageTileMethods:
     @staticmethod
     def _tile_blob(
         connection: sqlite3.Connection,
-        layer: _TileLayer,
+        layer: TileLayer,
         tile_column: int,
         tile_row: int,
     ) -> bytes | memoryview | None:
-        table = _sql_identifier(layer.table)
+        table = sql_identifier(layer.table)
         row = connection.execute(
-            # Identifier escaped by _sql_identifier; all values are bound parameters.
+            # Identifier escaped by sql_identifier; all values are bound parameters.
             f"SELECT tile_data FROM {table} "  # noqa: S608
             "WHERE zoom_level = ? AND tile_column = ? AND tile_row = ?",
             (layer.zoom_level, tile_column, tile_row),

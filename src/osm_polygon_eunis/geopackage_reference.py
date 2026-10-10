@@ -17,8 +17,8 @@ from shapely.wkb import loads as load_wkb
 
 from .domain import EPSG_LAEA_EUROPE, EunisResult, OverlapCandidate, SchemaError
 from .geometry import is_usable, repair_polygonal
-from .geopackage_sql import _sql_identifier
-from .geopackage_tiles import _GeoPackageTileMethods, _TileLayer
+from .geopackage_sql import sql_identifier
+from .geopackage_tiles import GeoPackageTileMethods, TileLayer
 from .grid_overlap import WeightedCells
 from .matching import choose_winner
 
@@ -79,7 +79,7 @@ def _envelope_size(envelope_type: int) -> int:
         raise ValueError("unsupported GeoPackage envelope type") from error
 
 
-class GeoPackageReference(_GeoPackageTileMethods):
+class GeoPackageReference(GeoPackageTileMethods):
     """Query official EPSG:3035 GeoPackage habitat polygons by RTree bounds."""
 
     _CODE_COLUMNS: ClassVar[frozenset[str]] = frozenset(
@@ -116,7 +116,7 @@ class GeoPackageReference(_GeoPackageTileMethods):
         self._threshold = threshold
         self._connection: sqlite3.Connection | None = None
         self._layers: tuple[_VectorLayer, ...] = ()
-        self._tile_layers: tuple[_TileLayer, ...] = ()
+        self._tile_layers: tuple[TileLayer, ...] = ()
         self._tile_cache: OrderedDict[tuple[str, int, int], BaseGeometry | None] = OrderedDict()
 
     def __enter__(self) -> GeoPackageReference:
@@ -294,7 +294,7 @@ class GeoPackageReference(_GeoPackageTileMethods):
         connection: sqlite3.Connection,
         table: str,
     ) -> tuple[str, str]:
-        columns = connection.execute(f"PRAGMA table_info({_sql_identifier(table)})").fetchall()
+        columns = connection.execute(f"PRAGMA table_info({sql_identifier(table)})").fetchall()
         if not columns:
             raise ValueError(f"GeoPackage geometry table is missing: {table}")
         primary_key = cast(str, next((column[1] for column in columns if column[5]), "rowid"))
@@ -328,15 +328,15 @@ class GeoPackageReference(_GeoPackageTileMethods):
         layer: _VectorLayer,
         polygon: BaseGeometry,
     ) -> list[tuple[object, object]]:
-        table = _sql_identifier(layer.table)
-        geometry = _sql_identifier(layer.geometry_column)
-        code = _sql_identifier(layer.code_column or "")
-        rtree = _sql_identifier(layer.rtree_table)
+        table = sql_identifier(layer.table)
+        geometry = sql_identifier(layer.geometry_column)
+        code = sql_identifier(layer.code_column or "")
+        rtree = sql_identifier(layer.rtree_table)
         key = (
-            "t.rowid" if layer.primary_key == "rowid" else f"t.{_sql_identifier(layer.primary_key)}"
+            "t.rowid" if layer.primary_key == "rowid" else f"t.{sql_identifier(layer.primary_key)}"
         )
         query = (
-            # Identifiers escaped by _sql_identifier; all values are bound parameters.
+            # Identifiers escaped by sql_identifier; all values are bound parameters.
             f"SELECT t.{code}, t.{geometry} FROM {table} AS t "  # noqa: S608
             f"JOIN {rtree} AS r ON r.id = {key} "
             "WHERE r.maxx > ? AND r.minx < ? AND r.maxy > ? AND r.miny < ?"

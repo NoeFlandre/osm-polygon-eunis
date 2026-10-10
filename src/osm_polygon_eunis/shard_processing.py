@@ -20,8 +20,8 @@ from .publish import (
     upload_replacement,
     upload_replacements,
 )
-from .reference_staging import _http_client
-from .release_plan import DatasetPlan, Progress, _cached_geometry_path, _sidecar_path
+from .reference_staging import reusable_http_client
+from .release_plan import DatasetPlan, Progress, cached_geometry_path, sidecar_path
 from .sources import capture_revision, download_to_temp
 from .transform import (
     SidecarAppendOptions,
@@ -62,7 +62,8 @@ def _commit_id(result: Any) -> str | None:
     return None
 
 
-def _advance_commit(api: HubApi, target_repo: str, result: Any) -> str:
+def advance_commit(api: HubApi, target_repo: str, result: Any) -> str:
+    """Return the commit id from an upload result, else the repo's current revision."""
     return _commit_id(result) or capture_revision(api, target_repo)
 
 
@@ -98,7 +99,7 @@ def finalize_dataset(
     the last committed group instead of repeating (or failing on) earlier shards.
     """
 
-    with _http_client(options.http_client) as reusable_client:
+    with reusable_http_client(options.http_client) as reusable_client:
         return _finalize_dataset_with_client(
             api,
             plan,
@@ -202,7 +203,7 @@ def _commit_pending(
         pending.files,
         parent_commit=parent_commit,
     )
-    current_commit = _advance_commit(api, plan.spec.output_repo, result)
+    current_commit = advance_commit(api, plan.spec.output_repo, result)
     options.card.merge(pending.card)
     expectations.extend(pending.expectations)
     _save_progress(options, plan, pending.identity, expectations)
@@ -244,7 +245,7 @@ def _input_identity(options: FinalizeOptions, plan: DatasetPlan) -> str:
         "source_revision": plan.source_revision,
         "reference": options.reference_info,
         "sidecars": {
-            path: _file_digest(_sidecar_path(options.sidecar_root, plan.spec, path))
+            path: _file_digest(sidecar_path(options.sidecar_root, plan.spec, path))
             for path in plan.geometry_paths
         },
     }
@@ -318,7 +319,7 @@ def _enrich_geometry_shard(
 ) -> tuple[Path, Path, ShardExpectation]:
     plan = context.plan
     options = context.options
-    sidecar = _sidecar_path(options.sidecar_root, plan.spec, geometry_path)
+    sidecar = sidecar_path(options.sidecar_root, plan.spec, geometry_path)
     if not sidecar.is_file():
         raise FileNotFoundError(f"missing completed label sidecar: {sidecar}")
     local_output = options.local_root / f"{geometry_path.replace('/', '__')}.enriched.parquet"
@@ -350,7 +351,7 @@ def _final_source(
     http_client: StreamClient,
 ) -> tuple[Path, bool]:
     if source_cache_root is not None:
-        cached = _cached_geometry_path(source_cache_root, plan, geometry_path)
+        cached = cached_geometry_path(source_cache_root, plan, geometry_path)
         if cached.is_file():
             return cached, True
     return (
@@ -403,7 +404,7 @@ def _build_link_output(
     )
 
 
-def _upload_file(
+def upload_file(
     api: HubApi,
     target_repo: str,
     path: str,
@@ -411,6 +412,7 @@ def _upload_file(
     parent_commit: str,
     commit_message: str | None = None,
 ) -> str:
+    """Upload one file on top of a parent commit and return the new commit id."""
     result = upload_replacement(
         api,
         target_repo,
@@ -419,4 +421,4 @@ def _upload_file(
         parent_commit=parent_commit,
         commit_message=commit_message,
     )
-    return _advance_commit(api, target_repo, result)
+    return advance_commit(api, target_repo, result)

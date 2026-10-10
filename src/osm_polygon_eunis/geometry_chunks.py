@@ -14,7 +14,7 @@ _DEFAULT_BATCH_LIMITS = BatchLimits()
 
 
 @dataclass(frozen=True, slots=True)
-class _GeometryChunk:
+class GeometryChunk:
     """Pickleable work unit for bounded source micro-batches."""
 
     groups: tuple[EeaGroup, ...]
@@ -31,7 +31,9 @@ class _GeometryChunk:
 
 
 @dataclass(frozen=True, slots=True)
-class _GeometryRunOptions:
+class GeometryRunOptions:
+    """Inputs shared by the geometry workers of one release run."""
+
     api: HubApi
     plans: tuple[DatasetPlan, ...]
     groups: tuple[EeaGroup, ...]
@@ -45,22 +47,24 @@ class _GeometryRunOptions:
     http_client: StreamClient
 
 
-def _geometry_jobs(plans: tuple[DatasetPlan, ...]) -> tuple[tuple[str, str], ...]:
+def plan_geometry_jobs(plans: tuple[DatasetPlan, ...]) -> tuple[tuple[str, str], ...]:
+    """Return the (dataset name, geometry path) job of every shard in the plans."""
     return tuple(
         (plan.spec.name, source_path) for plan in plans for source_path in plan.geometry_paths
     )
 
 
-def _geometry_work_units(
-    options: _GeometryRunOptions,
+def geometry_work_units(
+    options: GeometryRunOptions,
     jobs: tuple[tuple[str, str], ...],
     reference_directory: Path,
     reference_signature: str,
-) -> tuple[_GeometryChunk, ...]:
+) -> tuple[GeometryChunk, ...]:
+    """Build the geometry work chunks for a run, one per micro-batch of jobs."""
     endpoint = str(getattr(options.api, "endpoint", None) or "https://huggingface.co")
     token = getattr(options.api, "token", None)
     return tuple(
-        _GeometryChunk(
+        GeometryChunk(
             groups=options.groups,
             reference_directory=reference_directory,
             plans=options.plans,
@@ -89,9 +93,10 @@ def _geometry_chunks(
     return tuple(jobs[start : start + chunk_size] for start in range(0, len(jobs), chunk_size))
 
 
-def _geometry_micro_batches(
+def geometry_micro_batches(
     jobs: tuple[tuple[str, str], ...],
     limits: BatchLimits = _DEFAULT_BATCH_LIMITS,
 ) -> Iterator[tuple[tuple[str, str], ...]]:
+    """Split geometry jobs into micro-batches of retained source shards."""
     for start in range(0, len(jobs), limits.retained_source_shards_per_worker):
         yield jobs[start : start + limits.retained_source_shards_per_worker]

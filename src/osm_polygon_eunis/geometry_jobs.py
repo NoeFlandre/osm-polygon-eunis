@@ -17,10 +17,10 @@ def process_geometry_paths(
 ) -> None:
     """Merge one reference group into every geometry shard's compact sidecar."""
 
-    with reference_staging._http_client(options.http_client) as reusable_client:
+    with reference_staging.reusable_http_client(options.http_client) as reusable_client:
         options.source_root.mkdir(parents=True, exist_ok=True)
         for source_path in plan.geometry_paths:
-            geometry_workers._process_geometry_path(
+            geometry_workers.process_geometry_path(
                 api,
                 plan,
                 source_path,
@@ -37,36 +37,37 @@ def process_geometry_paths(
             )
 
 
-def _process_reference_groups(options: geometry_chunks._GeometryRunOptions) -> None:
-    jobs = geometry_chunks._geometry_jobs(options.plans)
+def process_reference_groups(options: geometry_chunks.GeometryRunOptions) -> None:
+    """Stage the EEA reference groups and run the geometry workers for these jobs."""
+    jobs = geometry_chunks.plan_geometry_jobs(options.plans)
     if not jobs:
         return
     reference_checksums: dict[str, str] = {}
-    with reference_staging._stage_reference_groups(
+    with reference_staging.stage_reference_groups(
         options.groups,
         workdir=options.workdir,
         checksums=reference_checksums,
         client=options.http_client,
     ) as reference_directory:
         options.checksums.update(reference_checksums)
-        reference_signature = geometry_checkpoints._reference_signature(
+        reference_signature = geometry_checkpoints.build_reference_signature(
             reference_checksums, options.threshold, options.groups
         )
         reference_batch_ids = tuple(
             start_index
-            for start_index, _ in reference_staging._indexed_reference_group_batches(
+            for start_index, _ in reference_staging.indexed_reference_group_batches(
                 options.groups, limits=options.limits
             )
         )
-        work = geometry_chunks._geometry_work_units(
+        work = geometry_chunks.geometry_work_units(
             options,
             jobs,
             reference_directory,
             reference_signature,
         )
-        geometry_workers._log_geometry_run_plan(
+        geometry_workers.log_geometry_run_plan(
             options.plans, reference_batch_ids, reference_signature
         )
-        geometry_workers._run_geometry_workers(
+        geometry_workers.run_geometry_workers(
             work, options.progress, max_workers=options.limits.workers
         )

@@ -482,7 +482,7 @@ def test_geopackage_tile_reference_uses_exact_positive_pixels(tmp_path: Path) ->
 
 
 def test_geopackage_tile_lookup_returns_nothing_for_a_missing_tile() -> None:
-    layer = tiles_module._TileLayer(
+    layer = tiles_module.TileLayer(
         "R11",
         0.0,
         0.0,
@@ -548,9 +548,9 @@ def test_geopackage_validation_and_geometry_headers() -> None:
     with pytest.raises(ValueError, match="envelope"):
         GeoPackageReference.decode_geometry(b"GP" + bytes((1, 15)) + struct.pack("<i", 3035) + b"")
     with pytest.raises(ValueError, match="identifier"):
-        geopackage_module._sql_identifier("")
+        geopackage_module.sql_identifier("")
     with pytest.raises(ValueError, match="identifier"):
-        geopackage_module._sql_identifier("bad\x00name")
+        geopackage_module.sql_identifier("bad\x00name")
     with pytest.raises(ValueError, match="EPSG:3035"):
         geopackage_module._validate_vector_header("habitats", "geom", 4326)
     with pytest.raises(ValueError, match="metadata"):
@@ -616,7 +616,7 @@ def test_geopackage_tile_cache_and_metadata_guards(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="invalid dimensions"):
         tiles_module._validate_tile_dimensions("R11", 0, 1, 1, 1)
 
-    layer = tiles_module._TileLayer("R11", 0, 0, 20, 20, 1, 1, 2, 2, 10.0, 10.0, 0)
+    layer = tiles_module.TileLayer("R11", 0, 0, 20, 20, 1, 1, 2, 2, 10.0, 10.0, 0)
     with sqlite3.connect(":memory:") as connection:
         connection.execute(
             "CREATE TABLE R11 (zoom_level INTEGER, tile_column INTEGER, "

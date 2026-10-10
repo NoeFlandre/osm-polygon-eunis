@@ -15,7 +15,7 @@ from .fileio import download_client
 from .geopackage_reference import GeoPackageReference
 from .options import BatchLimits
 from .raster_reference import RasterLayer, RasterReference
-from .reference_cache import _stage_or_verify_asset
+from .reference_cache import stage_or_verify_asset
 from .transform import (
     OverlapReference,
 )
@@ -35,7 +35,8 @@ def _asset_filename(asset: RemoteAsset) -> str:
     return f"{stem}{suffix}"
 
 
-def _asset_key(group: EeaGroup, asset: RemoteAsset) -> str:
+def asset_key(group: EeaGroup, asset: RemoteAsset) -> str:
+    """Return the cache key that identifies one remote asset of an EEA group."""
     return f"{group.record_id}:{asset.path}"
 
 
@@ -52,7 +53,7 @@ def open_reference_group(
 
     directory.mkdir(parents=True, exist_ok=True)
     with (
-        _http_client(client) as reusable_client,
+        reusable_http_client(client) as reusable_client,
         _reference_group_with_client(
             reusable_client,
             group,
@@ -65,7 +66,8 @@ def open_reference_group(
 
 
 @contextmanager
-def _http_client(client: StreamClient | None) -> Iterator[StreamClient]:
+def reusable_http_client(client: StreamClient | None) -> Iterator[StreamClient]:
+    """Yield the given HTTP client, or a downloaded one when none is given."""
     if client is not None:
         yield client
         return
@@ -100,7 +102,7 @@ def _stage_reference_group(
     directory.mkdir(parents=True, exist_ok=True)
     for asset in _reference_assets_for_staging(group):
         path = directory / _asset_filename(asset)
-        checksums[_asset_key(group, asset)] = _stage_or_verify_asset(client, asset, path)
+        checksums[asset_key(group, asset)] = stage_or_verify_asset(client, asset, path)
 
 
 def _reference_assets_for_staging(group: EeaGroup) -> tuple[RemoteAsset, ...]:
@@ -167,13 +169,14 @@ def _reference_group_directory(root: Path, index: int, group: EeaGroup) -> Path:
 
 
 @contextmanager
-def _stage_reference_groups(
+def stage_reference_groups(
     groups: tuple[EeaGroup, ...],
     *,
     workdir: Path,
     checksums: dict[str, str],
     client: StreamClient,
 ) -> Iterator[Path]:
+    """Stage the EEA reference groups under a temporary root and yield it."""
     first_record = groups[0].record_id[:8]
     with _reference_staging_root(workdir, first_record) as root:
         for index, group in enumerate(groups):
@@ -209,7 +212,7 @@ def _remove_stale_partial_downloads(root: Path) -> None:
             path.unlink(missing_ok=True)
 
 
-def _worker_reference_batch(
+def worker_reference_batch(
     groups: tuple[EeaGroup, ...],
     root: Path,
     threshold: int,
@@ -221,7 +224,7 @@ def _worker_reference_batch(
     cached = _WORKER_REFERENCES.get(key)
     if cached is not None:
         return cached
-    _close_worker_reference_cache()
+    close_worker_reference_cache()
     stack = ExitStack()
     try:
         references = tuple(
@@ -242,7 +245,8 @@ def _worker_reference_batch(
     return references
 
 
-def _close_worker_reference_cache() -> None:
+def close_worker_reference_cache() -> None:
+    """Close this worker's cached reference stacks and clear the caches."""
     for stack in _WORKER_REFERENCE_STACKS.values():
         stack.close()
     _WORKER_REFERENCE_STACKS.clear()
@@ -260,9 +264,9 @@ def _raster_group_reference(
     layers = []
     for asset in group.raster_assets:
         path = directory / _asset_filename(asset)
-        digest = _stage_or_verify_asset(client, asset, path)
+        digest = stage_or_verify_asset(client, asset, path)
         if checksums is not None:
-            checksums[_asset_key(group, asset)] = digest
+            checksums[asset_key(group, asset)] = digest
         layers.append(
             RasterLayer(
                 code=asset.code or "",
@@ -287,9 +291,9 @@ def _vector_group_reference(
     if asset is None:
         raise ValueError(f"EEA group has no reference asset: {group.record_id}")
     path = directory / _asset_filename(asset)
-    digest = _stage_or_verify_asset(client, asset, path)
+    digest = stage_or_verify_asset(client, asset, path)
     if checksums is not None:
-        checksums[_asset_key(group, asset)] = digest
+        checksums[asset_key(group, asset)] = digest
     with GeoPackageReference(
         path,
         dict(group.labels),
@@ -314,11 +318,12 @@ def _reference_group_batches(
     return tuple(tuple(batch) for batch in batches)
 
 
-def _indexed_reference_group_batches(
+def indexed_reference_group_batches(
     groups: tuple[EeaGroup, ...],
     *,
     limits: BatchLimits = _DEFAULT_LIMITS,
 ) -> tuple[tuple[int, tuple[EeaGroup, ...]], ...]:
+    """Pair each reference-group batch with the index of its first group."""
     indexed: list[tuple[int, tuple[EeaGroup, ...]]] = []
     start_index = 0
     for batch in _reference_group_batches(groups, limits=limits):

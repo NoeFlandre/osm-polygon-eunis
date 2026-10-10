@@ -186,9 +186,9 @@ def test_worker_reference_batch_opens_local_groups_once_and_closes_on_exit(
     )
     groups = (raster_group, vector_group)
 
-    first = reference_staging._worker_reference_batch(groups, tmp_path, 3, start_index=2)
-    second = reference_staging._worker_reference_batch(groups, tmp_path, 3, start_index=2)
-    third = reference_staging._worker_reference_batch((raster_group,), tmp_path, 3, start_index=4)
+    first = reference_staging.worker_reference_batch(groups, tmp_path, 3, start_index=2)
+    second = reference_staging.worker_reference_batch(groups, tmp_path, 3, start_index=2)
+    third = reference_staging.worker_reference_batch((raster_group,), tmp_path, 3, start_index=4)
 
     assert first is second
     assert first == tuple(opened[:2])
@@ -201,7 +201,7 @@ def test_worker_reference_batch_opens_local_groups_once_and_closes_on_exit(
     assert len(reference_staging._WORKER_REFERENCES) == 1
     assert all(cast(_TrackedReference, reference).closed for reference in first)
     assert not cast(_TrackedReference, third[0]).closed
-    reference_staging._close_worker_reference_cache()
+    reference_staging.close_worker_reference_cache()
     assert all(reference.closed for reference in opened)
     assert reference_staging._WORKER_REFERENCES == {}
 
@@ -222,7 +222,7 @@ def test_worker_reference_batch_closes_opened_groups_on_failure(
     empty_group = EeaGroup("empty", "empty", "folder", "service", {}, (), None)
 
     with pytest.raises(ValueError, match="no reference asset"):
-        reference_staging._worker_reference_batch(
+        reference_staging.worker_reference_batch(
             (raster_group, empty_group), tmp_path, 0, start_index=0
         )
 
@@ -248,7 +248,7 @@ def test_worker_reference_batch_closes_opened_groups_and_reraises_interrupts(
     )
 
     with pytest.raises(interrupt):
-        reference_staging._worker_reference_batch(
+        reference_staging.worker_reference_batch(
             (raster_group, raster_group), tmp_path, 0, start_index=0
         )
 
@@ -295,7 +295,7 @@ def test_staged_reference_assets_use_grid_scratch_and_reuse_verified_bytes(
 
     for _ in range(2):
         checksums: dict[str, str] = {}
-        with reference_staging._stage_reference_groups(
+        with reference_staging.stage_reference_groups(
             (group,), workdir=workdir, checksums=checksums, client=client
         ) as staged_root:
             staged_asset = staged_root / "00-record" / "R11.tif"
@@ -307,7 +307,7 @@ def test_staged_reference_assets_use_grid_scratch_and_reuse_verified_bytes(
     assert staged_asset.is_file()
 
     staged_asset.write_bytes(b"other")
-    with reference_staging._stage_reference_groups(
+    with reference_staging.stage_reference_groups(
         (group,), workdir=workdir, checksums={}, client=client
     ):
         pass
@@ -395,7 +395,7 @@ def test_indexed_reference_batches_cover_raster_and_vector_transitions() -> None
         for index in range(2)
     )
 
-    batches = reference_staging._indexed_reference_group_batches((*rasters, *vectors))
+    batches = reference_staging.indexed_reference_group_batches((*rasters, *vectors))
 
     assert batches == ((0, rasters[:2]), (2, (rasters[2],)), (3, vectors))
 
@@ -425,7 +425,7 @@ def test_stage_reference_groups_downloads_each_asset_and_cleans_temporary_files(
 
     monkeypatch.setattr(reference_cache, "download_asset", fake_download)
     checksums: dict[str, str] = {}
-    with reference_staging._stage_reference_groups(
+    with reference_staging.stage_reference_groups(
         (raster, vector),
         workdir=tmp_path,
         checksums=checksums,

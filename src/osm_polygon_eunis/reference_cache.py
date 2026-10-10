@@ -71,7 +71,7 @@ def _write_staged_asset_receipt(asset: RemoteAsset, path: Path, digest: str) -> 
     temporary_path.replace(receipt_path)
 
 
-def _stage_or_verify_asset(client: StreamClient, asset: RemoteAsset, path: Path) -> str:
+def stage_or_verify_asset(client: StreamClient, asset: RemoteAsset, path: Path) -> str:
     """Return a verified staged digest, downloading the asset when necessary."""
 
     digest = _staged_asset_digest(asset, path)

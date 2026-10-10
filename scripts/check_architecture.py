@@ -1,4 +1,4 @@
-"""Fail when module dependencies cross the declared direction."""
+"""Fail when modules cross the declared layers or use private names across modules."""
 
 from __future__ import annotations
 
@@ -72,6 +72,60 @@ def _imports(path: Path) -> set[str]:
     }
 
 
+def _is_private(name: str) -> bool:
+    return name.startswith("_") and not (name.startswith("__") and name.endswith("__"))
+
+
+def _is_package_import(node: ast.ImportFrom) -> bool:
+    if node.level:
+        return True
+    return node.module is not None and (node.module == PACKAGE or node.module.startswith(PREFIX))
+
+
+def _private_imports(path: Path) -> set[tuple[str, str]]:
+    """Return (source module, name) pairs for underscore names imported from the package."""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    return {
+        ("." * node.level + (node.module or ""), alias.name)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and _is_package_import(node)
+        for alias in node.names
+        if _is_private(alias.name)
+    }
+
+
+def _is_sibling_module_import(node: ast.ImportFrom) -> bool:
+    # Covers `from . import x` and `from osm_polygon_eunis import x`.
+    if node.level:
+        return node.module is None
+    return node.module == PACKAGE
+
+
+def _package_module_aliases(tree: ast.AST) -> dict[str, str]:
+    """Map local names bound to sibling package modules onto their module names."""
+    return {
+        alias.asname or alias.name: alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and _is_sibling_module_import(node)
+        for alias in node.names
+        if alias.name in MODULES
+    }
+
+
+def _private_attributes(path: Path) -> set[tuple[str, str]]:
+    """Return (module name, attribute) pairs for underscore attributes read from a sibling."""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    aliases = _package_module_aliases(tree)
+    return {
+        (aliases[node.value.id], node.attr)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id in aliases
+        and _is_private(node.attr)
+    }
+
+
 def _cycles(graph: dict[str, set[str]]) -> list[str]:
     errors: list[str] = []
     visiting: set[str] = set()
@@ -95,7 +149,7 @@ def _cycles(graph: dict[str, set[str]]) -> list[str]:
 
 
 def main() -> int:
-    """Return a failure status when package imports violate the layer graph."""
+    """Return a failure status when package imports break the layer graph or use private names."""
     errors = [
         f"{module} is not declared in LAYERS"
         for module in sorted(MODULES.keys() - FORBIDDEN.keys())
@@ -107,6 +161,14 @@ def main() -> int:
         errors.extend(
             f"{module} imports forbidden higher-level module {dependency}"
             for dependency in sorted(dependencies & FORBIDDEN.get(module, set()))
+        )
+        errors.extend(
+            f"{module} imports private name {name} from {source}"
+            for source, name in sorted(_private_imports(path))
+        )
+        errors.extend(
+            f"{module} uses private name {attribute} of {sibling}"
+            for sibling, attribute in sorted(_private_attributes(path))
         )
     errors.extend(_cycles(graph))
     if errors:

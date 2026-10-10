@@ -23,7 +23,8 @@ class _CrsLike(Protocol):
     def to_wkt(self) -> str: ...
 
 
-def _is_epsg_3035(crs: _CrsLike | str | None) -> bool:
+def is_epsg_3035(crs: _CrsLike | str | None) -> bool:
+    """Return whether a CRS is ETRS89-LAEA (EPSG:3035)."""
     if crs is None:
         return False
     if not isinstance(crs, str) and crs.to_epsg() == EPSG_LAEA_EUROPE:

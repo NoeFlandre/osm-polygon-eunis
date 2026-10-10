@@ -18,25 +18,25 @@ from ._protocols import HubApi, StreamClient
 from .eea import EeaGroup
 from .fileio import download_client
 from .geometry_checkpoints import (
-    _completed_batches,
-    _geometry_checkpoint_signature,
-    _record_completed_batch,
+    completed_batches,
+    geometry_checkpoint_signature,
+    record_completed_batch,
 )
-from .geometry_chunks import _geometry_micro_batches, _GeometryChunk
+from .geometry_chunks import GeometryChunk, geometry_micro_batches
 from .options import GeometryPathOptions
 from .reference_staging import (
-    _close_worker_reference_cache,
-    _indexed_reference_group_batches,
-    _worker_reference_batch,
+    close_worker_reference_cache,
+    indexed_reference_group_batches,
+    worker_reference_batch,
 )
-from .release_plan import DatasetPlan, Progress, _cached_geometry_path, _sidecar_path
+from .release_plan import DatasetPlan, Progress, cached_geometry_path, sidecar_path
 from .sources import download_to_temp
 from .transform import OverlapReference, SidecarUpdateOptions, update_label_sidecar
 
 
 @dataclass(frozen=True, slots=True)
 class _GeometryWorker:
-    chunk: _GeometryChunk
+    chunk: GeometryChunk
     plans: Mapping[str, DatasetPlan]
     api: HubApi
     reference_batches: tuple[tuple[int, tuple[EeaGroup, ...]], ...]
@@ -44,13 +44,14 @@ class _GeometryWorker:
     client: StreamClient
 
 
-def _process_geometry_path(
+def process_geometry_path(
     api: HubApi,
     plan: DatasetPlan,
     source_path: str,
     references: tuple[OverlapReference, ...],
     options: GeometryPathOptions,
 ) -> None:
+    """Enrich one geometry shard against its references and update its sidecar."""
     local_source = _download_geometry_source(
         api,
         plan,
@@ -59,7 +60,7 @@ def _process_geometry_path(
         retain_source=options.retain_source,
         client=options.http_client,
     )
-    sidecar = _sidecar_path(options.sidecar_root, plan.spec, source_path)
+    sidecar = sidecar_path(options.sidecar_root, plan.spec, source_path)
     sidecar.parent.mkdir(parents=True, exist_ok=True)
     merge_staging_sidecar = sidecar.with_name(f"{sidecar.name}.merge.next")
     update_label_sidecar(
@@ -90,7 +91,7 @@ def _download_geometry_source(
     client: StreamClient,
 ) -> Path:
     directory = source_root / plan.spec.name if retain_source else source_root
-    cached = _cached_geometry_path(source_root, plan, source_path)
+    cached = cached_geometry_path(source_root, plan, source_path)
     if retain_source and cached.is_file():
         return cached
     return download_to_temp(
@@ -103,12 +104,13 @@ def _download_geometry_source(
     )
 
 
-def _run_geometry_workers(
-    work: tuple[_GeometryChunk, ...],
+def run_geometry_workers(
+    work: tuple[GeometryChunk, ...],
     progress: Progress | None,
     *,
     max_workers: int,
 ) -> None:
+    """Run the geometry chunks in a spawned process pool and report each one."""
     worker_count = min(max(max_workers, 1), len(work))
     with ProcessPoolExecutor(
         max_workers=worker_count,
@@ -134,10 +136,10 @@ def _report_completed_geometry(
         )
 
 
-def _process_geometry_chunk(chunk: _GeometryChunk) -> tuple[tuple[str, str], ...]:
+def _process_geometry_chunk(chunk: GeometryChunk) -> tuple[tuple[str, str], ...]:
     plans = {plan.spec.name: plan for plan in chunk.plans}
     api = cast(HubApi, HfApi(endpoint=chunk.endpoint, token=chunk.token))
-    reference_batches = _indexed_reference_group_batches(
+    reference_batches = indexed_reference_group_batches(
         chunk.groups,
         limits=chunk.limits,
     )
@@ -154,12 +156,12 @@ def _process_geometry_chunk(chunk: _GeometryChunk) -> tuple[tuple[str, str], ...
                 )
             )
     finally:
-        _close_worker_reference_cache()
+        close_worker_reference_cache()
     return chunk.jobs
 
 
 def _process_geometry_micro_batches(worker: _GeometryWorker) -> None:
-    for micro_batch in _geometry_micro_batches(worker.chunk.jobs, worker.chunk.limits):
+    for micro_batch in geometry_micro_batches(worker.chunk.jobs, worker.chunk.limits):
         _process_geometry_micro_batch(worker, micro_batch)
 
 
@@ -186,14 +188,14 @@ def _process_geometry_micro_batch(
 
 
 def _pending_geometry_batches(
-    chunk: _GeometryChunk,
+    chunk: GeometryChunk,
     plans: Mapping[str, DatasetPlan],
     jobs: tuple[tuple[str, str], ...],
 ) -> dict[tuple[str, str], set[int]]:
     return {
-        job: _completed_batches(
-            _sidecar_path(chunk.sidecar_root, plans[job[0]].spec, job[1]),
-            _geometry_checkpoint_signature(
+        job: completed_batches(
+            sidecar_path(chunk.sidecar_root, plans[job[0]].spec, job[1]),
+            geometry_checkpoint_signature(
                 chunk.reference_signature,
                 plans[job[0]],
                 job[1],
@@ -212,7 +214,7 @@ def _unfinished_geometry_jobs(
 
 
 def _reset_geometry_sidecars(
-    chunk: _GeometryChunk,
+    chunk: GeometryChunk,
     plans: Mapping[str, DatasetPlan],
     jobs: tuple[tuple[str, str], ...],
     pending: Mapping[tuple[str, str], set[int]],
@@ -221,7 +223,7 @@ def _reset_geometry_sidecars(
         job
         for job in jobs
         if not pending[job]
-        and _sidecar_path(chunk.sidecar_root, plans[job[0]].spec, job[1]).is_file()
+        and sidecar_path(chunk.sidecar_root, plans[job[0]].spec, job[1]).is_file()
     }
 
 
@@ -253,7 +255,7 @@ def _process_geometry_reference_batch(
     outstanding = tuple(job for job in jobs if start_index not in pending[job])
     if not outstanding:
         return
-    references = _worker_reference_batch(
+    references = worker_reference_batch(
         groups,
         worker.chunk.reference_directory,
         worker.chunk.threshold,
@@ -281,7 +283,7 @@ def _process_geometry_job(
     dataset, source_path = job
     chunk = worker.chunk
     started = time.monotonic()
-    _process_geometry_path(
+    process_geometry_path(
         worker.api,
         worker.plans[dataset],
         source_path,
@@ -298,13 +300,13 @@ def _process_geometry_job(
     reset_sidecars.discard(job)
     completed.add(start_index)
     _log_geometry_timing(job, start_index, references, time.monotonic() - started)
-    sidecar = _sidecar_path(chunk.sidecar_root, worker.plans[dataset].spec, source_path)
-    signature = _geometry_checkpoint_signature(
+    sidecar = sidecar_path(chunk.sidecar_root, worker.plans[dataset].spec, source_path)
+    signature = geometry_checkpoint_signature(
         chunk.reference_signature,
         worker.plans[dataset],
         source_path,
     )
-    _record_completed_batch(sidecar, signature, completed)
+    record_completed_batch(sidecar, signature, completed)
 
 
 def _log_geometry_timing(
@@ -328,18 +330,19 @@ def _log_geometry_timing(
     _log_geometry_event(record)
 
 
-def _log_geometry_run_plan(
+def log_geometry_run_plan(
     plans: tuple[DatasetPlan, ...],
     reference_batch_ids: tuple[int, ...],
     reference_signature: str,
 ) -> None:
+    """Log the planned geometry batches and reference signature for each plan."""
     for plan in plans:
         record = {
             "event": "geometry_run_plan",
             "dataset": plan.spec.name,
             "reference_batch_ids": list(reference_batch_ids),
             "checkpoint_signatures": {
-                path: _geometry_checkpoint_signature(reference_signature, plan, path)
+                path: geometry_checkpoint_signature(reference_signature, plan, path)
                 for path in plan.geometry_paths
             },
         }
@@ -375,4 +378,4 @@ def _remove_cached_geometry_jobs(
     source_root: Path,
 ) -> None:
     for dataset, source_path in jobs:
-        _cached_geometry_path(source_root, plans[dataset], source_path).unlink(missing_ok=True)
+        cached_geometry_path(source_root, plans[dataset], source_path).unlink(missing_ok=True)

@@ -213,7 +213,7 @@ def _manifest_geometry_policy(
     return dict(policy) if isinstance(policy, Mapping) else None
 
 
-def _software_provenance() -> dict[str, str]:
+def software_provenance() -> dict[str, str]:
     """Return the installed package version and the best available source commit."""
 
     return {
@@ -302,7 +302,7 @@ def build_manifest(options: ManifestBuildOptions) -> dict[str, Any]:
         "shared_paths": sorted(set(source) - set(changed)),
         "rows_by_path": {path: options.rows_by_path[path] for path in sorted(options.rows_by_path)},
         "schema_by_path": {path: schemas[path] for path in sorted(schemas)},
-        "software": _software_provenance(),
+        "software": software_provenance(),
         "reference": dict(options.reference_manifest),
         "geometry_policy": _manifest_geometry_policy(options.card_manifest),
         "card": dict(options.card_manifest) if options.card_manifest is not None else None,

@@ -103,9 +103,9 @@ def test_plan_release_reports_no_op_without_uploads(monkeypatch, tmp_path: Path)
     monkeypatch.setattr(release_orchestration, "plan_datasets", lambda _api, _names=None: _plans())
     monkeypatch.setattr(release_orchestration, "resolve_config_data", lambda _config: ())
     monkeypatch.setattr(
-        release_orchestration, "_load_existing_manifests", lambda *args: (None, None)
+        release_orchestration, "load_existing_manifests", lambda *args: (None, None)
     )
-    monkeypatch.setattr(release_orchestration, "_compatible_manifests", lambda *args: True)
+    monkeypatch.setattr(release_orchestration, "compatible_manifests", lambda *args: True)
 
     report = release_orchestration.plan_release(
         cast(HubApi, api), reference_config=_config(tmp_path), workdir=tmp_path / "run"
@@ -205,7 +205,7 @@ def test_verify_release_pins_manifest_inputs_and_reports(monkeypatch, tmp_path: 
 
     plan = _plans()[0]
     manifest = {"source_revision": "published-rev", "source_paths": ["polygons/a.parquet"]}
-    existing = manifest_state._ExistingManifest("target-rev", manifest)
+    existing = manifest_state.ExistingManifest("target-rev", manifest)
     seen: list[DatasetPlan] = []
 
     def fake_verify(_api, pinned, _existing, **_kwargs):
@@ -214,10 +214,8 @@ def test_verify_release_pins_manifest_inputs_and_reports(monkeypatch, tmp_path: 
         return DatasetReceipt(pinned, (), verification, no_op=True)
 
     monkeypatch.setattr(release_orchestration, "plan_datasets", lambda _api, names=None: (plan,))
-    monkeypatch.setattr(
-        release_orchestration, "_load_existing_manifests", lambda *args: (existing,)
-    )
-    monkeypatch.setattr(release_orchestration, "_verify_no_op_dataset", fake_verify)
+    monkeypatch.setattr(release_orchestration, "load_existing_manifests", lambda *args: (existing,))
+    monkeypatch.setattr(release_orchestration, "verify_no_op_dataset", fake_verify)
 
     receipt = release_orchestration.verify_release(
         cast(HubApi, _ReadOnlyApi({"target-a"})), workdir=tmp_path, datasets=["website"]
@@ -229,13 +227,11 @@ def test_verify_release_pins_manifest_inputs_and_reports(monkeypatch, tmp_path: 
 
 
 def test_verify_release_rejects_manifest_without_source_pins(monkeypatch, tmp_path: Path) -> None:
-    existing = manifest_state._ExistingManifest("rev", {"source_revision": 3})
+    existing = manifest_state.ExistingManifest("rev", {"source_revision": 3})
     monkeypatch.setattr(
         release_orchestration, "plan_datasets", lambda _api, names=None: _plans()[:1]
     )
-    monkeypatch.setattr(
-        release_orchestration, "_load_existing_manifests", lambda *args: (existing,)
-    )
+    monkeypatch.setattr(release_orchestration, "load_existing_manifests", lambda *args: (existing,))
 
     with pytest.raises(ValueError, match="lacks source revision"):
         release_orchestration.verify_release(cast(HubApi, _ReadOnlyApi(set())), workdir=tmp_path)

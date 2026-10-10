@@ -11,11 +11,12 @@ from .geometry import OVERLAP_KERNEL_VERSION
 from .release_plan import DatasetPlan
 
 
-def _reference_signature(
+def build_reference_signature(
     checksums: Mapping[str, str],
     threshold: int,
     groups: tuple[EeaGroup, ...] = (),
 ) -> str:
+    """Return a digest of the reference checksums, threshold and groups."""
     payload = json.dumps(
         {
             "checksums": dict(sorted(checksums.items())),
@@ -48,11 +49,12 @@ def _reference_group_signature(group: EeaGroup) -> dict[str, object]:
     }
 
 
-def _geometry_checkpoint_signature(
+def geometry_checkpoint_signature(
     reference_signature: str,
     plan: DatasetPlan,
     source_path: str,
 ) -> str:
+    """Return the signature that binds one geometry shard to its inputs."""
     payload = json.dumps(
         {
             "references": reference_signature,
@@ -70,7 +72,8 @@ def _checkpoint_path(sidecar: Path) -> Path:
     return sidecar.with_name(f"{sidecar.name}.done")
 
 
-def _completed_batches(sidecar: Path, signature: str) -> set[int]:
+def completed_batches(sidecar: Path, signature: str) -> set[int]:
+    """Return the completed batch ids recorded for a sidecar under this signature."""
     payload = _read_checkpoint(_checkpoint_path(sidecar))
     return _checkpoint_batches(payload, signature)
 
@@ -96,7 +99,8 @@ def _integer_batch_ids(value: object) -> set[int]:
     return {item for item in value if type(item) is int}
 
 
-def _record_completed_batch(sidecar: Path, signature: str, completed: set[int]) -> None:
+def record_completed_batch(sidecar: Path, signature: str, completed: set[int]) -> None:
+    """Record the completed batch ids for a sidecar, replacing its checkpoint."""
     path = _checkpoint_path(sidecar)
     temporary = path.with_name(f"{path.name}.tmp")
     try:

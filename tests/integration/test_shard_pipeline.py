@@ -59,7 +59,7 @@ def _spawned_geometry_fixture(
     Path,
     pa.Table,
     Path,
-    geometry_chunks._GeometryRunOptions,
+    geometry_chunks.GeometryRunOptions,
     list[Mapping[str, object]],
 ]:
     source_root = tmp_path / "source"
@@ -127,7 +127,7 @@ def _spawned_geometry_fixture(
         (),
     )
     progress: list[Mapping[str, object]] = []
-    options = geometry_chunks._GeometryRunOptions(
+    options = geometry_chunks.GeometryRunOptions(
         api=cast(HubApi, SimpleNamespace(endpoint="https://huggingface.co", token=None)),
         plans=(plan,),
         groups=tuple(groups),
@@ -209,7 +209,7 @@ def test_parallel_reference_batch_processes_cached_geometry_shards(
     source_root, source_directory, source, sidecar_root, options, progress = (
         _spawned_geometry_fixture(tmp_path, monkeypatch, single_pixel_raster)
     )
-    geometry_jobs._process_reference_groups(options)
+    geometry_jobs.process_reference_groups(options)
     first_log = capfd.readouterr().err
     first_records = _json_events(first_log)
 
@@ -245,7 +245,7 @@ def test_parallel_reference_batch_processes_cached_geometry_shards(
         pq.write_table(source, source_directory / f"polygons__{name}.parquet")
     progress.clear()
 
-    geometry_jobs._process_reference_groups(options)
+    geometry_jobs.process_reference_groups(options)
     resume_log = capfd.readouterr().err
     resume_records = _json_events(resume_log)
     _assert_timing_batches(resume_records, {path: [1] for path in expected_signatures})
