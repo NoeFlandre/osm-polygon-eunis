@@ -186,6 +186,7 @@ def test_release_script_has_valid_bash_syntax() -> None:
 
 
 @pytest.mark.parametrize("root", ["/var/lib/eunis", "/homework/eunis", "/srv", "relative/root"])
+@pytest.mark.slow
 def test_release_rejects_roots_outside_persistent_storage(tmp_path: Path, root: str) -> None:
     result = _run_release(tmp_path, {"GRID5000_PERSISTENT_ROOT": root})
 
@@ -194,6 +195,7 @@ def test_release_rejects_roots_outside_persistent_storage(tmp_path: Path, root: 
     assert _uv_calls(tmp_path) == []
 
 
+@pytest.mark.slow
 def test_release_requires_an_oar_job_before_doing_any_work(tmp_path: Path) -> None:
     result = _run_release(tmp_path, {"OAR_JOB_ID": ""})
 
@@ -202,6 +204,7 @@ def test_release_requires_an_oar_job_before_doing_any_work(tmp_path: Path) -> No
     assert _uv_calls(tmp_path) == []
 
 
+@pytest.mark.slow
 def test_release_refuses_to_start_without_a_hugging_face_token(tmp_path: Path) -> None:
     result = _run_release(tmp_path, token=False)
 
@@ -218,6 +221,7 @@ def test_release_refuses_to_start_without_a_hugging_face_token(tmp_path: Path) -
         pytest.param("home/.cache/huggingface", {"HF_HOME": ""}, id="home-cache"),
     ],
 )
+@pytest.mark.slow
 def test_release_run_gets_cached_token_and_checkpoint_paths(
     tmp_path: Path,
     token_dir: str,
@@ -265,6 +269,7 @@ def test_release_run_gets_cached_token_and_checkpoint_paths(
     assert CREDENTIAL not in result.stdout + result.stderr
 
 
+@pytest.mark.slow
 def test_release_retries_a_failed_attempt_after_saving_checkpoints(tmp_path: Path) -> None:
     result = _run_release(tmp_path, {"STUB_RELEASE_STATUSES": "[7, 0]"})
 
@@ -279,6 +284,7 @@ def test_release_retries_a_failed_attempt_after_saving_checkpoints(tmp_path: Pat
     assert grid["errors"]["count"] == 1
 
 
+@pytest.mark.slow
 def test_release_gives_up_after_max_attempts_and_writes_a_failure_receipt(
     tmp_path: Path,
 ) -> None:
@@ -297,6 +303,7 @@ def test_release_gives_up_after_max_attempts_and_writes_a_failure_receipt(
     assert receipt["grid5000"]["errors"] == {"count": 2, "last_exit_status": 3}
 
 
+@pytest.mark.slow
 def test_release_stops_at_the_oar_deadline_before_any_worker_runs(tmp_path: Path) -> None:
     # Started an hour ago, so the 10-minute walltime is already spent.
     result = _run_release(tmp_path, {"STUB_OAR_START_TIME": str(int(time.time()) - 3600)})
@@ -312,6 +319,7 @@ def test_release_stops_at_the_oar_deadline_before_any_worker_runs(tmp_path: Path
     assert receipt["grid5000"]["errors"]["count"] == 0
 
 
+@pytest.mark.slow
 def test_release_writes_a_failure_receipt_when_the_oar_start_time_is_unreadable(
     tmp_path: Path,
 ) -> None:
