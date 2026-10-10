@@ -13,8 +13,8 @@ import pytest
 from osm_polygon_eunis import cli
 from osm_polygon_eunis._protocols import HubApi
 from osm_polygon_eunis.cli import CliDependencies
-from osm_polygon_eunis.grid5000 import Grid5000Config
-from osm_polygon_eunis.options import BatchLimits, ReleaseOptions
+from osm_polygon_eunis.grid5000 import DEFAULT_GRID_CORES, DEFAULT_GRID_WORKERS, Grid5000Config
+from osm_polygon_eunis.options import DEFAULT_BATCH_SIZE, BatchLimits, ReleaseOptions
 from osm_polygon_eunis.publish import ShardExpectation, VerificationError, VerificationReceipt
 from osm_polygon_eunis.release_orchestration import ConfigError
 from osm_polygon_eunis.release_plan import (
@@ -241,6 +241,164 @@ def test_grid5000_submit_accepts_an_explicit_site_and_defaults_to_a_short_job(
     assert calls["state_path"] == state
     assert calls["dry_run"] is True
     assert json.loads(capsys.readouterr().out)["source_revision"] == "abc123"
+
+
+def _grid5000_submit_argv(state: Path, *extra: str) -> list[str]:
+    return [
+        "grid5000",
+        "submit",
+        "--site",
+        "grenoble",
+        "--cluster",
+        "dahu",
+        "--state",
+        str(state),
+        "--dry-run",
+        *extra,
+    ]
+
+
+def _recording_submit(calls: dict[str, object]):
+    def fake_submit(config, _local_root, **_kwargs):
+        calls["config"] = config
+        return SimpleNamespace(job=None, datasets=(), source_revision="abc123", commands=())
+
+    return fake_submit
+
+
+def test_grid5000_submit_reads_frontend_and_persistent_root_from_environment(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("OSM_EUNIS_GRID5000_FRONTEND", "grenoble")
+    monkeypatch.setenv("OSM_EUNIS_GRID5000_PERSISTENT_ROOT", "/home/nflandre/osm-polygon-eunis")
+    calls: dict[str, object] = {}
+    dependencies = _dependencies(
+        resolve_source_revision=lambda _root, **_kwargs: "abc123",
+        submit_grid5000=_recording_submit(calls),
+    )
+
+    assert cli.main(_grid5000_submit_argv(tmp_path / "state.json"), dependencies=dependencies) == 0
+
+    config = cast(Grid5000Config, calls["config"])
+    assert config.frontend == "grenoble"
+    assert config.persistent_root == "/home/nflandre/osm-polygon-eunis"
+
+
+def test_grid5000_submit_flags_take_priority_over_environment(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("OSM_EUNIS_GRID5000_FRONTEND", "from-environment")
+    monkeypatch.setenv("OSM_EUNIS_GRID5000_PERSISTENT_ROOT", "/srv/from-environment")
+    calls: dict[str, object] = {}
+    dependencies = _dependencies(
+        resolve_source_revision=lambda _root, **_kwargs: "abc123",
+        submit_grid5000=_recording_submit(calls),
+    )
+    argv = _grid5000_submit_argv(
+        tmp_path / "state.json",
+        "--frontend",
+        "grenoble",
+        "--persistent-root",
+        "/home/nflandre/osm-polygon-eunis",
+    )
+
+    assert cli.main(argv, dependencies=dependencies) == 0
+
+    config = cast(Grid5000Config, calls["config"])
+    assert config.frontend == "grenoble"
+    assert config.persistent_root == "/home/nflandre/osm-polygon-eunis"
+
+
+@pytest.mark.parametrize("environment_value", [None, ""])
+@pytest.mark.parametrize("extra", [(), ("--debug",)], ids=["default", "debug"])
+def test_grid5000_submit_without_frontend_or_persistent_root_is_a_usage_error(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+    environment_value: str | None,
+    extra: tuple[str, ...],
+) -> None:
+    for name in ("OSM_EUNIS_GRID5000_FRONTEND", "OSM_EUNIS_GRID5000_PERSISTENT_ROOT"):
+        if environment_value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, environment_value)
+
+    def never_submit(*_args, **_kwargs):
+        raise AssertionError("submit must not run without a frontend and persistent root")
+
+    dependencies = _dependencies(
+        resolve_source_revision=lambda _root, **_kwargs: "abc123",
+        submit_grid5000=never_submit,
+    )
+
+    with pytest.raises(SystemExit) as raised:
+        cli.main(
+            _grid5000_submit_argv(tmp_path / "state.json", *extra),
+            dependencies=dependencies,
+        )
+
+    assert raised.value.code == cli.EXIT_USAGE
+    err = capsys.readouterr().err
+    assert err.startswith("usage: osm-polygon-eunis")
+    assert "Traceback" not in err
+    assert "--frontend or OSM_EUNIS_GRID5000_FRONTEND" in err
+    assert "--persistent-root or OSM_EUNIS_GRID5000_PERSISTENT_ROOT" in err
+
+
+_GRID5000_SUBMIT_ARGV: list[str] = [
+    "grid5000",
+    "submit",
+    "--site",
+    "grenoble",
+    "--frontend",
+    "grenoble",
+    "--cluster",
+    "dahu",
+    "--persistent-root",
+    "/home/u/eunis",
+    "--state",
+    "state.json",
+]
+
+_SUBCOMMAND_ARGV: list[list[str]] = [
+    ["plan"],
+    ["release"],
+    ["verify"],
+    ["analyze-run", "--log", "job.log"],
+    _GRID5000_SUBMIT_ARGV,
+]
+
+
+@pytest.mark.parametrize("argv", _SUBCOMMAND_ARGV)
+def test_output_flags_are_accepted_before_or_after_every_subcommand(argv: list[str]) -> None:
+    def flags(parsed: argparse.Namespace) -> tuple[bool, bool, bool]:
+        return (parsed.quiet, parsed.verbose, parsed.debug)
+
+    assert flags(cli._parser().parse_args(argv)) == (False, False, False)
+    assert flags(cli._parser().parse_args([*argv, "-v", "--debug"])) == (False, True, True)
+    assert flags(cli._parser().parse_args(["-q", *argv])) == (True, False, False)
+    assert flags(cli._parser().parse_args([*argv, "-q"])) == (True, False, False)
+
+
+@pytest.mark.parametrize("argv", _SUBCOMMAND_ARGV)
+def test_quiet_and_verbose_stay_mutually_exclusive_after_every_subcommand(
+    argv: list[str], capsys
+) -> None:
+    with pytest.raises(SystemExit) as raised:
+        cli._parser().parse_args([*argv, "-q", "-v"])
+    assert raised.value.code == 2
+    assert "not allowed with argument" in capsys.readouterr().err
+
+
+def test_grid5000_submit_defaults_are_stable() -> None:
+    parsed = cli._parser().parse_args(_GRID5000_SUBMIT_ARGV)
+
+    assert (parsed.queue, parsed.job_type, parsed.exclude_site) == ("default", None, [])
+    assert (parsed.cores, parsed.workers) == (DEFAULT_GRID_CORES, DEFAULT_GRID_WORKERS)
+    assert (parsed.walltime, parsed.batch_size, parsed.dry_run) == (
+        "1:00:00",
+        DEFAULT_BATCH_SIZE,
+        False,
+    )
 
 
 def test_top_level_help_shows_examples(capsys) -> None:
