@@ -113,9 +113,14 @@ See docs/operations.md for the full release procedure.
 """
 
 
-def _add_common(parser: argparse.ArgumentParser, *, top_level: bool = False) -> None:
-    """Output flags, accepted before or after the subcommand."""
+def _output_flags(*, top_level: bool = False) -> argparse.ArgumentParser:
+    """Output flags as a parent parser, accepted before or after the subcommand.
 
+    The top-level parser sets the defaults. Subcommands use SUPPRESS so that they
+    do not overwrite a flag that was given before the subcommand name.
+    """
+
+    parser = argparse.ArgumentParser(add_help=False)
     default: object = False if top_level else argparse.SUPPRESS
     volume = parser.add_mutually_exclusive_group()
     volume.add_argument(
@@ -138,6 +143,7 @@ def _add_common(parser: argparse.ArgumentParser, *, top_level: bool = False) -> 
         default=default,
         help="show the full traceback instead of a one-line error",
     )
+    return parser
 
 
 def _add_endpoint(parser: argparse.ArgumentParser) -> None:
@@ -184,23 +190,24 @@ def _parser() -> argparse.ArgumentParser:
         "publish them and verify the published result.",
         epilog=_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        parents=[_output_flags(top_level=True)],
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {_version()}")
-    _add_common(parser, top_level=True)
     subparsers = parser.add_subparsers(dest="command", required=True)
     plan = subparsers.add_parser(
         "plan",
         help="inspect pinned public source layouts",
         description="Print the pinned source revision and shard layout of each dataset.",
+        parents=[_output_flags()],
     )
     _add_dataset(plan)
     _add_endpoint(plan)
-    _add_common(plan)
     release = subparsers.add_parser(
         "release",
         help="run and publish the datasets",
         description="Label, publish and independently verify the selected datasets. "
         "Requires HF_TOKEN with write access unless --dry-run is given.",
+        parents=[_output_flags()],
     )
     release.add_argument(
         "--reference-config",
@@ -237,7 +244,6 @@ def _parser() -> argparse.ArgumentParser:
     )
     _add_dataset(release)
     _add_endpoint(release)
-    _add_common(release)
     release.add_argument(
         "--dry-run",
         action="store_true",
@@ -249,11 +255,11 @@ def _parser() -> argparse.ArgumentParser:
         description="Check each published target against its EUNIS manifest: remote tree, "
         "shared blobs, Parquet rows and schemas, and card artifacts. Makes no writes and "
         "exits nonzero on a mismatch.",
+        parents=[_output_flags()],
     )
     _add_workdir(verify)
     _add_dataset(verify)
     _add_endpoint(verify)
-    _add_common(verify)
 
     analyze = subparsers.add_parser(
         "analyze-run",
@@ -262,6 +268,7 @@ def _parser() -> argparse.ArgumentParser:
             "Summarize geometry batch timing records and matching .done checkpoints. "
             "This command reads local files only."
         ),
+        parents=[_output_flags()],
     )
     analyze.add_argument(
         "--log",
@@ -285,7 +292,6 @@ def _parser() -> argparse.ArgumentParser:
         metavar="N",
         help="slowest shards to show for each dataset (default: 5)",
     )
-    _add_common(analyze)
 
     grid_parser = subparsers.add_parser(
         "grid5000",
@@ -301,16 +307,20 @@ def _parser() -> argparse.ArgumentParser:
         "submit",
         help="check policy, sync the source and submit the release worker",
         description="Run usagepolicycheck -t, sync this source tree and submit one OAR job.",
+        parents=[_output_flags()],
     )
     grid_submit.add_argument("--site", required=True, help="Grid'5000 site, for example grenoble")
     grid_submit.add_argument(
-        "--frontend", required=True, help="SSH alias for the selected site's frontend"
+        "--frontend",
+        default=None,
+        help="SSH alias for the selected site's frontend (default: $OSM_EUNIS_GRID5000_FRONTEND)",
     )
     grid_submit.add_argument("--cluster", required=True, help="OAR cluster on the selected site")
     grid_submit.add_argument(
         "--persistent-root",
-        required=True,
-        help="remote persistent project directory under /home, /groups or /srv",
+        default=None,
+        help="remote persistent project directory under /home, /groups or /srv "
+        "(default: $OSM_EUNIS_GRID5000_PERSISTENT_ROOT)",
     )
     grid_submit.add_argument(
         "--exclude-site",
@@ -357,7 +367,6 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="show the validated plan without contacting Grid'5000",
     )
-    _add_common(grid_submit)
     return parser
 
 
@@ -554,6 +563,23 @@ def _resolve_defaults(args: argparse.Namespace) -> None:
     for name, resolve in resolvers.items():
         if getattr(args, name, "unset") is None:
             setattr(args, name, resolve())
+    if args.command == "grid5000":
+        _resolve_grid5000_environment(args)
+
+
+def _resolve_grid5000_environment(args: argparse.Namespace) -> None:
+    """Fill the Grid'5000 frontend and persistent root from the environment."""
+    if args.frontend is None:
+        args.frontend = os.environ.get("OSM_EUNIS_GRID5000_FRONTEND") or None
+    if args.persistent_root is None:
+        args.persistent_root = os.environ.get("OSM_EUNIS_GRID5000_PERSISTENT_ROOT") or None
+    missing = []
+    if args.frontend is None:
+        missing.append("--frontend or OSM_EUNIS_GRID5000_FRONTEND")
+    if args.persistent_root is None:
+        missing.append("--persistent-root or OSM_EUNIS_GRID5000_PERSISTENT_ROOT")
+    if missing:
+        raise ConfigError(f"grid5000 submit requires {' and '.join(missing)}")
 
 
 def _run(args: argparse.Namespace, services: CliDependencies) -> int:

@@ -100,6 +100,11 @@ uv run osm-polygon-eunis grid5000 submit \
   --state /path/on/external-HDD/eunis-grid5000-state.json
 ```
 
+The `--frontend` and `--persistent-root` options can be omitted when these
+variables are set: `OSM_EUNIS_GRID5000_FRONTEND` and
+`OSM_EUNIS_GRID5000_PERSISTENT_ROOT`. An explicit option has priority. If neither
+the option nor the variable is set, the command exits with status 2.
+
 The controller runs `usagepolicycheck -t --sites` over the current API site list
 minus the explicit exclusions. It runs the check before the sync and again after
 the submission. It refuses a job that it finds in the same all-site inventory.
