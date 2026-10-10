@@ -108,6 +108,29 @@ def test_child_exit_124_without_deadline_marker_is_a_failed_attempt(tmp_path: Pa
     assert grid["stop_reason"] == "worker_failure"
 
 
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    ("exit_status", "stop_state", "stop_reason"),
+    [
+        pytest.param("124", "deadline", "graceful_deadline", id="deadline"),
+        pytest.param("130", "signal:2", "interrupt", id="interrupt"),
+        pytest.param("143", "signal:15", "termination_signal", id="termination"),
+    ],
+)
+def test_guarded_stops_are_incomplete_with_their_own_reason(
+    tmp_path: Path,
+    exit_status: str,
+    stop_state: str,
+    stop_reason: str,
+) -> None:
+    payload = _write_receipt(
+        tmp_path, ReceiptOptions(exit_status=exit_status, stop_state=stop_state)
+    )
+
+    assert payload["status"] == "incomplete"
+    assert payload["grid5000"]["stop_reason"] == stop_reason
+
+
 def test_invalid_deadline_overrides_do_not_block_failure_receipt(tmp_path: Path) -> None:
     payload = _write_receipt(
         tmp_path,

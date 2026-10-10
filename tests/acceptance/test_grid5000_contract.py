@@ -185,6 +185,9 @@ def test_release_command_writes_the_receipt_the_worker_merges(release_run: _Rele
 
 @pytest.mark.slow
 def test_release_command_runs_without_the_retired_dataset_flag(release_run: _ReleaseRun) -> None:
+    assert release_run.uv_calls, (
+        "release.sh made no uv calls, so the check below would pass vacuously"
+    )
     for call in release_run.uv_calls:
         assert not any(argument.startswith("--dataset") for argument in call["argv"]), call
 
