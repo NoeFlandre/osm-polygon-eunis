@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import functools
 import sys
 from pathlib import Path
 
@@ -50,6 +51,13 @@ LAYERS = (
 FORBIDDEN = {module: set(LAYERS[index + 1 :]) for index, module in enumerate(LAYERS)}
 
 
+@functools.cache
+def _nodes(path: Path) -> tuple[ast.AST, ...]:
+    # Every check reads the same nodes, so parse and walk each module once per run.
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    return tuple(ast.walk(tree))
+
+
 def _imported_names(node: ast.AST) -> tuple[str, ...]:
     if isinstance(node, ast.Import):
         return tuple(alias.name for alias in node.names)
@@ -63,10 +71,9 @@ def _imported_names(node: ast.AST) -> tuple[str, ...]:
 
 
 def _imports(path: Path) -> set[str]:
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     return {
         name[len(PREFIX) :].split(".", 1)[0]
-        for node in ast.walk(tree)
+        for node in _nodes(path)
         for name in _imported_names(node)
         if name.startswith(PREFIX)
     }
@@ -84,10 +91,9 @@ def _is_package_import(node: ast.ImportFrom) -> bool:
 
 def _private_imports(path: Path) -> set[tuple[str, str]]:
     """Return (source module, name) pairs for underscore names imported from the package."""
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     return {
         ("." * node.level + (node.module or ""), alias.name)
-        for node in ast.walk(tree)
+        for node in _nodes(path)
         if isinstance(node, ast.ImportFrom) and _is_package_import(node)
         for alias in node.names
         if _is_private(alias.name)
@@ -101,11 +107,11 @@ def _is_sibling_module_import(node: ast.ImportFrom) -> bool:
     return node.module == PACKAGE
 
 
-def _package_module_aliases(tree: ast.AST) -> dict[str, str]:
+def _package_module_aliases(nodes: tuple[ast.AST, ...]) -> dict[str, str]:
     """Map local names bound to sibling package modules onto their module names."""
     return {
         alias.asname or alias.name: alias.name
-        for node in ast.walk(tree)
+        for node in nodes
         if isinstance(node, ast.ImportFrom) and _is_sibling_module_import(node)
         for alias in node.names
         if alias.name in MODULES
@@ -114,11 +120,11 @@ def _package_module_aliases(tree: ast.AST) -> dict[str, str]:
 
 def _private_attributes(path: Path) -> set[tuple[str, str]]:
     """Return (module name, attribute) pairs for underscore attributes read from a sibling."""
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    aliases = _package_module_aliases(tree)
+    nodes = _nodes(path)
+    aliases = _package_module_aliases(nodes)
     return {
         (aliases[node.value.id], node.attr)
-        for node in ast.walk(tree)
+        for node in nodes
         if isinstance(node, ast.Attribute)
         and isinstance(node.value, ast.Name)
         and node.value.id in aliases
