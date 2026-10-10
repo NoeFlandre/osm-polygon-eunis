@@ -539,7 +539,7 @@ def main(
         The documented command exit status.
     """
     services = dependencies or CliDependencies()
-    args = _parser().parse_args(argv)
+    args = _parse_arguments(argv)
     _configure_logging(args)
     try:
         return _run(args, services)
@@ -553,6 +553,20 @@ def main(
         _reset_logging()
 
 
+def _parse_arguments(argv: list[str] | None) -> argparse.Namespace:
+    """Parse argv and resolve the values that depend on the environment.
+
+    A missing required value exits through the parser with status 2, whether or
+    not --debug is set.
+    """
+
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if args.command == "grid5000":
+        _resolve_grid5000_environment(parser, args)
+    return args
+
+
 def _resolve_defaults(args: argparse.Namespace) -> None:
     """Fill environment- and filesystem-dependent defaults after parsing."""
     resolvers: dict[str, Callable[[], Path]] = {
@@ -563,23 +577,32 @@ def _resolve_defaults(args: argparse.Namespace) -> None:
     for name, resolve in resolvers.items():
         if getattr(args, name, "unset") is None:
             setattr(args, name, resolve())
-    if args.command == "grid5000":
-        _resolve_grid5000_environment(args)
 
 
-def _resolve_grid5000_environment(args: argparse.Namespace) -> None:
+def _resolve_grid5000_environment(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> None:
     """Fill the Grid'5000 frontend and persistent root from the environment."""
-    if args.frontend is None:
-        args.frontend = os.environ.get("OSM_EUNIS_GRID5000_FRONTEND") or None
-    if args.persistent_root is None:
-        args.persistent_root = os.environ.get("OSM_EUNIS_GRID5000_PERSISTENT_ROOT") or None
+
+    args.frontend = _flag_or_environment(args.frontend, "OSM_EUNIS_GRID5000_FRONTEND")
+    args.persistent_root = _flag_or_environment(
+        args.persistent_root, "OSM_EUNIS_GRID5000_PERSISTENT_ROOT"
+    )
     missing = []
     if args.frontend is None:
         missing.append("--frontend or OSM_EUNIS_GRID5000_FRONTEND")
     if args.persistent_root is None:
         missing.append("--persistent-root or OSM_EUNIS_GRID5000_PERSISTENT_ROOT")
     if missing:
-        raise ConfigError(f"grid5000 submit requires {' and '.join(missing)}")
+        parser.error(f"grid5000 submit requires {' and '.join(missing)}")
+
+
+def _flag_or_environment(value: str | None, variable: str) -> str | None:
+    """Keep an explicit flag value; otherwise read the variable, where empty means unset."""
+
+    if value is not None:
+        return value
+    return os.environ.get(variable) or None
 
 
 def _run(args: argparse.Namespace, services: CliDependencies) -> int:

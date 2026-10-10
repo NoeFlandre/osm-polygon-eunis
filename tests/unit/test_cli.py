@@ -308,8 +308,13 @@ def test_grid5000_submit_flags_take_priority_over_environment(monkeypatch, tmp_p
 
 
 @pytest.mark.parametrize("environment_value", [None, ""])
+@pytest.mark.parametrize("extra", [(), ("--debug",)], ids=["default", "debug"])
 def test_grid5000_submit_without_frontend_or_persistent_root_is_a_usage_error(
-    monkeypatch, tmp_path: Path, capsys, environment_value: str | None
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+    environment_value: str | None,
+    extra: tuple[str, ...],
 ) -> None:
     for name in ("OSM_EUNIS_GRID5000_FRONTEND", "OSM_EUNIS_GRID5000_PERSISTENT_ROOT"):
         if environment_value is None:
@@ -325,10 +330,16 @@ def test_grid5000_submit_without_frontend_or_persistent_root_is_a_usage_error(
         submit_grid5000=never_submit,
     )
 
-    code = cli.main(_grid5000_submit_argv(tmp_path / "state.json"), dependencies=dependencies)
+    with pytest.raises(SystemExit) as raised:
+        cli.main(
+            _grid5000_submit_argv(tmp_path / "state.json", *extra),
+            dependencies=dependencies,
+        )
 
-    assert code == cli.EXIT_USAGE
+    assert raised.value.code == cli.EXIT_USAGE
     err = capsys.readouterr().err
+    assert err.startswith("usage: osm-polygon-eunis")
+    assert "Traceback" not in err
     assert "--frontend or OSM_EUNIS_GRID5000_FRONTEND" in err
     assert "--persistent-root or OSM_EUNIS_GRID5000_PERSISTENT_ROOT" in err
 
