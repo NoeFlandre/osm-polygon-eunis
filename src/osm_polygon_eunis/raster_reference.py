@@ -30,7 +30,7 @@ from .grid_overlap import (
 )
 from .matching import choose_winner
 from .raster_geometry import (
-    _is_epsg_3035,
+    is_epsg_3035,
     wgs84_envelope,
 )
 
@@ -325,7 +325,7 @@ class RasterReference:
     def _validate_crs(dataset: rasterio.DatasetReader, path: Path) -> None:
         try:
             crs = dataset.crs
-            valid = _is_epsg_3035(crs)
+            valid = is_epsg_3035(crs)
         except (TypeError, ValueError):
             valid = False
         if not valid:

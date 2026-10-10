@@ -13,22 +13,22 @@ from tempfile import TemporaryDirectory
 from typing import cast
 
 from ._protocols import HubApi, StreamClient
-from .card_publishing import _finalize_plan, _PlanOptions
+from .card_publishing import PlanOptions, finalize_plan
 from .domain import SchemaError
 from .eea import EeaGroup, resolve_config_data
-from .geometry_chunks import _GeometryRunOptions
-from .geometry_jobs import _process_reference_groups
+from .geometry_chunks import GeometryRunOptions
+from .geometry_jobs import process_reference_groups
 from .manifest_state import (
-    _compatible_manifests,
-    _ExistingManifest,
-    _load_existing_manifests,
-    _reference_manifest,
-    _try_no_op_release,
-    _verify_no_op_dataset,
+    ExistingManifest,
+    compatible_manifests,
+    load_existing_manifests,
+    reference_manifest,
+    try_no_op_release,
+    verify_no_op_dataset,
 )
 from .options import ReleaseOptions, resolve_sidecar_root
 from .publish import VerificationError, duplicate_source, target_exists
-from .reference_staging import _http_client
+from .reference_staging import reusable_http_client
 from .release_plan import (
     DatasetPlan,
     DatasetReceipt,
@@ -148,9 +148,9 @@ def run_release(api: HubApi, options: ReleaseOptions) -> ReleaseReceipt:
     groups = resolve_config_data(settings.config)
     sidecar_root = _sidecar_root(workdir)
     checksums: dict[str, str] = {}
-    with _source_cache(workdir) as source_root, _http_client(None) as reusable_client:
+    with _source_cache(workdir) as source_root, reusable_http_client(None) as reusable_client:
         # Detect a verified no-op before any Hub write so a rerun stays read-only.
-        no_op_receipt = _try_no_op_release(
+        no_op_receipt = try_no_op_release(
             api,
             plans,
             _reference_info(groups, {}, settings),
@@ -161,8 +161,8 @@ def run_release(api: HubApi, options: ReleaseOptions) -> ReleaseReceipt:
         if no_op_receipt is not None:
             return no_op_receipt
         _duplicate_outputs(api, plans, options.token)
-        _process_reference_groups(
-            _GeometryRunOptions(
+        process_reference_groups(
+            GeometryRunOptions(
                 api=api,
                 plans=plans,
                 groups=groups,
@@ -178,10 +178,10 @@ def run_release(api: HubApi, options: ReleaseOptions) -> ReleaseReceipt:
         )
         reference_info = _reference_info(groups, checksums, settings)
         receipts = tuple(
-            _finalize_plan(
+            finalize_plan(
                 api,
                 plan,
-                options=_PlanOptions(
+                options=PlanOptions(
                     sidecar_root=sidecar_root,
                     workdir=workdir,
                     batch_size=options.limits.parquet_batch_size,
@@ -222,9 +222,9 @@ def plan_release(
     plans = plan_datasets(api, datasets)
     groups = resolve_config_data(settings.config)
     reference = _reference_info(groups, {}, settings)
-    with _http_client(None) as client:
-        existing = _load_existing_manifests(api, plans, workdir / "dry-run", client)
-    no_op = _compatible_manifests(plans, existing, reference)
+    with reusable_http_client(None) as client:
+        existing = load_existing_manifests(api, plans, workdir / "dry-run", client)
+    no_op = compatible_manifests(plans, existing, reference)
     assets = reference.get("assets")
     return DryRunReport(
         tuple(_dry_run_dataset(api, plan, no_op=no_op) for plan in plans),
@@ -246,8 +246,8 @@ def verify_release(
 
     workdir.mkdir(parents=True, exist_ok=True)
     plans = plan_datasets(api, datasets)
-    with _http_client(None) as client:
-        existing = _load_existing_manifests(api, plans, workdir / "verify-load", client)
+    with reusable_http_client(None) as client:
+        existing = load_existing_manifests(api, plans, workdir / "verify-load", client)
         receipts = tuple(
             _verify_published(api, plan, item, workdir=workdir, client=client)
             for plan, item in zip(plans, existing, strict=True)
@@ -260,7 +260,7 @@ def verify_release(
 def _verify_published(
     api: HubApi,
     plan: DatasetPlan,
-    existing: _ExistingManifest | None,
+    existing: ExistingManifest | None,
     *,
     workdir: Path,
     client: StreamClient,
@@ -268,7 +268,7 @@ def _verify_published(
     if existing is None:
         raise VerificationError(f"{plan.spec.output_repo} has no EUNIS manifest to verify")
     pinned = _manifest_plan(plan, existing.manifest)
-    receipt = _verify_no_op_dataset(api, pinned, existing, workdir=workdir, client=client)
+    receipt = verify_no_op_dataset(api, pinned, existing, workdir=workdir, client=client)
     return replace(receipt, no_op=False)
 
 
@@ -292,7 +292,7 @@ def _reference_info(
     checksums: Mapping[str, str],
     settings: _ReferenceSettings,
 ) -> dict[str, object]:
-    return _reference_manifest(
+    return reference_manifest(
         groups,
         checksums,
         source_version=settings.source_version,

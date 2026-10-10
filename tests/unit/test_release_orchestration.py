@@ -243,7 +243,7 @@ def test_finalize_dataset_enriches_polygon_and_link_shards_and_cleans_staging(
         ("polygons/region.parquet",),
         ("polygon_document_links/region.parquet",),
     )
-    sidecar = release_plan._sidecar_path(tmp_path / "sidecars", plan.spec, plan.geometry_paths[0])
+    sidecar = release_plan.sidecar_path(tmp_path / "sidecars", plan.spec, plan.geometry_paths[0])
     sidecar.parent.mkdir(parents=True)
     pq.write_table(
         pa.table(
@@ -329,7 +329,7 @@ def test_finalize_dataset_resumes_after_the_last_committed_group(
         (),
     )
     for path in plan.geometry_paths:
-        sidecar = release_plan._sidecar_path(tmp_path / "sidecars", plan.spec, path)
+        sidecar = release_plan.sidecar_path(tmp_path / "sidecars", plan.spec, path)
         sidecar.parent.mkdir(parents=True, exist_ok=True)
         pq.write_table(
             pa.table(
@@ -421,7 +421,7 @@ def test_finalize_dataset_reprocesses_committed_shards_when_inputs_change(
 
     def write_sidecars(code: str, version: str) -> None:
         for path in plan.geometry_paths:
-            sidecar = release_plan._sidecar_path(tmp_path / "sidecars", plan.spec, path)
+            sidecar = release_plan.sidecar_path(tmp_path / "sidecars", plan.spec, path)
             sidecar.parent.mkdir(parents=True, exist_ok=True)
             pq.write_table(
                 pa.table(
@@ -544,7 +544,7 @@ def test_planning_manifest_and_shared_blobs_are_deterministic(monkeypatch) -> No
     raster = _asset("/Prob_R11.tif")
     vector = _asset("/habitats.gpkg", code=None)
     group = EeaGroup("record", "title", "folder", "service", {}, (raster,), vector)
-    manifest = manifest_state._reference_manifest(
+    manifest = manifest_state.reference_manifest(
         (group,),
         {"record:/Prob_R11.tif": "sha"},
         source_version="EEA-test",
@@ -581,7 +581,9 @@ def test_planning_manifest_and_shared_blobs_are_deterministic(monkeypatch) -> No
         ],
     }
 
-    shared = manifest_state._shared_blobs(cast(HubApi, object()), plans[1], {"polygons/a.parquet"})
+    shared = manifest_state.collect_shared_blobs(
+        cast(HubApi, object()), plans[1], {"polygons/a.parquet"}
+    )
     assert shared == {
         "polygon_document_links/a.parquet": "link",
         "wikipedia/a.parquet": "wikipedia",
@@ -641,7 +643,7 @@ def test_finalize_plan_builds_manifest_and_verifies_target(monkeypatch, tmp_path
             )
 
     monkeypatch.setattr(card_publishing, "DatasetCardAccumulator", FakeCard)
-    monkeypatch.setattr(card_publishing, "_upload_file", lambda *args, **kwargs: "commit-card")
+    monkeypatch.setattr(card_publishing, "upload_file", lambda *args, **kwargs: "commit-card")
 
     def fake_build_manifest(options):
         calls.append(options)
@@ -650,14 +652,14 @@ def test_finalize_plan_builds_manifest_and_verifies_target(monkeypatch, tmp_path
     monkeypatch.setattr(card_publishing, "build_manifest", fake_build_manifest)
     monkeypatch.setattr(
         card_publishing,
-        "_shared_blobs",
+        "collect_shared_blobs",
         lambda *args, **kwargs: {"README.md": "blob"},
     )
 
-    result = card_publishing._finalize_plan(
+    result = card_publishing.finalize_plan(
         cast(HubApi, object()),
         plan,
-        options=card_publishing._PlanOptions(
+        options=card_publishing.PlanOptions(
             sidecar_root=tmp_path / "sidecars",
             workdir=tmp_path,
             batch_size=2,
@@ -697,10 +699,10 @@ def test_run_release_coordinates_pooled_processing(monkeypatch, tmp_path: Path) 
     monkeypatch.setattr(release_orchestration, "resolve_config_data", lambda config: (group,))
     monkeypatch.setattr(
         release_orchestration,
-        "_process_reference_groups",
+        "process_reference_groups",
         lambda options: seen.append((options.http_client, options.limits.workers)),
     )
-    monkeypatch.setattr(release_orchestration, "_finalize_plan", lambda *args, **kwargs: receipt)
+    monkeypatch.setattr(release_orchestration, "finalize_plan", lambda *args, **kwargs: receipt)
 
     result = release_orchestration.run_release(
         cast(HubApi, object()),

@@ -13,7 +13,7 @@ import pyarrow.parquet as pq
 from osm_polygon_eunis import card_publishing, release_orchestration, release_plan, shard_processing
 from osm_polygon_eunis._protocols import HubApi
 from osm_polygon_eunis.geometry import GEOMETRY_POLICY
-from osm_polygon_eunis.geometry_chunks import _GeometryRunOptions
+from osm_polygon_eunis.geometry_chunks import GeometryRunOptions
 from osm_polygon_eunis.options import BatchLimits, ReleaseOptions
 from osm_polygon_eunis.publish import (
     MANIFEST_VERSION,
@@ -155,9 +155,9 @@ def test_release_outputs_match_pre_refactor_golden_snapshot(
     )
     workdir = tmp_path / "release"
 
-    def prepare_labels(options: _GeometryRunOptions) -> None:
+    def prepare_labels(options: GeometryRunOptions) -> None:
         for plan in options.plans:
-            sidecar = release_plan._sidecar_path(
+            sidecar = release_plan.sidecar_path(
                 options.sidecar_root, plan.spec, plan.geometry_paths[0]
             )
             sidecar.parent.mkdir(parents=True, exist_ok=True)
@@ -213,9 +213,9 @@ def test_release_outputs_match_pre_refactor_golden_snapshot(
         )
 
     monkeypatch.setattr(release_orchestration, "resolve_config_data", lambda _config: ())
-    monkeypatch.setattr(release_orchestration, "_process_reference_groups", prepare_labels)
+    monkeypatch.setattr(release_orchestration, "process_reference_groups", prepare_labels)
     monkeypatch.setattr(shard_processing, "download_to_temp", download_source)
-    monkeypatch.setattr(card_publishing, "_verify_final_dataset", verify_published)
+    monkeypatch.setattr(card_publishing, "verify_final_dataset", verify_published)
 
     receipt = release_orchestration.run_release(
         hub,

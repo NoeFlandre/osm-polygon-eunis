@@ -11,24 +11,26 @@ from typing import Any
 from ._protocols import HubApi, StreamClient
 from .cards import CardArtifacts, DatasetCardAccumulator
 from .manifest_state import (
-    _FinalDatasetVerificationOptions,
-    _shared_blobs,
-    _verify_final_dataset,
+    FinalDatasetVerificationOptions,
+    collect_shared_blobs,
+    verify_final_dataset,
 )
 from .publish import ManifestBuildOptions, ShardExpectation, build_manifest, upload_manifest
 from .release_plan import DatasetPlan, DatasetReceipt, Progress
 from .shard_processing import (
     FinalizeOptions,
-    _advance_commit,
-    _upload_file,
+    advance_commit,
     clear_finalize_progress,
     finalize_dataset,
+    upload_file,
 )
 from .sources import capture_revision, download_to_temp
 
 
 @dataclass(frozen=True, slots=True)
-class _PlanOptions:
+class PlanOptions:
+    """Options for finalizing one planned dataset release."""
+
     sidecar_root: Path
     workdir: Path
     batch_size: int
@@ -39,12 +41,13 @@ class _PlanOptions:
     max_intersection_errors: int | None
 
 
-def _finalize_plan(
+def finalize_plan(
     api: HubApi,
     plan: DatasetPlan,
     *,
-    options: _PlanOptions,
+    options: PlanOptions,
 ) -> DatasetReceipt:
+    """Publish and verify one dataset plan, returning its receipt."""
     target_revision = capture_revision(api, plan.spec.output_repo)
     source_readme = _download_source_readme(api, plan, options)
     card = DatasetCardAccumulator(source_readme=source_readme)
@@ -76,11 +79,11 @@ def _finalize_plan(
         card_artifacts,
         parent_commit=current_commit,
     )
-    shared_blobs = _shared_blobs(api, plan, set(changed_paths))
-    verification = _verify_final_dataset(
+    shared_blobs = collect_shared_blobs(api, plan, set(changed_paths))
+    verification = verify_final_dataset(
         api,
         plan,
-        _FinalDatasetVerificationOptions(
+        FinalDatasetVerificationOptions(
             expectations=expectations,
             added_paths=added_paths,
             expected_shared_blobs=shared_blobs,
@@ -131,7 +134,7 @@ def _write_card_artifacts(
 def _download_source_readme(
     api: HubApi,
     plan: DatasetPlan,
-    options: _PlanOptions,
+    options: PlanOptions,
 ) -> str | None:
     """Fetch the small pinned source card so its Viewer config is preserved."""
 
@@ -175,7 +178,7 @@ def _publish_dataset_manifest(
         manifest,
         parent_commit=parent_commit,
     )
-    _advance_commit(api, plan.spec.output_repo, manifest_commit)
+    advance_commit(api, plan.spec.output_repo, manifest_commit)
     return manifest, changed_paths, added_paths
 
 
@@ -192,7 +195,7 @@ def _upload_card_artifacts(
 ) -> str:
     current_commit = parent_commit
     for path, local_path in artifacts.files.items():
-        current_commit = _upload_file(
+        current_commit = upload_file(
             api,
             target_repo,
             path,

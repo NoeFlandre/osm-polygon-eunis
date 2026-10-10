@@ -10,11 +10,11 @@ from osm_polygon_eunis._protocols import HubApi
 from osm_polygon_eunis.release_plan import (
     DATASET_NAMES,
     DatasetPlan,
-    _cached_geometry_path,
     _geometry_paths,
-    _sidecar_path,
+    cached_geometry_path,
     plan_datasets,
     selected_dataset_names,
+    sidecar_path,
 )
 from osm_polygon_eunis.sources import dataset_spec
 
@@ -107,9 +107,9 @@ def test_sidecar_and_cached_geometry_paths_flatten_the_repository_path() -> None
     spec = dataset_spec("wikidata")
     plan = DatasetPlan(spec, "revision", (), (), ())
 
-    assert _sidecar_path(Path("/work"), spec, "polygons/a/b.parquet") == Path(
+    assert sidecar_path(Path("/work"), spec, "polygons/a/b.parquet") == Path(
         "/work/wikidata/polygons__a__b.parquet.labels.parquet"
     )
-    assert _cached_geometry_path(Path("/work"), plan, "polygons/a/b.parquet") == Path(
+    assert cached_geometry_path(Path("/work"), plan, "polygons/a/b.parquet") == Path(
         "/work/wikidata/polygons__a__b.parquet"
     )

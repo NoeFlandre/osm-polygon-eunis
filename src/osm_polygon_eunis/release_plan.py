@@ -53,11 +53,13 @@ class ReleaseReceipt:
     reference: Mapping[str, object]
 
 
-def _sidecar_path(root: Path, spec: DatasetSpec, source_path: str) -> Path:
+def sidecar_path(root: Path, spec: DatasetSpec, source_path: str) -> Path:
+    """Return the labels sidecar path for one geometry shard of a dataset."""
     return root / spec.name / f"{source_path.replace('/', '__')}.labels.parquet"
 
 
-def _cached_geometry_path(root: Path, plan: DatasetPlan, source_path: str) -> Path:
+def cached_geometry_path(root: Path, plan: DatasetPlan, source_path: str) -> Path:
+    """Return the cached path of one source geometry shard of a dataset."""
     return root / plan.spec.name / flatten_repo_path(source_path)
 
 

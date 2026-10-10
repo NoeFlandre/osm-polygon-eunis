@@ -33,7 +33,7 @@ def _plan() -> DatasetPlan:
 def _matching_manifest(plan: DatasetPlan) -> dict[str, object]:
     return {
         "manifest_version": manifest_state.MANIFEST_VERSION,
-        "software": manifest_state._software_provenance(),
+        "software": manifest_state.software_provenance(),
         "source_repo": plan.spec.source_repo,
         "target_repo": plan.spec.output_repo,
         "source_revision": plan.source_revision,
@@ -45,7 +45,7 @@ def _matching_manifest(plan: DatasetPlan) -> dict[str, object]:
 def test_reference_manifest_ignores_groups_without_assets() -> None:
     group = EeaGroup("empty", "empty", "folder", "service", {}, (), None)
 
-    manifest = manifest_state._reference_manifest(
+    manifest = manifest_state.reference_manifest(
         (group,), {}, source_version="EEA-test", crs="EPSG:3035", threshold=0, config={}
     )
 
@@ -171,7 +171,7 @@ def test_run_release_verifies_matching_manifests_without_processing(
     reference = {"source_version": "EEA-test", "crs": "EPSG:3035", "threshold": 0}
     manifest = {
         "manifest_version": manifest_state.MANIFEST_VERSION,
-        "software": manifest_state._software_provenance(),
+        "software": manifest_state.software_provenance(),
         "source_repo": "source",
         "target_repo": "target",
         "source_revision": "source-revision",
@@ -206,23 +206,23 @@ def test_run_release_verifies_matching_manifests_without_processing(
     monkeypatch.setattr(release_orchestration, "resolve_config_data", lambda config: ())
     monkeypatch.setattr(
         release_orchestration,
-        "_reference_manifest",
+        "reference_manifest",
         lambda *args, **kwargs: reference,
     )
     monkeypatch.setattr(
         manifest_state,
         "_load_existing_manifest",
-        lambda *args, **kwargs: manifest_state._ExistingManifest("target", manifest),
+        lambda *args, **kwargs: manifest_state.ExistingManifest("target", manifest),
     )
-    monkeypatch.setattr(manifest_state, "_verify_no_op_dataset", lambda *args, **kwargs: receipt)
+    monkeypatch.setattr(manifest_state, "verify_no_op_dataset", lambda *args, **kwargs: receipt)
     monkeypatch.setattr(
         release_orchestration,
-        "_process_reference_groups",
+        "process_reference_groups",
         lambda *args, **kwargs: pytest.fail("matching release must not process source shards"),
     )
     monkeypatch.setattr(
         release_orchestration,
-        "_finalize_plan",
+        "finalize_plan",
         lambda *args, **kwargs: pytest.fail("matching release must not upload source shards"),
     )
 
@@ -254,7 +254,7 @@ def test_no_op_manifest_helpers_validate_and_load_pinned_state(
     reference = {"assets": [{"code": "R11", "sha256": "downloaded"}]}
     manifest = {
         "manifest_version": manifest_state.MANIFEST_VERSION,
-        "software": manifest_state._software_provenance(),
+        "software": manifest_state.software_provenance(),
         "source_repo": "source",
         "target_repo": "target",
         "source_revision": "source-revision",
@@ -328,7 +328,7 @@ def test_no_op_manifest_helpers_validate_and_load_pinned_state(
     loaded = manifest_state._load_existing_manifest(
         cast(HubApi, Api()), plan, tmp_path / "noop", cast(StreamClient, object())
     )
-    assert loaded == manifest_state._ExistingManifest("target-revision", manifest)
+    assert loaded == manifest_state.ExistingManifest("target-revision", manifest)
 
 
 def test_verify_no_op_dataset_reuses_manifest_expectations(monkeypatch, tmp_path: Path) -> None:
@@ -352,15 +352,15 @@ def test_verify_no_op_dataset_reuses_manifest_expectations(monkeypatch, tmp_path
         },
     }
     verification = VerificationReceipt("target", "verified", {}, (), manifest)
-    monkeypatch.setattr(manifest_state, "_shared_blobs", lambda *args, **kwargs: {})
+    monkeypatch.setattr(manifest_state, "collect_shared_blobs", lambda *args, **kwargs: {})
     monkeypatch.setattr(
-        manifest_state, "_verify_final_dataset", lambda *args, **kwargs: verification
+        manifest_state, "verify_final_dataset", lambda *args, **kwargs: verification
     )
 
-    result = manifest_state._verify_no_op_dataset(
+    result = manifest_state.verify_no_op_dataset(
         cast(HubApi, object()),
         plan,
-        manifest_state._ExistingManifest("target", manifest),
+        manifest_state.ExistingManifest("target", manifest),
         workdir=tmp_path,
         client=cast(StreamClient, object()),
     )
@@ -382,15 +382,15 @@ def test_no_op_release_falls_back_when_manifest_is_missing_or_stale(
     if existing is None:
         item = None
     else:
-        item = manifest_state._ExistingManifest("target-revision", manifest)
-    monkeypatch.setattr(manifest_state, "_load_existing_manifests", lambda *args: (item,))
+        item = manifest_state.ExistingManifest("target-revision", manifest)
+    monkeypatch.setattr(manifest_state, "load_existing_manifests", lambda *args: (item,))
     monkeypatch.setattr(
         manifest_state,
-        "_verify_no_op_dataset",
+        "verify_no_op_dataset",
         lambda *args, **kwargs: pytest.fail("incompatible manifests must not be verified as no-op"),
     )
 
-    receipt = manifest_state._try_no_op_release(
+    receipt = manifest_state.try_no_op_release(
         cast(HubApi, object()),
         (plan,),
         {"source_version": "EEA-test"},
@@ -414,11 +414,11 @@ def test_no_op_release_fails_closed_when_manifest_artifacts_are_incomplete(
         "changed_paths": ["polygons/a.parquet"],
         "added_paths": ["eunis/world-map.svg"],
     }
-    existing = manifest_state._ExistingManifest("target-revision", manifest)
-    monkeypatch.setattr(manifest_state, "_load_existing_manifests", lambda *args: (existing,))
+    existing = manifest_state.ExistingManifest("target-revision", manifest)
+    monkeypatch.setattr(manifest_state, "load_existing_manifests", lambda *args: (existing,))
 
     with pytest.raises(VerificationError, match="incomplete"):
-        manifest_state._try_no_op_release(
+        manifest_state.try_no_op_release(
             cast(HubApi, object()),
             (plan,),
             {"source_version": "EEA-test"},
@@ -434,18 +434,18 @@ def test_no_op_release_reports_each_verified_dataset(
 ) -> None:
     plan = _plan()
     manifest = _matching_manifest(plan)
-    existing = manifest_state._ExistingManifest("target-revision", manifest)
+    existing = manifest_state.ExistingManifest("target-revision", manifest)
     receipt = DatasetReceipt(
         plan,
         (),
         VerificationReceipt("target", "target-revision", {}, (), manifest),
         no_op=True,
     )
-    monkeypatch.setattr(manifest_state, "_load_existing_manifests", lambda *args: (existing,))
+    monkeypatch.setattr(manifest_state, "load_existing_manifests", lambda *args: (existing,))
     monkeypatch.setattr(manifest_state, "_no_op_receipts", lambda *args, **kwargs: (receipt,))
     events: list[Mapping[str, object]] = []
 
-    result = manifest_state._try_no_op_release(
+    result = manifest_state.try_no_op_release(
         cast(HubApi, object()),
         (plan,),
         {"source_version": "EEA-test"},

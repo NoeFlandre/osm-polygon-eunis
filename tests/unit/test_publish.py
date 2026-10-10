@@ -107,7 +107,7 @@ def test_manifest_rejects_invalid_source_commit(monkeypatch) -> None:
     monkeypatch.setenv("EUNIS_SOURCE_COMMIT", "not-a-commit")
 
     with pytest.raises(ValueError, match="40- or 64-character hexadecimal SHA"):
-        publish._software_provenance()
+        publish.software_provenance()
 
 
 def test_manifest_uses_git_commit_when_environment_is_empty(monkeypatch) -> None:
@@ -123,7 +123,7 @@ def test_manifest_uses_git_commit_when_environment_is_empty(monkeypatch) -> None
 
     monkeypatch.setattr(publish.subprocess, "run", run_git)
 
-    assert publish._software_provenance()["commit"] == source_commit
+    assert publish.software_provenance()["commit"] == source_commit
 
 
 def test_manifest_rejects_dirty_git_checkout_when_falling_back_to_head(monkeypatch) -> None:
@@ -139,7 +139,7 @@ def test_manifest_rejects_dirty_git_checkout_when_falling_back_to_head(monkeypat
     monkeypatch.setattr(publish.subprocess, "run", run_git)
 
     with pytest.raises(ValueError, match="source checkout is dirty"):
-        publish._software_provenance()
+        publish.software_provenance()
 
 
 @pytest.mark.parametrize("git_path", (None, "/usr/bin/git"), ids=("git-not-found", "git-failed"))
@@ -159,7 +159,7 @@ def test_manifest_requires_source_commit(monkeypatch, git_path: str | None) -> N
         )
 
     with pytest.raises(ValueError, match="source commit unavailable"):
-        publish._software_provenance()
+        publish.software_provenance()
 
 
 def test_manifest_records_added_card_artifacts() -> None:
