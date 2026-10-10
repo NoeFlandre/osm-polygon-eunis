@@ -1,9 +1,17 @@
 import json
+import os
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+RELEASE = REPO_ROOT / "scripts" / "grid5000" / "release.sh"
+JOB_ID = "4242"
 
 
 @dataclass(frozen=True)
@@ -100,6 +108,29 @@ def test_child_exit_124_without_deadline_marker_is_a_failed_attempt(tmp_path: Pa
     assert grid["stop_reason"] == "worker_failure"
 
 
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    ("exit_status", "stop_state", "stop_reason"),
+    [
+        pytest.param("124", "deadline", "graceful_deadline", id="deadline"),
+        pytest.param("130", "signal:2", "interrupt", id="interrupt"),
+        pytest.param("143", "signal:15", "termination_signal", id="termination"),
+    ],
+)
+def test_guarded_stops_are_incomplete_with_their_own_reason(
+    tmp_path: Path,
+    exit_status: str,
+    stop_state: str,
+    stop_reason: str,
+) -> None:
+    payload = _write_receipt(
+        tmp_path, ReceiptOptions(exit_status=exit_status, stop_state=stop_state)
+    )
+
+    assert payload["status"] == "incomplete"
+    assert payload["grid5000"]["stop_reason"] == stop_reason
+
+
 def test_invalid_deadline_overrides_do_not_block_failure_receipt(tmp_path: Path) -> None:
     payload = _write_receipt(
         tmp_path,
@@ -141,9 +172,69 @@ def test_option_like_invalid_deadline_overrides_do_not_block_receipt(tmp_path: P
     assert grid["requested_termination_grace_seconds"] == "--malformed-grace"
 
 
-def test_release_failure_handler_passes_raw_deadline_values_as_option_assignments() -> None:
-    release_script = Path(__file__).resolve().parents[2] / "scripts/grid5000/release.sh"
-    source = release_script.read_text(encoding="utf-8")
+def _persistent_root(workspace: Path) -> str:
+    """Return a root that passes release.sh's literal /home/ gate inside workspace.
 
-    assert '--stop-margin-seconds="$stop_margin_seconds"' in source
-    assert '--termination-grace-seconds="$termination_grace_seconds"' in source
+    The gate matches the string prefix, so the root starts with /home/ and then
+    climbs out with /home/.. so that the kernel resolves it to the temporary
+    workspace. This needs /home to be a real directory on the test machine.
+    """
+
+    if Path("/home/..").resolve() != Path("/"):
+        pytest.fail("these tests need /home to be a real directory")
+    return f"/home/../{workspace.relative_to('/').as_posix()}/persistent"
+
+
+@pytest.mark.slow
+def test_release_failure_handler_passes_raw_deadline_values_as_option_assignments(
+    tmp_path: Path,
+) -> None:
+    # Metadata validation rejects the two option-like deadline values before any
+    # work starts, and the EXIT handler then writes the failure receipt. Argparse
+    # reads a space-separated value that starts with "--" as an option, so the
+    # receipt exists only if the handler passes each value as --flag=value.
+    shell = shutil.which("bash")
+    assert shell is not None
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "python3").symlink_to(sys.executable)
+    persistent_root = _persistent_root(tmp_path)
+    environment = {
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', os.defpath)}",
+        "HOME": str(tmp_path / "home"),
+        "HF_HOME": str(tmp_path / "hf-home"),
+        "TMPDIR": str(tmp_path / "tmp"),
+        "OAR_JOB_ID": JOB_ID,
+        "GRID5000_PERSISTENT_ROOT": persistent_root,
+        "GRID5000_SOURCE_REVISION": "c" * 40,
+        "GRID5000_SITE": "test-site",
+        "GRID5000_FRONTEND": "frontend.test",
+        "GRID5000_CLUSTER": "test-cluster",
+        "GRID5000_QUEUE": "test-queue",
+        "GRID5000_CORES": "4",
+        "GRID5000_WORKERS": "2",
+        "GRID5000_BATCH_SIZE": "8",
+        "GRID5000_WALLTIME": "0:10:00",
+        "GRID5000_STOP_MARGIN_SECONDS": "--malformed-margin",
+        "GRID5000_TERMINATION_GRACE_SECONDS": "--malformed-grace",
+    }
+
+    # The script and all arguments are local test fixtures from trusted paths.
+    result = subprocess.run(  # noqa: S603
+        [shell, str(RELEASE)],
+        capture_output=True,
+        check=False,
+        env=environment,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 2, result.stdout + result.stderr
+    receipt = json.loads(
+        (Path(persistent_root) / "receipts" / f"eunis-{JOB_ID}.json").read_text(encoding="utf-8")
+    )
+    assert receipt["status"] == "failed"
+    grid = receipt["grid5000"]
+    assert grid["site"] == "test-site"
+    assert grid["requested_stop_margin_seconds"] == "--malformed-margin"
+    assert grid["requested_termination_grace_seconds"] == "--malformed-grace"
