@@ -13,7 +13,9 @@ from typing import Any
 MODULE_MINIMUM_SCORES: dict[str, float] = {
     "geometry": 93.02,
     "grid_overlap": 93.67,
+    "manifest_state": 99.09,
     "matching": 99.2,
+    "publish": 99.6,
     "release_plan": 100.0,
     "transform": 98.3,
 }
@@ -134,6 +136,32 @@ ALLOWED_MUTANTS: dict[str, str] = {
         "geometry with zero area, which is the value already in place.",
         "grid_overlap",
         "x__cell_areas__mutmut_30",
+    ),
+    **_equivalent(
+        "Equivalent: typing.cast returns its value unchanged at runtime, so the cast target "
+        "is not observable.",
+        "manifest_state",
+        "x__required_string_list__mutmut_16",
+        "x__no_op_receipts__mutmut_12",
+    ),
+    **_equivalent(
+        "Equivalent: shard paths are strings, so str is the default sort order. A non-string "
+        "path is rejected whichever order it sorts in.",
+        "manifest_state",
+        "x__manifest_expectations__mutmut_13",
+        "x__manifest_expectations__mutmut_15",
+    ),
+    **_equivalent(
+        "Equivalent: importlib.metadata normalises distribution names, so the upper-case "
+        "spelling resolves to the same installed distribution.",
+        "publish",
+        "x_software_provenance__mutmut_9",
+    ),
+    **_equivalent(
+        "Equivalent: rows_by_path is reassigned by the try block before any read, and an "
+        "exception leaves the function without returning it.",
+        "publish",
+        "x_verify_dataset__mutmut_30",
     ),
 }
 _NAME_PARTS = 3  # osm_polygon_eunis.<module>.<mutant>

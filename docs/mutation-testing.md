@@ -1,6 +1,6 @@
 # Mutation testing
 
-A separate GitHub Actions workflow runs mutation tests on five modules. Mutmut
+A separate GitHub Actions workflow runs mutation tests on seven modules. Mutmut
 targets these modules:
 
 | Module | Why it is mutated |
@@ -10,6 +10,8 @@ targets these modules:
 | `grid_overlap.py` | The exact polygon and cell overlap areas. |
 | `transform.py` | The batch and label sidecar alignment. |
 | `release_plan.py` | The pinned source layout and the sidecar paths. |
+| `manifest_state.py` | The release manifest identity and the no-op release check. |
+| `publish.py` | The fail-closed remote verification and the manifest build. |
 
 Each module uses its focused unit suites. The brute-force grid cross-check in
 `tests/unit/test_grid_overlap.py` is marked `slow`, but it runs in under one
@@ -54,6 +56,10 @@ mutant changes the code but not the behavior. These are the groups:
   covers `dtype`, `fill`, `copy` and the `STABLE` sort kind.
 - Grouping cells by finer keys, preparing a geometry, and clipping a polygon to
   a cell that it does not touch do not change any cell area.
+- `typing.cast` returns its value unchanged at run time. importlib normalises
+  distribution names. Shard paths are strings, so the default sort order equals
+  an explicit `str` key. A variable assigned before a `try` block is replaced
+  before any read.
 
 To run the workflow locally, use these commands:
 

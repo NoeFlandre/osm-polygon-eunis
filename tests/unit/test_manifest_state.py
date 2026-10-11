@@ -12,10 +12,16 @@ import pytest
 
 from osm_polygon_eunis import manifest_state, release_orchestration
 from osm_polygon_eunis._protocols import HubApi, StreamClient
-from osm_polygon_eunis.eea import EeaGroup
+from osm_polygon_eunis.eea import EeaGroup, RemoteAsset
 from osm_polygon_eunis.geometry import GEOMETRY_POLICY
 from osm_polygon_eunis.options import BatchLimits, ReleaseOptions
-from osm_polygon_eunis.publish import ShardExpectation, VerificationError, VerificationReceipt
+from osm_polygon_eunis.publish import (
+    DatasetVerificationOptions,
+    ShardExpectation,
+    VerificationError,
+    VerificationReceipt,
+)
+from osm_polygon_eunis.reference_staging import asset_key
 from osm_polygon_eunis.release_plan import DatasetPlan, DatasetReceipt, ReleaseReceipt
 from osm_polygon_eunis.sources import DatasetSpec
 
@@ -456,3 +462,596 @@ def test_no_op_release_reports_each_verified_dataset(
 
     assert result == ReleaseReceipt((receipt,), {"source_version": "EEA-test"})
     assert events == [{"event": "dataset_no_op", "dataset": "website"}]
+
+
+def test_reference_manifest_lists_every_asset_with_checksums_in_record_then_path_order() -> None:
+    raster_a = RemoteAsset(
+        "z-raster/a.tif",
+        "https://example.test/a.tif",
+        11,
+        "etag-a",
+        "R1",
+        "A raster",
+        "record-a",
+        "EEA-test",
+    )
+    raster_b = RemoteAsset(
+        "raster/b.tif",
+        "https://example.test/b.tif",
+        22,
+        None,
+        "R2",
+        "B raster",
+        "record-b",
+        "EEA-test",
+    )
+    vector_b = RemoteAsset(
+        "aa-vector/b.gpkg",
+        "https://example.test/b.gpkg",
+        33,
+        "etag-v",
+        None,
+        "B vector",
+        "record-b",
+        "EEA-test",
+    )
+    group_a = EeaGroup("record-a", "A", "folder-a", "service-a", {}, (raster_a,), None)
+    group_b = EeaGroup("record-b", "B", "folder-b", "service-b", {}, (raster_b,), vector_b)
+    checksums = {
+        asset_key(group_a, raster_a): "sha-a",
+        asset_key(group_b, raster_b): "sha-b",
+        asset_key(group_b, vector_b): "sha-vector",
+    }
+
+    manifest = manifest_state.reference_manifest(
+        (group_b, group_a),
+        checksums,
+        source_version="EEA-test",
+        crs="EPSG:3035",
+        threshold=7,
+        config={"classification_record": "clc-2018"},
+    )
+
+    assert manifest == {
+        "source_version": "EEA-test",
+        "crs": "EPSG:3035",
+        "threshold": 7,
+        "classification_record": "clc-2018",
+        "assets": [
+            {
+                "record_id": "record-a",
+                "path": "z-raster/a.tif",
+                "url": "https://example.test/a.tif",
+                "size": 11,
+                "etag": "etag-a",
+                "code": "R1",
+                "name": "A raster",
+                "sha256": "sha-a",
+            },
+            {
+                "record_id": "record-b",
+                "path": "aa-vector/b.gpkg",
+                "url": "https://example.test/b.gpkg",
+                "size": 33,
+                "etag": "etag-v",
+                "code": None,
+                "name": "B vector",
+                "sha256": "sha-vector",
+            },
+            {
+                "record_id": "record-b",
+                "path": "raster/b.tif",
+                "url": "https://example.test/b.tif",
+                "size": 22,
+                "etag": None,
+                "code": "R2",
+                "name": "B raster",
+                "sha256": "sha-b",
+            },
+        ],
+    }
+
+
+def test_mapping_field_returns_only_mapping_values() -> None:
+    assert manifest_state._mapping_field({"reference": {"source_version": "EEA"}}, "reference") == {
+        "source_version": "EEA"
+    }
+    assert manifest_state._mapping_field({"reference": ["not", "a", "mapping"]}, "reference") == {}
+    assert manifest_state._mapping_field({}, "reference") == {}
+
+
+def test_existing_manifest_reads_the_pinned_target_and_removes_the_download(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plan = _plan()
+    api = cast(HubApi, object())
+    client = cast(StreamClient, object())
+    capture_calls: list[tuple[object, str]] = []
+    list_calls: list[tuple[object, str, str]] = []
+    download_calls: list[tuple[object, str, str, str, Path, object]] = []
+    downloaded: list[Path] = []
+
+    def fake_capture(api_arg: object, repo: str) -> str:
+        capture_calls.append((api_arg, repo))
+        return "target-revision"
+
+    def fake_list(api_arg: object, repo: str, revision: str) -> tuple[SimpleNamespace, ...]:
+        list_calls.append((api_arg, repo, revision))
+        return (SimpleNamespace(path="README.md"), SimpleNamespace(path="eunis/manifest.json"))
+
+    def fake_download(
+        api_arg: object,
+        repo_id: str,
+        path: str,
+        revision: str,
+        directory: Path,
+        *,
+        client: object = None,
+    ) -> Path:
+        download_calls.append((api_arg, repo_id, path, revision, directory, client))
+        directory.mkdir(parents=True, exist_ok=True)
+        destination = directory / "manifest.json"
+        destination.write_text(json.dumps({"source_revision": "source-revision"}), encoding="utf-8")
+        downloaded.append(destination)
+        return destination
+
+    monkeypatch.setattr(manifest_state, "capture_revision", fake_capture)
+    monkeypatch.setattr(manifest_state, "list_repo_files", fake_list)
+    monkeypatch.setattr(manifest_state, "download_to_temp", fake_download)
+
+    existing = manifest_state._load_existing_manifest(api, plan, tmp_path, client)
+
+    assert capture_calls == [(api, "target")]
+    assert list_calls == [(api, "target", "target-revision")]
+    assert download_calls == [
+        (api, "target", "eunis/manifest.json", "target-revision", tmp_path, client)
+    ]
+    assert existing == manifest_state.ExistingManifest(
+        "target-revision", {"source_revision": "source-revision"}
+    )
+    assert not downloaded[0].exists()
+
+
+def test_existing_manifest_is_absent_when_the_target_has_no_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(manifest_state, "capture_revision", lambda api, repo: "target-revision")
+    monkeypatch.setattr(
+        manifest_state,
+        "list_repo_files",
+        lambda api, repo, revision: (SimpleNamespace(path="README.md"),),
+    )
+    monkeypatch.setattr(
+        manifest_state,
+        "download_to_temp",
+        lambda *args, **kwargs: pytest.fail("a target without a manifest must not download"),
+    )
+
+    assert (
+        manifest_state._load_existing_manifest(
+            cast(HubApi, object()), _plan(), tmp_path, cast(StreamClient, object())
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("path", "rows", "schema", "message"),
+    [
+        (1, 1, "schema", "manifest shard path must be a string"),
+        (
+            "polygons/a.parquet",
+            True,
+            "schema",
+            "manifest shard rows must be a non-negative integer",
+        ),
+        ("polygons/a.parquet", 1, None, "manifest shard schema must be a string"),
+    ],
+)
+def test_manifest_expectation_names_the_invalid_field(
+    path: object,
+    rows: object,
+    schema: object,
+    message: str,
+) -> None:
+    with pytest.raises(TypeError) as excinfo:
+        manifest_state._manifest_expectation(path, rows, schema)
+
+    assert str(excinfo.value) == message
+
+
+def test_manifest_artifacts_require_both_a_path_and_a_digest_for_each_card_file() -> None:
+    complete = {
+        "readme_path": "README.md",
+        "readme_sha256": "readme",
+        "map_path": "eunis/world-map.svg",
+        "map_sha256": "map",
+    }
+
+    assert manifest_state._manifest_artifacts({"card": complete}) == {
+        "README.md": "readme",
+        "eunis/world-map.svg": "map",
+    }
+    assert manifest_state._manifest_artifacts({"card": {**complete, "readme_sha256": None}}) is None
+    assert manifest_state._manifest_artifacts({"card": {**complete, "map_path": None}}) is None
+
+
+def test_no_op_manifest_errors_use_the_exact_incomplete_manifest_message() -> None:
+    with pytest.raises(VerificationError) as excinfo:
+        manifest_state._required_string_list(
+            {"changed_paths": "polygons/a.parquet"}, "changed_paths"
+        )
+    assert str(excinfo.value) == "matching EUNIS manifest is incomplete for no-op verification"
+
+    with pytest.raises(VerificationError) as mixed:
+        manifest_state._required_string_list({"changed_paths": ["ok", 1]}, "changed_paths")
+    assert str(mixed.value) == "matching EUNIS manifest is incomplete for no-op verification"
+
+    with pytest.raises(VerificationError) as missing:
+        manifest_state._required_no_op_parts({})
+    assert str(missing.value) == "matching EUNIS manifest is incomplete for no-op verification"
+
+
+def test_verify_no_op_dataset_passes_exact_expectations_to_final_verification(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plan = _plan()
+    manifest = {
+        "rows_by_path": {"polygons/a.parquet": 1},
+        "schema_by_path": {"polygons/a.parquet": "schema"},
+        "changed_paths": ["polygons/a.parquet"],
+        "added_paths": ["eunis/world-map.svg"],
+        "card": {
+            "readme_path": "README.md",
+            "map_path": "eunis/world-map.svg",
+            "readme_sha256": "readme",
+            "map_sha256": "map",
+        },
+    }
+    api = cast(HubApi, object())
+    client = cast(StreamClient, object())
+    verification = VerificationReceipt(
+        "target", "verified", {"polygons/a.parquet": 1}, (), manifest
+    )
+    shared_calls: list[tuple[object, DatasetPlan, set[str]]] = []
+    final_calls: list[tuple[object, DatasetPlan, object]] = []
+
+    def fake_shared(api_arg: object, plan_arg: DatasetPlan, changed: set[str]) -> dict[str, str]:
+        shared_calls.append((api_arg, plan_arg, changed))
+        return {"README.md": "readme-blob"}
+
+    def fake_final(api_arg: object, plan_arg: DatasetPlan, options: object) -> VerificationReceipt:
+        final_calls.append((api_arg, plan_arg, options))
+        return verification
+
+    monkeypatch.setattr(manifest_state, "collect_shared_blobs", fake_shared)
+    monkeypatch.setattr(manifest_state, "verify_final_dataset", fake_final)
+
+    result = manifest_state.verify_no_op_dataset(
+        api,
+        plan,
+        manifest_state.ExistingManifest("target", manifest),
+        workdir=tmp_path,
+        client=client,
+    )
+
+    assert shared_calls == [(api, plan, {"polygons/a.parquet"})]
+    assert final_calls == [
+        (
+            api,
+            plan,
+            manifest_state.FinalDatasetVerificationOptions(
+                expectations=(ShardExpectation("polygons/a.parquet", 1, "schema"),),
+                added_paths=("eunis/world-map.svg",),
+                expected_shared_blobs={"README.md": "readme-blob"},
+                expected_manifest=manifest,
+                expected_artifacts={"README.md": "readme", "eunis/world-map.svg": "map"},
+                temp_dir=tmp_path / "verify-no-op",
+                http_client=client,
+            ),
+        )
+    ]
+    assert result == DatasetReceipt(
+        plan,
+        (ShardExpectation("polygons/a.parquet", 1, "schema"),),
+        verification,
+        no_op=True,
+    )
+
+
+def test_load_existing_manifests_reads_every_plan_with_the_same_client_and_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    first = _plan()
+    second = DatasetPlan(
+        DatasetSpec("other", "source-2", "target-2", "polygons/*.parquet"),
+        "other-revision",
+        ("polygons/b.parquet",),
+        ("polygons/b.parquet",),
+        (),
+    )
+    api = cast(HubApi, object())
+    client = cast(StreamClient, object())
+    calls: list[tuple[object, DatasetPlan, Path, object]] = []
+
+    def fake_load(
+        api_arg: object,
+        plan: DatasetPlan,
+        directory: Path,
+        client_arg: object,
+    ) -> str:
+        calls.append((api_arg, plan, directory, client_arg))
+        return f"manifest-{plan.spec.name}"
+
+    monkeypatch.setattr(manifest_state, "_load_existing_manifest", fake_load)
+
+    result = manifest_state.load_existing_manifests(api, (first, second), tmp_path, client)
+
+    assert result == ("manifest-website", "manifest-other")
+    assert calls == [(api, first, tmp_path, client), (api, second, tmp_path, client)]
+
+
+def test_compatible_manifests_rejects_fewer_manifests_than_plans() -> None:
+    plan = _plan()
+    existing = (manifest_state.ExistingManifest("target-revision", _matching_manifest(plan)),)
+
+    assert (
+        manifest_state.compatible_manifests((plan,), existing, {"source_version": "EEA-test"})
+        is True
+    )
+    with pytest.raises(ValueError):
+        manifest_state.compatible_manifests((plan, plan), existing, {"source_version": "EEA-test"})
+
+
+def test_no_op_receipts_verify_each_plan_with_exact_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plan = _plan()
+    item = manifest_state.ExistingManifest("target-revision", _matching_manifest(plan))
+    api = cast(HubApi, object())
+    client = cast(StreamClient, object())
+    calls: list[tuple[object, DatasetPlan, object, Path, object]] = []
+    receipt = DatasetReceipt(
+        plan,
+        (),
+        VerificationReceipt("target", "target-revision", {}, (), {}),
+        no_op=True,
+    )
+
+    def fake_verify(
+        api_arg: object,
+        plan_arg: DatasetPlan,
+        existing: object,
+        *,
+        workdir: Path,
+        client: object,
+    ) -> DatasetReceipt:
+        calls.append((api_arg, plan_arg, existing, workdir, client))
+        return receipt
+
+    monkeypatch.setattr(manifest_state, "verify_no_op_dataset", fake_verify)
+
+    result = manifest_state._no_op_receipts(
+        api,
+        (plan,),
+        (item,),
+        workdir=tmp_path,
+        client=client,
+    )
+
+    assert result == (receipt,)
+    assert calls == [(api, plan, item, tmp_path, client)]
+
+
+def test_no_op_receipts_reject_mismatched_plan_and_manifest_counts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plan = _plan()
+    item = manifest_state.ExistingManifest("target-revision", _matching_manifest(plan))
+    monkeypatch.setattr(
+        manifest_state,
+        "verify_no_op_dataset",
+        lambda *args, **kwargs: DatasetReceipt(
+            plan, (), VerificationReceipt("target", "rev", {}, (), {}), no_op=True
+        ),
+    )
+
+    with pytest.raises(ValueError):
+        manifest_state._no_op_receipts(
+            cast(HubApi, object()),
+            (plan, plan),
+            (item,),
+            workdir=tmp_path,
+            client=cast(StreamClient, object()),
+        )
+
+
+def test_try_no_op_release_threads_pinned_arguments_through_every_step(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plan = _plan()
+    manifest = _matching_manifest(plan)
+    existing = (manifest_state.ExistingManifest("target-revision", manifest),)
+    api = cast(HubApi, object())
+    client = cast(StreamClient, object())
+    load_calls: list[tuple[object, tuple[DatasetPlan, ...], Path, object]] = []
+    receipt_calls: list[tuple[object, tuple[DatasetPlan, ...], object, Path, object]] = []
+    receipts = (
+        DatasetReceipt(
+            plan,
+            (),
+            VerificationReceipt("target", "target-revision", {}, (), manifest),
+            no_op=True,
+        ),
+    )
+
+    def fake_load(
+        api_arg: object,
+        plans: tuple[DatasetPlan, ...],
+        directory: Path,
+        client_arg: object,
+    ) -> tuple[manifest_state.ExistingManifest, ...]:
+        load_calls.append((api_arg, plans, directory, client_arg))
+        return existing
+
+    def fake_receipts(
+        api_arg: object,
+        plans: tuple[DatasetPlan, ...],
+        items: object,
+        *,
+        workdir: Path,
+        client: object,
+    ) -> tuple[DatasetReceipt, ...]:
+        receipt_calls.append((api_arg, plans, items, workdir, client))
+        return receipts
+
+    monkeypatch.setattr(manifest_state, "load_existing_manifests", fake_load)
+    monkeypatch.setattr(manifest_state, "_no_op_receipts", fake_receipts)
+    events: list[Mapping[str, object]] = []
+
+    result = manifest_state.try_no_op_release(
+        api,
+        (plan,),
+        {"source_version": "EEA-test"},
+        workdir=tmp_path,
+        client=client,
+        progress=events.append,
+    )
+
+    assert load_calls == [(api, (plan,), tmp_path / "noop", client)]
+    assert receipt_calls == [(api, (plan,), existing, tmp_path, client)]
+    assert events == [{"event": "dataset_no_op", "dataset": "website"}]
+    assert result == ReleaseReceipt(receipts, {"source_version": "EEA-test"})
+
+
+def test_verify_final_dataset_requests_the_pinned_tree_and_expectations(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    plan = _plan()
+    api = cast(HubApi, object())
+    client = cast(StreamClient, object())
+    calls: list[tuple[object, str, DatasetVerificationOptions]] = []
+
+    def fake_verify(
+        api_arg: object,
+        repo: str,
+        options: DatasetVerificationOptions,
+    ) -> str:
+        calls.append((api_arg, repo, options))
+        return "verified"
+
+    monkeypatch.setattr(manifest_state, "verify_dataset", fake_verify)
+    options = manifest_state.FinalDatasetVerificationOptions(
+        expectations=(ShardExpectation("polygons/a.parquet", 1, "schema"),),
+        added_paths=("eunis/world-map.svg",),
+        expected_shared_blobs={"README.md": "readme"},
+        expected_manifest={"source_revision": "source-revision"},
+        expected_artifacts={"eunis/world-map.svg": "map"},
+        temp_dir=tmp_path,
+        http_client=client,
+    )
+
+    result = manifest_state.verify_final_dataset(api, plan, options)
+
+    assert result == "verified"
+    assert calls == [
+        (
+            api,
+            "target",
+            DatasetVerificationOptions(
+                expectations=(ShardExpectation("polygons/a.parquet", 1, "schema"),),
+                expected_tree_paths=(
+                    "README.md",
+                    "polygons/a.parquet",
+                    "eunis/world-map.svg",
+                    "eunis/manifest.json",
+                ),
+                expected_shared_blobs={"README.md": "readme"},
+                expected_manifest={"source_revision": "source-revision"},
+                expected_artifacts={"eunis/world-map.svg": "map"},
+                temp_dir=tmp_path,
+                http_client=client,
+            ),
+        )
+    ]
+
+
+def test_collect_shared_blobs_maps_only_unchanged_files_that_have_a_blob_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _plan()
+    api = cast(HubApi, object())
+    calls: list[tuple[object, str, str]] = []
+    entries = (
+        SimpleNamespace(path="README.md", blob_id="readme-blob"),
+        SimpleNamespace(path="polygons/a.parquet", blob_id="changed-blob"),
+        SimpleNamespace(path="polygons/b.parquet", blob_id="shared-blob"),
+        SimpleNamespace(path="polygons/c.parquet", blob_id=None),
+        SimpleNamespace(path="polygons/d.parquet"),
+    )
+
+    def fake_list(api_arg: object, repo: str, revision: str) -> tuple[SimpleNamespace, ...]:
+        calls.append((api_arg, repo, revision))
+        return entries
+
+    monkeypatch.setattr(manifest_state, "list_repo_files", fake_list)
+
+    result = manifest_state.collect_shared_blobs(api, plan, {"polygons/a.parquet"})
+
+    assert calls == [(api, "source", "source-revision")]
+    assert result == {"README.md": "readme-blob", "polygons/b.parquet": "shared-blob"}
+
+
+def test_existing_manifest_is_read_as_utf8_and_cleanup_tolerates_a_removed_download(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    encodings: list[object] = []
+    original_read_text = Path.read_text
+
+    def read_then_remove(self: Path, *, encoding: str | None = None) -> str:
+        encodings.append(encoding)
+        text = original_read_text(self, encoding=encoding)
+        self.unlink()
+        return text
+
+    def fake_download(
+        api: object,
+        repo_id: str,
+        path: str,
+        revision: str,
+        directory: Path,
+        *,
+        client: object = None,
+    ) -> Path:
+        del api, repo_id, path, revision, client
+        directory.mkdir(parents=True, exist_ok=True)
+        destination = directory / "manifest.json"
+        destination.write_text(json.dumps({"source_revision": "source-revision"}), encoding="utf-8")
+        return destination
+
+    monkeypatch.setattr(Path, "read_text", read_then_remove)
+    monkeypatch.setattr(manifest_state, "capture_revision", lambda api, repo: "target-revision")
+    monkeypatch.setattr(
+        manifest_state,
+        "list_repo_files",
+        lambda api, repo, revision: (SimpleNamespace(path="eunis/manifest.json"),),
+    )
+    monkeypatch.setattr(manifest_state, "download_to_temp", fake_download)
+
+    existing = manifest_state._load_existing_manifest(
+        cast(HubApi, object()), _plan(), tmp_path, cast(StreamClient, object())
+    )
+
+    assert encodings == ["utf-8"]
+    assert existing == manifest_state.ExistingManifest(
+        "target-revision", {"source_revision": "source-revision"}
+    )
