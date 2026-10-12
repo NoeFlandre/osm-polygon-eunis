@@ -51,7 +51,7 @@ def test_accepts_threshold_and_only_documented_equivalent_mutant() -> None:
 
 
 def test_accepts_every_allowlisted_mutant_when_module_scores_hold() -> None:
-    killed = 10_000
+    killed = 2_000 * len(MODULE_MINIMUM_SCORES)
     stats = _stats(killed, len(ALLOWED_MUTANTS), killed + len(ALLOWED_MUTANTS))
     rows = []
     for module in MODULE_MINIMUM_SCORES:
