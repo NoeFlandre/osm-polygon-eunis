@@ -12,7 +12,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
-from typing import Final, cast
+from typing import Any, Final, cast, override
 
 import httpx
 from huggingface_hub import HfApi
@@ -87,6 +87,41 @@ def _non_negative_int(value: str) -> int:
     if number < 0:
         raise argparse.ArgumentTypeError(f"expected a non-negative integer, got {value!r}")
     return number
+
+
+def _refused_option(message: str) -> type[argparse.Action]:
+    """Build an action that rejects its option at parse time, with the reason shown."""
+
+    class _RefusedOption(argparse.Action):
+        @override
+        def __call__(
+            self,
+            parser: argparse.ArgumentParser,
+            namespace: argparse.Namespace,  # noqa: V107 - fixed by the argparse action protocol
+            values: str | Sequence[Any] | None,
+            option_string: str | None = None,  # noqa: V107 - fixed by the argparse action protocol
+        ) -> None:
+            raise argparse.ArgumentError(self, message)
+
+    return _RefusedOption
+
+
+def _add_batch_size(parser: argparse.ArgumentParser, description: str) -> None:
+    parser.add_argument(
+        "--batch-size",
+        type=_positive_int,
+        default=DEFAULT_BATCH_SIZE,
+        help=f"{description} (default: {DEFAULT_BATCH_SIZE})",
+    )
+
+
+def _add_workers(parser: argparse.ArgumentParser, description: str, default: int) -> None:
+    parser.add_argument(
+        "--workers",
+        type=_positive_int,
+        default=default,
+        help=f"{description} (default: {default})",
+    )
 
 
 _EPILOG = f"""\
@@ -216,18 +251,8 @@ def _parser() -> argparse.ArgumentParser:
         help="EEA reference config JSON (default: the packaged EEA 2021 config)",
     )
     _add_workdir(release)
-    release.add_argument(
-        "--batch-size",
-        type=_positive_int,
-        default=DEFAULT_BATCH_SIZE,
-        help=f"Parquet rows per streamed batch (default: {DEFAULT_BATCH_SIZE})",
-    )
-    release.add_argument(
-        "--workers",
-        type=_positive_int,
-        default=DEFAULT_WORKERS,
-        help=f"geometry worker processes (default: {DEFAULT_WORKERS})",
-    )
+    _add_batch_size(release, "Parquet rows per streamed batch")
+    _add_workers(release, "geometry worker processes", DEFAULT_WORKERS)
     release.add_argument(
         "--max-intersection-errors",
         type=_non_negative_int,
@@ -344,23 +369,23 @@ def _parser() -> argparse.ArgumentParser:
         default=DEFAULT_GRID_CORES,
         help=f"cores on one host (default: {DEFAULT_GRID_CORES})",
     )
-    grid_submit.add_argument(
-        "--workers",
-        type=_positive_int,
-        default=DEFAULT_GRID_WORKERS,
-        help=f"geometry workers (default: {DEFAULT_GRID_WORKERS})",
-    )
+    _add_workers(grid_submit, "geometry workers", DEFAULT_GRID_WORKERS)
     grid_submit.add_argument(
         "--walltime",
         type=_walltime,
         default="1:00:00",
         help="OAR walltime in HH:MM:SS, above 5 minutes and at most 1 hour (default: 1:00:00)",
     )
+    _add_batch_size(grid_submit, "Parquet rows per batch")
     grid_submit.add_argument(
-        "--batch-size",
-        type=_positive_int,
-        default=DEFAULT_BATCH_SIZE,
-        help=f"Parquet rows per batch (default: {DEFAULT_BATCH_SIZE})",
+        "--dataset",
+        action=_refused_option(
+            "grid5000 submit runs the all-source release in one job, so it does not accept "
+            "--dataset. Omit the flag to submit every source."
+        ),
+        nargs="?",
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
     )
     grid_submit.add_argument(
         "--dry-run",

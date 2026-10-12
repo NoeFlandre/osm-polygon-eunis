@@ -14,7 +14,12 @@ from osm_polygon_eunis import cli
 from osm_polygon_eunis._protocols import HubApi
 from osm_polygon_eunis.cli import CliDependencies
 from osm_polygon_eunis.grid5000 import DEFAULT_GRID_CORES, DEFAULT_GRID_WORKERS, Grid5000Config
-from osm_polygon_eunis.options import DEFAULT_BATCH_SIZE, BatchLimits, ReleaseOptions
+from osm_polygon_eunis.options import (
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_WORKERS,
+    BatchLimits,
+    ReleaseOptions,
+)
 from osm_polygon_eunis.publish import ShardExpectation, VerificationError, VerificationReceipt
 from osm_polygon_eunis.release_orchestration import ConfigError
 from osm_polygon_eunis.release_plan import (
@@ -399,6 +404,49 @@ def test_grid5000_submit_defaults_are_stable() -> None:
         DEFAULT_BATCH_SIZE,
         False,
     )
+
+
+def test_release_run_size_defaults_are_stable() -> None:
+    parsed = cli._parser().parse_args(["release"])
+
+    assert (parsed.batch_size, parsed.workers) == (DEFAULT_BATCH_SIZE, DEFAULT_WORKERS)
+
+
+@pytest.mark.parametrize(
+    "dataset_flags",
+    [["--dataset", "website"], ["--dataset=wikidata"], ["--dataset"]],
+    ids=["separate-value", "inline-value", "no-value"],
+)
+def test_grid5000_submit_refuses_dataset_with_the_all_source_reason(
+    dataset_flags: list[str], capsys, tmp_path: Path
+) -> None:
+    def never_submit(*_args, **_kwargs):
+        raise AssertionError("submit must not run with --dataset")
+
+    dependencies = _dependencies(submit_grid5000=never_submit)
+    argv = _grid5000_submit_argv(
+        tmp_path / "state.json",
+        "--frontend",
+        "grenoble",
+        "--persistent-root",
+        "/home/user/osm-polygon-eunis",
+        *dataset_flags,
+    )
+
+    with pytest.raises(SystemExit) as raised:
+        cli.main(argv, dependencies=dependencies)
+
+    assert raised.value.code == cli.EXIT_USAGE
+    err = capsys.readouterr().err
+    assert err.startswith("usage: osm-polygon-eunis grid5000 submit")
+    assert "argument --dataset: grid5000 submit runs the all-source release" in err
+    assert "Traceback" not in err
+
+
+def test_grid5000_submit_namespace_has_no_dataset_field() -> None:
+    parsed = cli._parser().parse_args(_GRID5000_SUBMIT_ARGV)
+
+    assert not hasattr(parsed, "dataset")
 
 
 def test_top_level_help_shows_examples(capsys) -> None:
