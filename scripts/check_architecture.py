@@ -1,8 +1,9 @@
-"""Fail when module dependencies cross the declared direction."""
+"""Fail when modules cross the declared layers or use private names across modules."""
 
 from __future__ import annotations
 
 import ast
+import functools
 import sys
 from pathlib import Path
 
@@ -44,11 +45,21 @@ LAYERS = (
     "shard_processing",
     "card_publishing",
     "release_orchestration",
+    "grid5000_commands",
+    "grid5000_oar",
+    "grid5000_policy",
     "grid5000",
     "run_analysis",
     "cli",
 )
 FORBIDDEN = {module: set(LAYERS[index + 1 :]) for index, module in enumerate(LAYERS)}
+
+
+@functools.cache
+def _nodes(path: Path) -> tuple[ast.AST, ...]:
+    # Every check reads the same nodes, so parse and walk each module once per run.
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    return tuple(ast.walk(tree))
 
 
 def _imported_names(node: ast.AST) -> tuple[str, ...]:
@@ -64,12 +75,64 @@ def _imported_names(node: ast.AST) -> tuple[str, ...]:
 
 
 def _imports(path: Path) -> set[str]:
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     return {
         name[len(PREFIX) :].split(".", 1)[0]
-        for node in ast.walk(tree)
+        for node in _nodes(path)
         for name in _imported_names(node)
         if name.startswith(PREFIX)
+    }
+
+
+def _is_private(name: str) -> bool:
+    return name.startswith("_") and not (name.startswith("__") and name.endswith("__"))
+
+
+def _is_package_import(node: ast.ImportFrom) -> bool:
+    if node.level:
+        return True
+    return node.module is not None and (node.module == PACKAGE or node.module.startswith(PREFIX))
+
+
+def _private_imports(path: Path) -> set[tuple[str, str]]:
+    """Return (source module, name) pairs for underscore names imported from the package."""
+    return {
+        ("." * node.level + (node.module or ""), alias.name)
+        for node in _nodes(path)
+        if isinstance(node, ast.ImportFrom) and _is_package_import(node)
+        for alias in node.names
+        if _is_private(alias.name)
+    }
+
+
+def _is_sibling_module_import(node: ast.ImportFrom) -> bool:
+    # Covers `from . import x` and `from osm_polygon_eunis import x`.
+    if node.level:
+        return node.module is None
+    return node.module == PACKAGE
+
+
+def _package_module_aliases(nodes: tuple[ast.AST, ...]) -> dict[str, str]:
+    """Map local names bound to sibling package modules onto their module names."""
+    return {
+        alias.asname or alias.name: alias.name
+        for node in nodes
+        if isinstance(node, ast.ImportFrom) and _is_sibling_module_import(node)
+        for alias in node.names
+        if alias.name in MODULES
+    }
+
+
+def _private_attributes(path: Path) -> set[tuple[str, str]]:
+    """Return (module name, attribute) pairs for underscore attributes read from a sibling."""
+    nodes = _nodes(path)
+    aliases = _package_module_aliases(nodes)
+    return {
+        (aliases[node.value.id], node.attr)
+        for node in nodes
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id in aliases
+        and _is_private(node.attr)
     }
 
 
@@ -96,7 +159,7 @@ def _cycles(graph: dict[str, set[str]]) -> list[str]:
 
 
 def main() -> int:
-    """Return a failure status when package imports violate the layer graph."""
+    """Return a failure status when package imports break the layer graph or use private names."""
     errors = [
         f"{module} is not declared in LAYERS"
         for module in sorted(MODULES.keys() - FORBIDDEN.keys())
@@ -108,6 +171,14 @@ def main() -> int:
         errors.extend(
             f"{module} imports forbidden higher-level module {dependency}"
             for dependency in sorted(dependencies & FORBIDDEN.get(module, set()))
+        )
+        errors.extend(
+            f"{module} imports private name {name} from {source}"
+            for source, name in sorted(_private_imports(path))
+        )
+        errors.extend(
+            f"{module} uses private name {attribute} of {sibling}"
+            for sibling, attribute in sorted(_private_attributes(path))
         )
     errors.extend(_cycles(graph))
     if errors:
