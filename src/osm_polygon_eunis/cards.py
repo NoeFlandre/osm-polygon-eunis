@@ -398,12 +398,13 @@ class DatasetCardAccumulator:
                 "This dataset preserves the source rows and adds four nullable EUNIS fields "
                 "to each polygon-bearing Parquet shard.",
                 "",
-                "![World map of dataset-row coverage by H3 cell](./eunis/world-map.svg)",
+                "![World map of source polygon-row counts by H3 cell](./eunis/world-map.svg)",
                 "",
-                "The map uses one representative point per valid polygon-bearing dataset row "
-                "and H3 resolution 3. Each cell counts dataset rows, not area. Counts include "
-                "every EUNIS label, including unlabeled rows. Colors use the same fixed bands "
-                "across all cards: 1-9 rows, 10-99 rows, 100-999 rows, and 1,000+ rows. "
+                "The map places one representative point per valid polygon-bearing dataset "
+                "row in an H3 resolution 3 cell. Each cell counts source polygon rows, not "
+                "land area or validated habitat coverage. Counts include every EUNIS label, "
+                "including unlabeled rows. Colors use the same fixed bands across all cards: "
+                "1-9 rows, 10-99 rows, 100-999 rows, and 1,000+ rows. "
                 "Missing or invalid polygon geometry is omitted. Representative points outside "
                 "longitude [-180, 180] or latitude [-90, 90] are omitted.",
                 "",
@@ -478,11 +479,13 @@ def _write_map_header(output: TextIO, dataset_name: str, layout: _MapLayout) -> 
         'aria-labelledby="map-title map-description">\n'
     )
     output.write(
-        f'<title id="map-title">{html.escape(_title(dataset_name))} H3 coverage map</title>\n'
+        f'<title id="map-title">{html.escape(_title(dataset_name))} polygon-row counts by H3 cell'
+        "</title>\n"
     )
     output.write(
         '<desc id="map-description">One representative point per valid polygon-bearing '
         "dataset row is counted in one H3 resolution 3 cell across all labels. Cell colors "
+        "show source polygon-row counts, not land area or validated habitat coverage. "
         "show fixed dataset-row count bands; unlabeled rows are included.</desc>\n"
     )
     output.write('<rect width="100%" height="100%" fill="#ffffff"/>\n')
@@ -574,7 +577,7 @@ def _validated_map_total_rows(value: object, map_counts: Mapping[str, int]) -> i
 
 def _map_aggregation_metadata(*, mapped_rows: int, omitted_rows: int) -> dict[str, object]:
     return {
-        "unit": "dataset rows per occupied H3 cell",
+        "unit": "source polygon rows per occupied H3 cell",
         "aggregation": "one representative point per valid polygon-bearing dataset row",
         "includes_unlabeled_rows": True,
         "h3_resolution": _H3_RESOLUTION,

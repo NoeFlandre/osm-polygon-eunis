@@ -23,14 +23,14 @@ from osm_polygon_eunis.publish import (
 from osm_polygon_eunis.sources import DatasetSpec
 
 _CURRENT_RELEASE_GOLDEN = {
-    "eunis/world-map.svg": "ab3e13c2a1a4e2c83d2e1e5c77e5be0497e1ed00711714fe7dc78f41975784d6",
+    "eunis/world-map.svg": "6320026ee5533c6d25495ae5731408aea095348ee43fc98407465e04a3a50f7b",
     "polygon_document_links/region.parquet": (
         "3d8c8d95ce1a7f62a59e221f52ccd17dc5ba77f3e4b47a5a110b0d643b9c78c0"
     ),
     "polygons/region.parquet": "e2d3d549a14795d938b498a60b57d614f2e96b6378c1af4fce3a0b44aeae83b4",
 }
-_CURRENT_STABLE_MANIFEST_SHA256 = "bae9475378f9b2f3fa5be47754cbf759faa52575184ea2f53cdee68cde3f4e1c"
-_CURRENT_README_SHA256 = "f1807c59164fd72baf815b1d9867e957de92e9a4271b1b5064588a4bbf74cbc6"
+_CURRENT_STABLE_MANIFEST_SHA256 = "77f1f21203fc5ab6f8231510662baafcf164367a2c2f1738b683a1bf45613eb6"
+_CURRENT_README_SHA256 = "c855b53fb754e1a0b1711afbc416ddf4692a2aa222feeadb56eb8625d81ba55d"
 
 
 class _GoldenHub:
@@ -240,7 +240,9 @@ def test_synthetic_release_outputs_match_golden_snapshot(
         {"code": "R11", "name": "steppe", "rows": 1, "percentage": 50.0},
         {"code": None, "name": "No EUNIS label", "rows": 1, "percentage": 50.0},
     ]
-    assert manifest["card"]["map_aggregation"]["unit"] == ("dataset rows per occupied H3 cell")
+    assert manifest["card"]["map_aggregation"]["unit"] == (
+        "source polygon rows per occupied H3 cell"
+    )
     assert manifest["card"]["map_aggregation"]["aggregation"] == (
         "one representative point per valid polygon-bearing dataset row"
     )

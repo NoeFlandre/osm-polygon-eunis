@@ -85,7 +85,7 @@ def test_geometry_only_rows_render_map_without_changing_label_summaries() -> Non
 
     output = StringIO()
     card.write_map_svg(output, "source")
-    assert '<title id="map-title">Source H3 coverage map</title>' in output.getvalue()
+    assert '<title id="map-title">Source polygon-row counts by H3 cell</title>' in output.getvalue()
     assert "H3 resolution 3" in output.getvalue()
 
 
@@ -339,8 +339,8 @@ def test_default_card_artifacts_are_byte_identical_to_golden_hashes(tmp_path: Pa
         print(json.dumps(dict(artifacts.hashes), indent=2, sort_keys=True))  # noqa: T201
 
     assert dict(artifacts.hashes) == {
-        "README.md": "8d6b6409665764cd955ebcd983e9eba93e95d364eee4d5a39fe31fc07ea1f536",
-        "eunis/world-map.svg": "387cc2b80335eebc80b0052169378d85fe6d8d587e36acab52ee2fe13fe08d3e",
+        "README.md": "626c393a3911ce1c977ef62be15304adf1f6b8bc7ad1ab32ca62a8931fa8d27e",
+        "eunis/world-map.svg": "2a25324e84715db5947c4a784e29827060ce0f726eca9e96e55a1079dd0291d6",
     }
 
 
@@ -361,7 +361,7 @@ def test_card_map_manifest_readme_and_legend_define_fixed_h3_aggregation(
     )
 
     expected_map_metadata = {
-        "unit": "dataset rows per occupied H3 cell",
+        "unit": "source polygon rows per occupied H3 cell",
         "aggregation": "one representative point per valid polygon-bearing dataset row",
         "includes_unlabeled_rows": True,
         "h3_resolution": 3,
@@ -381,7 +381,7 @@ def test_card_map_manifest_readme_and_legend_define_fixed_h3_aggregation(
     assert artifacts.manifest["map_aggregation"] == expected_map_metadata
 
     readme = artifacts.files["README.md"].read_text(encoding="utf-8")
-    assert "![World map of dataset-row coverage by H3 cell]" in readme
+    assert "![World map of source polygon-row counts by H3 cell]" in readme
     assert "one representative point per valid polygon-bearing dataset row" in readme
     assert "H3 resolution 3" in readme
     assert "Counts include every EUNIS label, including unlabeled rows." in readme
@@ -394,7 +394,7 @@ def test_card_map_manifest_readme_and_legend_define_fixed_h3_aggregation(
 
     svg = artifacts.files["eunis/world-map.svg"].read_text(encoding="utf-8")
     assert 'aria-labelledby="map-title map-description"' in svg
-    assert '<title id="map-title">Website H3 coverage map</title>' in svg
+    assert '<title id="map-title">Website polygon-row counts by H3 cell</title>' in svg
     assert '<desc id="map-description">' in svg
     assert "Rows per H3 cell" in svg
     assert "H3 resolution 3" in svg
