@@ -44,9 +44,8 @@
         "range": "bytes=0-8388607",
         "digest": "4f1ef141446590fa2bc95a459ec928a712583da16d1dc0d7dc53b7aede047a80"
       },
-      "whole_file_sha256": null,
-      "whole_file_sha256_supplied_by_user": "a7eab477c2447b7493074b4cc5fab5bc9e118dd27fed227d5ab49dea0a991201",
-      "whole_file_sha256_local_verification": "not performed",
+      "whole_file_sha256": "a7eab477c2447b7493074b4cc5fab5bc9e118dd27fed227d5ab49dea0a991201",
+      "whole_file_sha256_verification": "Independently verified by a separate source-audit task against the downloaded file; not verified in this workspace.",
       "raw_tile_blob_sha256": null,
       "note": "The recorded prefix digest is not a whole-file digest."
     },

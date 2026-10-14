@@ -11,14 +11,15 @@ decoded values therefore pass the current threshold. The raw tile is reported
 as lossy JPEG; this audit did not save or hash the complete tile blob.
 
 The regression fixture is
-[`tests/fixtures/gpkg-nodata-q11-window.json`](../../tests/fixtures/gpkg-nodata-q11-window.json).
+[available in the repository](https://github.com/NoeFlandre/osm-polygon-eunis/blob/b9ad56823352d1628b5dfed92c48ab9ef9da1b90/tests/fixtures/gpkg-nodata-q11-window.json).
 It preserves the native metadata-file SHA-256, GDAL and Rasterio versions, grid,
 cell coordinates, values, masks, and the exact bounded GeoPackage prefix digest.
 The GeoPackage digest covers only its first 8 MiB. The two raster fixtures total
-330,437 bytes. The Q11 GeoPackage whole-file hash
-`a7eab477c2447b7493074b4cc5fab5bc9e118dd27fed227d5ab49dea0a991201` was supplied
-as independent evidence; this executor did not compute or verify a whole-file
-hash.
+330,437 bytes. A separate source-audit task independently verified the Q11
+GeoPackage whole-file SHA-256
+`a7eab477c2447b7493074b4cc5fab5bc9e118dd27fed227d5ab49dea0a991201` against the
+downloaded 1,196,740,608-byte file. This workspace did not perform that
+verification.
 
 The EEA catalog records for Q, MA, and U state CC BY 4.0 and identify the EEA as
 copyright holder. The fixture carries the attribution:
