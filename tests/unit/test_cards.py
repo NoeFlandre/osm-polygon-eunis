@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import json
 import os
+import tracemalloc
+from collections.abc import Iterator
 from io import StringIO
 from pathlib import Path
+from typing import Any
 
 import h3
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 from shapely.geometry import (
     GeometryCollection,
@@ -24,6 +29,10 @@ from osm_polygon_eunis.cards import (
 )
 from osm_polygon_eunis.domain import EunisResult
 from osm_polygon_eunis.geometry import GEOMETRY_POLICY, parse_geometry
+from osm_polygon_eunis.geometry_map_batches import (
+    GEOMETRY_MAP_BATCH_ROWS,
+    accumulate_geometry_row_group,
+)
 
 
 def _geometry(longitude: float, latitude: float) -> str:
@@ -87,6 +96,135 @@ def test_geometry_only_rows_render_map_without_changing_label_summaries() -> Non
     card.write_map_svg(output, "source")
     assert '<title id="map-title">Source polygon-row counts by H3 cell</title>' in output.getvalue()
     assert "H3 resolution 3" in output.getvalue()
+
+
+def test_geometry_row_group_reads_small_parquet_batches(tmp_path: Path) -> None:
+    geometries: list[str | None] = [_geometry(2.0, 48.0) for _ in range(37)]
+    geometries[3] = "not-json"
+    geometries[7] = None
+    parquet_path = tmp_path / "geometry.parquet"
+    pq.write_table(
+        pa.table({"geometry": geometries}),
+        parquet_path,
+        row_group_size=len(geometries),
+        compression="NONE",
+    )
+
+    class RecordingParquetFile:
+        def __init__(self, parquet_file: pq.ParquetFile) -> None:
+            self.parquet_file = parquet_file
+            self.batch_sizes: list[int] = []
+
+        def iter_batches(
+            self,
+            *,
+            batch_size: int,
+            row_groups: list[int],
+            columns: list[str],
+            use_threads: bool,
+        ) -> Iterator[Any]:
+            assert batch_size == GEOMETRY_MAP_BATCH_ROWS
+            assert row_groups == [0]
+            assert columns == ["geometry"]
+            assert not use_threads
+            for batch in self.parquet_file.iter_batches(
+                batch_size=batch_size,
+                row_groups=row_groups,
+                columns=columns,
+                use_threads=use_threads,
+            ):
+                self.batch_sizes.append(batch.num_rows)
+                yield batch
+
+        def read_row_group(self, *_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("geometry scan must not materialize a complete row group")
+
+    reader = RecordingParquetFile(pq.ParquetFile(parquet_path))
+    rows, state = accumulate_geometry_row_group(reader, 0)
+    expected = DatasetCardAccumulator()
+    for geometry in geometries:
+        expected.observe_map_row(geometry)
+
+    assert rows == len(geometries)
+    assert state == expected.snapshot()
+    assert reader.batch_sizes == [8, 8, 8, 8, 5]
+    assert max(reader.batch_sizes) <= GEOMETRY_MAP_BATCH_ROWS
+
+
+def test_geometry_row_group_rejects_a_batch_over_the_memory_bound() -> None:
+    class OversizedBatch:
+        num_rows = GEOMETRY_MAP_BATCH_ROWS + 1
+
+        def column(self, index: int) -> Any:
+            raise AssertionError(f"oversized batch was decoded from column {index}")
+
+    class OversizedParquetFile:
+        def iter_batches(
+            self,
+            *,
+            batch_size: int,
+            row_groups: list[int],
+            columns: list[str],
+            use_threads: bool,
+        ) -> Iterator[OversizedBatch]:
+            assert batch_size == GEOMETRY_MAP_BATCH_ROWS
+            assert row_groups == [0]
+            assert columns == ["geometry"]
+            assert not use_threads
+            yield OversizedBatch()
+
+    with pytest.raises(ValueError, match="batch exceeded the configured row bound"):
+        accumulate_geometry_row_group(OversizedParquetFile(), 0)
+
+
+def test_geometry_batch_memory_does_not_grow_with_row_group_length() -> None:
+    total_rows = 512
+    payload_bytes = 32 * 1024
+
+    class GeometryArray:
+        def __init__(self, offset: int) -> None:
+            self.offset = offset
+
+        def to_pylist(self) -> list[str]:
+            return [f"!{self.offset + index}:" + "x" * payload_bytes for index in range(8)]
+
+    class GeometryBatch:
+        num_rows = 8
+
+        def __init__(self, offset: int) -> None:
+            self.offset = offset
+
+        def column(self, index: int) -> GeometryArray:
+            assert index == 0
+            return GeometryArray(self.offset)
+
+    class StreamingParquetFile:
+        def iter_batches(
+            self,
+            *,
+            batch_size: int,
+            row_groups: list[int],
+            columns: list[str],
+            use_threads: bool,
+        ) -> Iterator[GeometryBatch]:
+            assert batch_size == GEOMETRY_MAP_BATCH_ROWS
+            assert row_groups == [0]
+            assert columns == ["geometry"]
+            assert not use_threads
+            for offset in range(0, total_rows, batch_size):
+                yield GeometryBatch(offset)
+
+    tracemalloc.start()
+    try:
+        rows, state = accumulate_geometry_row_group(StreamingParquetFile(), 0)
+        _current_bytes, peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert rows == total_rows
+    assert state["total_rows"] == total_rows
+    assert state["invalid_geometries"] == total_rows
+    assert peak_bytes < 4 * 1024 * 1024
 
 
 def test_card_preserves_source_viewer_configs_without_source_card_body(tmp_path: Path) -> None:

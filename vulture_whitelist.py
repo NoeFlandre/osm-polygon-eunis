@@ -3,6 +3,7 @@
 from osm_polygon_eunis.cards import DatasetCardAccumulator
 from osm_polygon_eunis.cli import main
 from osm_polygon_eunis.geometry_jobs import process_geometry_paths
+from osm_polygon_eunis.geometry_map_batches import accumulate_geometry_row_group
 from osm_polygon_eunis.raster_reference import RasterReference
 from osm_polygon_eunis.reference_staging import open_reference_group
 
@@ -21,3 +22,4 @@ RasterReference.tile_cache_byte_budget
 # Library entry points that tests and downstream callers use directly.
 process_geometry_paths
 open_reference_group
+accumulate_geometry_row_group
