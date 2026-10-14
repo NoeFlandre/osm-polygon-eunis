@@ -33,6 +33,7 @@ LAYERS = (
     "transform",
     "reference_staging",
     "cards",
+    "geometry_map_batches",
     "sources",
     "publish",
     "release_plan",

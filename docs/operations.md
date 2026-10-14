@@ -359,8 +359,12 @@ configured raster tile-cache byte budget.
    server-side.
 4. Stream bounded source micro-batches through each EUNIS reference batch.
    Delete each source shard after its last pass. For Wikidata, process the
-   matching link shard. At the same time, collect the bounded label counts and
-   the map bins.
+   matching link shard. At the same time, collect bounded label counts and one
+   integer count per occupied resolution-3 H3 cell. Each valid polygon-bearing
+   row contributes one representative point, including rows without an EUNIS
+   label. Missing or invalid polygon geometry and out-of-range representative
+   points do not contribute to the map. The fixed row-count bands are 1–9,
+   10–99, 100–999, and 1,000+ across all cards.
 5. Upload each dataset card, static SVG map, Parquet schema, row count,
    manifest, and remote tree. Verify each one independently.
 6. Add the verified datasets to the `OSM Polygon EUNIS` collection.
