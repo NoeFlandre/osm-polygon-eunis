@@ -4,18 +4,25 @@ import json
 import os
 from pathlib import Path
 
+import h3
 import pytest
-from shapely.geometry import GeometryCollection, LineString, Point, Polygon, box, mapping
-from shapely.geometry.base import BaseGeometry
+from shapely.geometry import (
+    GeometryCollection,
+    LineString,
+    MultiPolygon,
+    Point,
+    Polygon,
+    box,
+    mapping,
+)
 
 from osm_polygon_eunis.cards import (
     DatasetCardAccumulator,
     _extract_source_configs,
     _extract_source_license,
-    _map_cell_coordinates,
 )
 from osm_polygon_eunis.domain import EunisResult
-from osm_polygon_eunis.geometry import GEOMETRY_POLICY
+from osm_polygon_eunis.geometry import GEOMETRY_POLICY, parse_geometry
 
 
 def _geometry(longitude: float, latitude: float) -> str:
@@ -172,10 +179,7 @@ def test_card_separates_code_license_from_dataset_data_terms(tmp_path: Path) -> 
     assert "The Apache-2.0 license applies to project code only" in readme
 
 
-def test_card_accumulator_rejects_invalid_cell_size_and_conflicting_names() -> None:
-    with pytest.raises(ValueError, match="cell_size"):
-        DatasetCardAccumulator(cell_size=0.0)
-
+def test_card_accumulator_rejects_conflicting_names() -> None:
     card = DatasetCardAccumulator()
     card.observe(EunisResult("R11", "Steppe", 50.0, "EEA-test"), _geometry(0.0, 0.0))
     with pytest.raises(ValueError, match="conflicting names"):
@@ -194,12 +198,45 @@ def test_card_counts_rows_even_when_geometry_is_invalid_or_outside_world() -> No
     assert [summary.rows for summary in card.summaries()] == [1, 1]
 
 
-def test_map_cell_coordinates_uses_representative_point_and_rejects_outside_world() -> None:
-    polygon: BaseGeometry = box(2.0, 48.0, 3.0, 49.0)
-    outside: BaseGeometry = box(200.0, 0.0, 201.0, 1.0)
+def test_card_map_counts_one_row_per_h3_cell_across_all_labels() -> None:
+    geometry = _geometry(2.0, 48.0)
+    card = DatasetCardAccumulator()
+    card.observe(EunisResult("R11", "Steppe", 50.0, "EEA-test"), geometry)
+    card.observe(EunisResult("R12", "Other", 25.0, "EEA-test"), geometry)
+    card.observe(EunisResult(None, None, None, None), geometry)
+    card.observe(EunisResult(None, None, None, None), None)
 
-    assert _map_cell_coordinates(polygon, 2.0) == (91, 69)
-    assert _map_cell_coordinates(outside, 2.0) is None
+    cell = h3.latlng_to_cell(48.5, 2.5, 3)
+    assert card.snapshot()["map_counts"] == [[cell, 3]]
+    assert card.total_rows == 4
+    assert [summary.rows for summary in card.summaries()] == [1, 1, 2]
+
+
+def test_card_map_uses_a_representative_point_instead_of_the_centroid() -> None:
+    geometry = MultiPolygon((box(-40.0, 1.0, -39.0, 2.0), box(40.0, 1.0, 41.0, 2.0)))
+    polygonal = parse_geometry(mapping(geometry))
+    assert polygonal is not None
+    representative_point = polygonal.representative_point()
+    representative_cell = h3.latlng_to_cell(representative_point.y, representative_point.x, 3)
+    centroid = polygonal.centroid
+    assert representative_cell != h3.latlng_to_cell(centroid.y, centroid.x, 3)
+
+    card = DatasetCardAccumulator()
+    card.observe(EunisResult("R11", "Steppe", 50.0, "EEA-test"), mapping(geometry))
+
+    assert card.snapshot()["map_counts"] == [[representative_cell, 1]]
+
+
+def test_card_map_omits_missing_invalid_and_out_of_range_geometries() -> None:
+    card = DatasetCardAccumulator()
+    result = EunisResult(None, None, None, None)
+    card.observe(result, None)
+    card.observe(result, "not-json")
+    card.observe(result, _geometry(200.0, 0.0))
+    card.observe(result, _geometry(2.0, 48.0))
+
+    assert card.snapshot()["map_counts"] == [[h3.latlng_to_cell(48.5, 2.5, 3), 1]]
+    assert card.total_rows == 4
 
 
 def test_card_counts_undecodable_geometries_separately_from_missing_ones(
@@ -283,14 +320,17 @@ def test_default_card_artifacts_are_byte_identical_to_golden_hashes(tmp_path: Pa
         print(json.dumps(dict(artifacts.hashes), indent=2, sort_keys=True))  # noqa: T201
 
     assert dict(artifacts.hashes) == {
-        "README.md": "0ae2d67b0d5d2a85c7bbee1aaaef918c3d27c7ad78b009ad5fbf321dbbd56848",
-        "eunis/world-map.svg": "adb1d18e0876692cb71143402828c0aaa5a2df98762e9b43bcb6353d8fdbf731",
+        "README.md": "8d6b6409665764cd955ebcd983e9eba93e95d364eee4d5a39fe31fc07ea1f536",
+        "eunis/world-map.svg": "387cc2b80335eebc80b0052169378d85fe6d8d587e36acab52ee2fe13fe08d3e",
     }
 
 
-def test_card_map_subtitle_and_readme_follow_cell_size(tmp_path: Path) -> None:
-    card = DatasetCardAccumulator(cell_size=0.5)
+def test_card_map_manifest_readme_and_legend_define_fixed_h3_aggregation(
+    tmp_path: Path,
+) -> None:
+    card = DatasetCardAccumulator()
     card.observe(EunisResult("R11", "Steppe", 80.0, "EEA-test"), _geometry(2.0, 48.0))
+    card.observe(EunisResult(None, None, None, None), _geometry(2.0, 48.0))
 
     artifacts = card.write_artifacts(
         tmp_path,
@@ -301,8 +341,114 @@ def test_card_map_subtitle_and_readme_follow_cell_size(tmp_path: Path) -> None:
         reference_version="EEA-test",
     )
 
-    assert "· 0.5° bins ·" in artifacts.files["eunis/world-map.svg"].read_text(encoding="utf-8")
-    assert "0.5-degree geographic bins" in artifacts.files["README.md"].read_text(encoding="utf-8")
+    expected_map_metadata = {
+        "unit": "dataset rows per occupied H3 cell",
+        "aggregation": "one representative point per valid polygon-bearing dataset row",
+        "includes_unlabeled_rows": True,
+        "h3_resolution": 3,
+        "count_bands": [
+            {"minimum": 1, "maximum": 9, "label": "1-9", "color": "#d7ece3"},
+            {"minimum": 10, "maximum": 99, "label": "10-99", "color": "#a4d1c2"},
+            {"minimum": 100, "maximum": 999, "label": "100-999", "color": "#67a796"},
+            {"minimum": 1000, "maximum": None, "label": "1,000+", "color": "#2f6f66"},
+        ],
+        "mapped_rows": 2,
+        "omitted_rows": 0,
+        "omission_policy": (
+            "Missing or invalid polygon geometry, and representative points outside longitude "
+            "[-180, 180] or latitude [-90, 90], are omitted."
+        ),
+    }
+    assert artifacts.manifest["map_aggregation"] == expected_map_metadata
+
+    readme = artifacts.files["README.md"].read_text(encoding="utf-8")
+    assert "![World map of dataset-row coverage by H3 cell]" in readme
+    assert "one representative point per valid polygon-bearing dataset row" in readme
+    assert "H3 resolution 3" in readme
+    assert "Counts include every EUNIS label, including unlabeled rows." in readme
+    assert "1-9 rows, 10-99 rows, 100-999 rows, and 1,000+ rows" in readme
+    assert "Missing or invalid polygon geometry is omitted." in readme
+    assert (
+        "Representative points outside longitude [-180, 180] or latitude [-90, 90] are omitted."
+        in readme
+    )
+
+    svg = artifacts.files["eunis/world-map.svg"].read_text(encoding="utf-8")
+    assert 'aria-labelledby="map-title map-description"' in svg
+    assert '<title id="map-title">Website H3 coverage map</title>' in svg
+    assert '<desc id="map-description">' in svg
+    assert "Rows per H3 cell" in svg
+    assert "H3 resolution 3" in svg
+    assert "Counts include unlabeled rows" in svg
+    assert all(label in svg for label in ("1-9", "10-99", "100-999", "1,000+"))
+    assert "Missing or invalid geometry is omitted" in svg
+    assert "Points outside longitude [-180, 180]" in svg
+    assert "or latitude [-90, 90] are omitted" in svg
+
+
+@pytest.mark.parametrize(
+    ("geometry", "point"),
+    [
+        (_geometry(179.0, 0.0), (0.5, 179.5)),
+        (json.dumps(mapping(box(-180.0, 0.0, -179.9, 1.0))), (0.5, -179.95)),
+    ],
+)
+def test_card_map_splits_antimeridian_cells_and_clips_to_plot(
+    tmp_path: Path,
+    geometry: str,
+    point: tuple[float, float],
+) -> None:
+    cell = h3.latlng_to_cell(*point, 3)
+    boundary = h3.cell_to_boundary(cell)
+    assert any(
+        abs(boundary[index][1] - boundary[index - 1][1]) > 180.0 for index in range(len(boundary))
+    )
+
+    card = DatasetCardAccumulator()
+    card.observe(EunisResult("R11", "Steppe", 50.0, "EEA-test"), geometry)
+    artifacts = card.write_artifacts(
+        tmp_path,
+        dataset_name="website",
+        source_repo="org/source",
+        target_repo="org/target",
+        source_revision="rev",
+        reference_version="EEA-test",
+    )
+
+    svg = artifacts.files["eunis/world-map.svg"].read_text(encoding="utf-8")
+    assert svg.count('fill="#d7ece3" stroke="none"') == 2
+    assert '<clipPath id="map-plot-clip">' in svg
+    assert '<g clip-path="url(#map-plot-clip)">' in svg
+
+
+def test_card_map_uses_fixed_absolute_count_bands(tmp_path: Path) -> None:
+    card = DatasetCardAccumulator()
+    result = EunisResult(None, None, None, None)
+    cells = (
+        (1, -100.0, 40.0, "#d7ece3"),
+        (10, 0.0, 0.0, "#a4d1c2"),
+        (100, 70.0, 20.0, "#67a796"),
+        (1000, 150.0, -20.0, "#2f6f66"),
+    )
+    for count, longitude, latitude, _color in cells:
+        geometry = _geometry(longitude, latitude)
+        for _ in range(count):
+            card.observe(result, geometry)
+
+    artifacts = card.write_artifacts(
+        tmp_path,
+        dataset_name="website",
+        source_repo="org/source",
+        target_repo="org/target",
+        source_revision="rev",
+        reference_version="EEA-test",
+    )
+
+    svg = artifacts.files["eunis/world-map.svg"].read_text(encoding="utf-8")
+    assert all(f'fill="{color}" stroke="none"' in svg for _count, _lon, _lat, color in cells)
+    map_metadata = artifacts.manifest["map_aggregation"]
+    assert isinstance(map_metadata, dict)
+    assert map_metadata["mapped_rows"] == 1111
 
 
 def test_card_manifest_records_intersection_errors(tmp_path: Path) -> None:
@@ -330,9 +476,9 @@ def test_card_manifest_records_intersection_errors(tmp_path: Path) -> None:
 
 def test_card_accumulator_snapshot_restore_and_merge_round_trip() -> None:
     first = DatasetCardAccumulator()
-    first.observe(EunisResult("R11", "steppe", 80.0, "v"), '{"type":"Point","coordinates":[1,1]}')
+    first.observe(EunisResult("R11", "steppe", 80.0, "v"), _geometry(1.0, 1.0))
     second = first.spawn()
-    second.observe(EunisResult("R11", "steppe", 60.0, "v"), '{"type":"Point","coordinates":[1,1]}')
+    second.observe(EunisResult("R11", "steppe", 60.0, "v"), _geometry(1.0, 1.0))
     second.observe(EunisResult(None, None, None, None), None)
     second.record_intersection_errors(2)
 
@@ -344,7 +490,59 @@ def test_card_accumulator_snapshot_restore_and_merge_round_trip() -> None:
     assert first.total_rows == restored.total_rows == 3
     assert restored.intersection_errors == 2
     assert restored.summaries() == first.summaries()
+    assert restored.snapshot()["map_snapshot_schema_version"] == 1
     assert restored.snapshot() == first.snapshot()
+
+
+def test_card_accumulator_rejects_legacy_two_degree_snapshot_without_partial_restore() -> None:
+    card = DatasetCardAccumulator()
+    card.observe(EunisResult("R11", "Steppe", 50.0, "EEA-test"), _geometry(2.0, 48.0))
+    before = card.snapshot()
+    old_snapshot = {
+        "counts": [["R12", 4]],
+        "names": [["R12", "Other"]],
+        "bins": [["R12", 91, 69, 4]],
+        "total_rows": 4,
+        "invalid_geometries": 0,
+        "intersection_errors": 0,
+    }
+
+    with pytest.raises(ValueError, match="legacy 2-degree map snapshot"):
+        card.restore(old_snapshot)
+
+    assert card.snapshot() == before
+
+
+def test_card_accumulator_rejects_invalid_h3_snapshot_counts_before_restore() -> None:
+    card = DatasetCardAccumulator()
+    card.observe(EunisResult("R11", "Steppe", 50.0, "EEA-test"), _geometry(2.0, 48.0))
+    before = card.snapshot()
+    valid_cell = h3.latlng_to_cell(48.5, 2.5, 3)
+    other_resolution = h3.latlng_to_cell(48.5, 2.5, 2)
+    invalid_states = (
+        (None, TypeError, "map_counts must be a list"),
+        (["bad entry"], TypeError, "entries must contain"),
+        ([[None, 1]], TypeError, "H3 cells must be strings"),
+        ([["not-an-h3-cell", 1]], ValueError, "invalid resolution-3 H3 cell"),
+        ([[other_resolution, 1]], ValueError, "invalid resolution-3 H3 cell"),
+        ([[valid_cell, True]], TypeError, "row counts must be integers"),
+        ([[valid_cell, 0]], ValueError, "row counts must be positive"),
+        ([[valid_cell, 1], [valid_cell, 2]], ValueError, "duplicate H3 cells"),
+    )
+
+    for map_counts, error_type, message in invalid_states:
+        with pytest.raises(error_type, match=message):
+            card.restore({**before, "map_counts": map_counts})
+        assert card.snapshot() == before
+
+    with pytest.raises(ValueError, match="map snapshot row counts exceed total_rows"):
+        card.restore(
+            {
+                **before,
+                "map_counts": [[valid_cell, before["total_rows"] + 1]],
+            }
+        )
+    assert card.snapshot() == before
 
 
 def test_card_accumulator_merge_rejects_conflicting_names() -> None:

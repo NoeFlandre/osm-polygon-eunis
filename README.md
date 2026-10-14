@@ -62,8 +62,14 @@ Each output dataset card also contains two items:
 - a compact percentage table for every EUNIS label, with the polygons that
   received no label
 
-The pipeline builds the map while the final Parquet shards stream through it. It
-uses bounded 2-degree bins. It does not keep the source geometries.
+The pipeline builds the map while the final Parquet shards stream through it.
+Each valid polygon-bearing dataset row contributes one representative point to
+an H3 cell at resolution 3. Each occupied cell stores an integer count of rows
+across every EUNIS label, including unlabeled rows. The map uses the same fixed
+count bands on every card: 1–9, 10–99, 100–999, and 1,000+ rows. Rows with
+missing or invalid polygonal geometry, or representative points outside
+longitude [-180, 180] or latitude [-90, 90], do not contribute. The pipeline
+does not keep source geometries or point collections.
 
 ## Install and run
 

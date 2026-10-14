@@ -9,48 +9,30 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
+import h3
 from shapely.geometry.base import BaseGeometry
 
 from .domain import EunisResult
 from .fileio import sha256_file
-from .geometry import GEOMETRY_POLICY, has_antimeridian_span, parse_geometry
+from .geometry import (
+    ANTIMERIDIAN_LONGITUDE_SPAN_DEGREES,
+    GEOMETRY_POLICY,
+    has_antimeridian_span,
+    parse_geometry,
+)
 
-_CELL_SIZE = 2.0
-_MAX_CELL_SIZE = 180.0
+_H3_RESOLUTION = 3
+_MAP_SNAPSHOT_SCHEMA_VERSION = 1
+_MAP_COUNT_ENTRY_LENGTH = 2
 _LON_MIN, _LON_MAX = -180.0, 180.0
 _LAT_MIN, _LAT_MAX = -90.0, 90.0
 _LON_RANGE = _LON_MAX - _LON_MIN
 _LAT_RANGE = _LAT_MAX - _LAT_MIN
 _MAP_PATH = "eunis/world-map.svg"
 _NO_LABEL = "No EUNIS label"
-_PALETTE = (
-    "#1b9e77",
-    "#d95f02",
-    "#7570b3",
-    "#e7298a",
-    "#66a61e",
-    "#e6ab02",
-    "#a6761d",
-    "#666666",
-    "#1f78b4",
-    "#b2df8a",
-    "#fb9a99",
-    "#6a3d9a",
-    "#ff7f00",
-    "#cab2d6",
-    "#33a02c",
-    "#a6cee3",
-    "#fdbf6f",
-    "#b15928",
-    "#8dd3c7",
-    "#bebada",
-)
 
-# Low-detail land silhouettes keep the card self-contained and avoid shipping a
-# second geospatial dependency or a large Natural Earth dataset. They are only
-# a visual backdrop; all data-driven positions are the colored points.
 _LANDMASSES: tuple[tuple[tuple[float, float], ...], ...] = (
     (
         (-168, 70),
@@ -143,35 +125,41 @@ class _MapLayout:
     legend_y: int = 105
 
 
+@dataclass(frozen=True, slots=True)
+class _MapCountBand:
+    minimum: int
+    maximum: int | None
+    label: str
+    color: str
+
+
 _LAYOUT = _MapLayout()
+_MAP_COUNT_BANDS = (
+    _MapCountBand(1, 9, "1-9", "#d7ece3"),
+    _MapCountBand(10, 99, "10-99", "#a4d1c2"),
+    _MapCountBand(100, 999, "100-999", "#67a796"),
+    _MapCountBand(1000, None, "1,000+", "#2f6f66"),
+)
 
 
 class DatasetCardAccumulator:
-    """Collect label counts and bounded map bins while shards stream past."""
+    """Collect label counts and bounded H3 cell counts while shards stream past."""
 
     def __init__(
         self,
         *,
-        cell_size: float = _CELL_SIZE,
         source_readme: str | None = None,
     ) -> None:
-        """Create a card accumulator with the requested map-bin size.
+        """Create a card accumulator for a pinned source card.
 
         Args:
-            cell_size: Maximum longitude/latitude width of each map bin in degrees.
             source_readme: Pinned source card used to retain Viewer configs and license.
-
-        Raises:
-            ValueError: If the size is not in the supported range.
         """
-        if cell_size <= 0.0 or cell_size > _MAX_CELL_SIZE:
-            raise ValueError("cell_size must be in (0, 180]")
-        self.cell_size = cell_size
         self._source_configs = _extract_source_configs(source_readme)
         self._source_license = _extract_source_license(source_readme)
         self._counts: dict[str | None, int] = {}
         self._names: dict[str | None, str] = {}
-        self._bins: dict[tuple[str | None, int, int], int] = {}
+        self._map_counts: dict[str, int] = {}
         self._total_rows = 0
         self._invalid_geometries = 0
         self._intersection_errors = 0
@@ -197,7 +185,7 @@ class DatasetCardAccumulator:
         """Return an empty accumulator sharing this one's settings and source card."""
 
         child = copy.copy(self)
-        child._counts, child._names, child._bins = {}, {}, {}
+        child._counts, child._names, child._map_counts = {}, {}, {}
         child._total_rows = child._invalid_geometries = child._intersection_errors = 0
         return child
 
@@ -209,8 +197,8 @@ class DatasetCardAccumulator:
                 raise ValueError(f"dataset card has conflicting names for {code}")
         for code, count in other._counts.items():
             self._counts[code] = self._counts.get(code, 0) + count
-        for key, count in other._bins.items():
-            self._bins[key] = self._bins.get(key, 0) + count
+        for cell, count in other._map_counts.items():
+            self._map_counts[cell] = self._map_counts.get(cell, 0) + count
         self._total_rows += other._total_rows
         self._invalid_geometries += other._invalid_geometries
         self._intersection_errors += other._intersection_errors
@@ -221,7 +209,8 @@ class DatasetCardAccumulator:
         return {
             "counts": [[code, count] for code, count in self._counts.items()],
             "names": [[code, name] for code, name in self._names.items()],
-            "bins": [[code, x, y, count] for (code, x, y), count in self._bins.items()],
+            "map_snapshot_schema_version": _MAP_SNAPSHOT_SCHEMA_VERSION,
+            "map_counts": [[cell, count] for cell, count in sorted(self._map_counts.items())],
             "total_rows": self._total_rows,
             "invalid_geometries": self._invalid_geometries,
             "intersection_errors": self._intersection_errors,
@@ -230,12 +219,28 @@ class DatasetCardAccumulator:
     def restore(self, state: Mapping[str, Any]) -> None:
         """Replace the observations with a previous :meth:`snapshot`."""
 
-        self._counts = dict(state["counts"])
-        self._names = dict(state["names"])
-        self._bins = {(code, x, y): count for code, x, y, count in state["bins"]}
-        self._total_rows = int(state["total_rows"])
-        self._invalid_geometries = int(state["invalid_geometries"])
-        self._intersection_errors = int(state["intersection_errors"])
+        map_schema_version = state.get("map_snapshot_schema_version")
+        if map_schema_version is None:
+            if "bins" in state:
+                raise ValueError(
+                    "cannot restore legacy 2-degree map snapshot; map snapshot schema is missing"
+                )
+            raise ValueError("map snapshot schema version is missing")
+        if map_schema_version != _MAP_SNAPSHOT_SCHEMA_VERSION:
+            raise ValueError(f"unsupported map snapshot schema version: {map_schema_version}")
+
+        counts = dict(state["counts"])
+        names = dict(state["names"])
+        map_counts = dict(_validated_map_counts(state["map_counts"]))
+        total_rows = _validated_map_total_rows(state["total_rows"], map_counts)
+        invalid_geometries = int(state["invalid_geometries"])
+        intersection_errors = int(state["intersection_errors"])
+        self._counts = counts
+        self._names = names
+        self._map_counts = map_counts
+        self._total_rows = total_rows
+        self._invalid_geometries = invalid_geometries
+        self._intersection_errors = intersection_errors
 
     def record_intersection_errors(self, count: int) -> None:
         """Add intersection errors carried in a label sidecar."""
@@ -249,7 +254,7 @@ class DatasetCardAccumulator:
 
         code, name = _label_identity(result)
         self._record_label(code, name)
-        self._record_map_bin(code, raw_geometry)
+        self._record_map_cell(raw_geometry)
 
     def _record_label(self, code: str | None, name: str) -> None:
         previous_name = self._names.setdefault(code, name)
@@ -258,17 +263,21 @@ class DatasetCardAccumulator:
         self._counts[code] = self._counts.get(code, 0) + 1
         self._total_rows += 1
 
-    def _record_map_bin(self, code: str | None, raw_geometry: object) -> None:
+    def _record_map_cell(self, raw_geometry: object) -> None:
         geometry = parse_geometry(raw_geometry)
-        if geometry is None or has_antimeridian_span(geometry):
+        if geometry is None:
             if raw_geometry is not None:
                 self._invalid_geometries += 1
             return
-        indices = _map_cell_coordinates(geometry, self.cell_size)
-        if indices is None:
+        if has_antimeridian_span(geometry):
+            self._invalid_geometries += 1
             return
-        key = (code, *indices)
-        self._bins[key] = self._bins.get(key, 0) + 1
+        representative_point = _map_representative_point(geometry)
+        if representative_point is None:
+            return
+        latitude, longitude = representative_point
+        cell = h3.latlng_to_cell(latitude, longitude, _H3_RESOLUTION)
+        self._map_counts[cell] = self._map_counts.get(cell, 0) + 1
 
     def summaries(self) -> tuple[LabelSummary, ...]:
         """Return complete deterministic label distribution statistics."""
@@ -305,7 +314,8 @@ class DatasetCardAccumulator:
         directory.mkdir(parents=True, exist_ok=True)
         map_path = directory / _MAP_PATH
         map_path.parent.mkdir(parents=True, exist_ok=True)
-        map_path.write_text(self._render_map(dataset_name), encoding="utf-8")
+        with map_path.open("w", encoding="utf-8", newline="\n") as output:
+            self._write_map(output, dataset_name)
         readme_path = directory / "README.md"
         readme_path.write_text(
             self._render_readme(
@@ -328,6 +338,10 @@ class DatasetCardAccumulator:
             "total_rows": self._total_rows,
             "invalid_geometries": self._invalid_geometries,
             "intersection_errors": self._intersection_errors,
+            "map_aggregation": _map_aggregation_metadata(
+                mapped_rows=sum(self._map_counts.values()),
+                omitted_rows=self._total_rows - sum(self._map_counts.values()),
+            ),
             "geometry_policy": dict(GEOMETRY_POLICY),
             "label_distribution": [
                 {
@@ -378,12 +392,14 @@ class DatasetCardAccumulator:
                 "This dataset preserves the source rows and adds four nullable EUNIS fields "
                 "to each polygon-bearing Parquet shard.",
                 "",
-                "![Static world map of EUNIS label distribution](./eunis/world-map.svg)",
+                "![World map of dataset-row coverage by H3 cell](./eunis/world-map.svg)",
                 "",
-                "The map uses a representative point for each polygon and "
-                f"{self.cell_size:g}-degree geographic "
-                "bins to keep the static artifact small. Colors identify EUNIS codes; the "
-                "complete distribution is listed below. Unlabeled polygons are shown in gray.",
+                "The map uses one representative point per valid polygon-bearing dataset row "
+                "and H3 resolution 3. Each cell counts dataset rows, not area. Counts include "
+                "every EUNIS label, including unlabeled rows. Colors use the same fixed bands "
+                "across all cards: 1-9 rows, 10-99 rows, 100-999 rows, and 1,000+ rows. "
+                "Missing or invalid polygon geometry is omitted. Representative points outside "
+                "longitude [-180, 180] or latitude [-90, 90] are omitted.",
                 "",
                 "## Label distribution",
                 "",
@@ -429,76 +445,205 @@ class DatasetCardAccumulator:
         )
         return "\n".join(lines) + "\n"
 
-    def _render_map(self, dataset_name: str) -> str:
-        layout = _LAYOUT
-        summaries = self.summaries()
-        colors = _label_colors(summaries)
-        elements = [
-            '<?xml version="1.0" encoding="UTF-8"?>',
-            (
-                f'<svg xmlns="http://www.w3.org/2000/svg" width="{layout.width}" '
-                f'height="{layout.height}" viewBox="0 0 {layout.width} {layout.height}">'
-            ),
-            '<rect width="100%" height="100%" fill="#ffffff"/>',
-            (
-                f'<text x="{layout.plot_x}" y="30" font-family="sans-serif" '
-                f'font-size="22" font-weight="600" fill="#1f2933">'
-                f"{html.escape(_title(dataset_name))}</text>"
-            ),
-            (
-                f'<text x="{layout.plot_x}" y="{layout.subtitle_y}" font-family="sans-serif" '
-                'font-size="12" fill="#52606d">Representative polygon locations · '
-                f"{self.cell_size:g}° bins · colors are EUNIS labels</text>"
-            ),
-            (
-                f'<rect x="{layout.plot_x}" y="{layout.plot_y}" width="{layout.plot_width}" '
-                f'height="{layout.plot_height}" rx="4" fill="#f7fafc" stroke="#cbd5e0"/>'
-            ),
-        ]
-        elements.extend(_grid_elements(layout))
-        elements.extend(_land_elements(layout))
-        elements.extend(self._point_elements(layout, colors))
-        elements.extend(_legend_elements(summaries, colors, x=layout.legend_x, y=layout.legend_y))
-        elements.append("</svg>")
-        return "\n".join(elements) + "\n"
-
-    def _point_elements(
-        self,
-        layout: _MapLayout,
-        colors: Mapping[str | None, str],
-    ) -> list[str]:
-        elements: list[str] = []
-        for (code, longitude_index, latitude_index), count in sorted(
-            self._bins.items(), key=lambda item: (item[0][0] is None, item[0])
-        ):
-            longitude = _LON_MIN + (longitude_index + 0.5) * self.cell_size
-            latitude = _LAT_MIN + (latitude_index + 0.5) * self.cell_size
-            x = _map_x(longitude, layout)
-            y = _map_y(latitude, layout)
-            radius = min(11.0, 3.0 + math.sqrt(count))
-            label = _label_text(code, self._names.get(code, _NO_LABEL))
-            elements.append(
-                f'<circle cx="{x:.2f}" cy="{y:.2f}" r="{radius:.2f}" fill="{colors[code]}" '
-                f'fill-opacity="0.82" stroke="#ffffff" stroke-width="0.7">'
-                f"<title>{html.escape(label)} · {count:,} polygon(s)</title></circle>"
-            )
-        return elements
+    def _write_map(self, output: TextIO, dataset_name: str) -> None:
+        _write_map_header(output, dataset_name, _LAYOUT)
+        _write_map_plot(output, self._map_counts, _LAYOUT)
+        _write_map_footer(output, _LAYOUT)
 
 
-def _coordinate_index(value: float, lower: float, upper: float, cell_size: float) -> int:
-    cells = max(1, math.ceil((upper - lower) / cell_size))
-    return min(cells - 1, max(0, math.floor((value - lower) / cell_size)))
-
-
-def _map_cell_coordinates(geometry: BaseGeometry, cell_size: float) -> tuple[int, int] | None:
+def _map_representative_point(geometry: BaseGeometry) -> tuple[float, float] | None:
     point = geometry.representative_point()
     longitude = float(point.x)
     latitude = float(point.y)
+    if not math.isfinite(longitude) or not math.isfinite(latitude):
+        return None
     if not (_LON_MIN <= longitude <= _LON_MAX and _LAT_MIN <= latitude <= _LAT_MAX):
         return None
+    return latitude, longitude
+
+
+def _write_map_header(output: TextIO, dataset_name: str, layout: _MapLayout) -> None:
+    output.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+    output.write(
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{layout.width}" '
+        f'height="{layout.height}" viewBox="0 0 {layout.width} {layout.height}" '
+        'aria-labelledby="map-title map-description">\n'
+    )
+    output.write(
+        f'<title id="map-title">{html.escape(_title(dataset_name))} H3 coverage map</title>\n'
+    )
+    output.write(
+        '<desc id="map-description">One representative point per valid polygon-bearing '
+        "dataset row is counted in one H3 resolution 3 cell across all labels. Cell colors "
+        "show fixed dataset-row count bands; unlabeled rows are included.</desc>\n"
+    )
+    output.write('<rect width="100%" height="100%" fill="#ffffff"/>\n')
+    output.write(
+        f'<text x="{layout.plot_x}" y="30" font-family="sans-serif" '
+        f'font-size="22" font-weight="600" fill="#1f2933">'
+        f"{html.escape(_title(dataset_name))}</text>\n"
+    )
+    output.write(
+        f'<text x="{layout.plot_x}" y="{layout.subtitle_y}" font-family="sans-serif" '
+        'font-size="12" fill="#52606d">Representative point per polygon-bearing row · '
+        "H3 resolution 3 · counts include unlabeled rows</text>\n"
+    )
+    output.write(
+        '<defs><clipPath id="map-plot-clip">'
+        f'<rect x="{layout.plot_x}" y="{layout.plot_y}" '
+        f'width="{layout.plot_width}" height="{layout.plot_height}"/>'
+        "</clipPath></defs>\n"
+    )
+    output.write(
+        f'<rect x="{layout.plot_x}" y="{layout.plot_y}" width="{layout.plot_width}" '
+        f'height="{layout.plot_height}" fill="#eaf1f3"/>\n'
+    )
+    output.write('<g clip-path="url(#map-plot-clip)">\n')
+
+
+def _write_map_plot(output: TextIO, map_counts: Mapping[str, int], layout: _MapLayout) -> None:
+    for element in _land_elements(layout):
+        output.write(f"{element}\n")
+    for element in _grid_elements(layout):
+        output.write(f"{element}\n")
+    for cell, count in sorted(map_counts.items()):
+        for element in _map_cell_elements(cell, count, layout):
+            output.write(f"{element}\n")
+
+
+def _write_map_footer(output: TextIO, layout: _MapLayout) -> None:
+    output.write("</g>\n")
+    output.write(
+        f'<rect x="{layout.plot_x}" y="{layout.plot_y}" width="{layout.plot_width}" '
+        f'height="{layout.plot_height}" fill="none" stroke="#cbd8dc" stroke-width="1"/>\n'
+    )
+    for element in _map_legend_elements(layout):
+        output.write(f"{element}\n")
+    output.write("</svg>\n")
+
+
+def _validated_map_counts(value: object) -> tuple[tuple[str, int], ...]:
+    if not isinstance(value, list):
+        raise TypeError("map snapshot map_counts must be a list")
+    counts = tuple(_validated_map_count_entry(entry) for entry in value)
+    if len({cell for cell, _count in counts}) != len(counts):
+        raise ValueError("map snapshot contains duplicate H3 cells")
+    return counts
+
+
+def _validated_map_count_entry(entry: object) -> tuple[str, int]:
+    if not isinstance(entry, list) or len(entry) != _MAP_COUNT_ENTRY_LENGTH:
+        raise TypeError("map snapshot entries must contain an H3 cell and row count")
+    cell, count = entry
+    _validate_map_snapshot_cell(cell)
+    _validate_map_snapshot_count(count)
+    return cell, count
+
+
+def _validate_map_snapshot_cell(cell: object) -> None:
+    if not isinstance(cell, str):
+        raise TypeError("map snapshot H3 cells must be strings")
+    if not h3.is_valid_cell(cell) or h3.get_resolution(cell) != _H3_RESOLUTION:
+        raise ValueError("map snapshot contains an invalid resolution-3 H3 cell")
+
+
+def _validate_map_snapshot_count(count: object) -> None:
+    if type(count) is not int:
+        raise TypeError("map snapshot row counts must be integers")
+    if count < 1:
+        raise ValueError("map snapshot row counts must be positive integers")
+
+
+def _validated_map_total_rows(value: object, map_counts: Mapping[str, int]) -> int:
+    if type(value) is not int:
+        raise TypeError("map snapshot total_rows must be an integer")
+    if value < 0:
+        raise ValueError("map snapshot total_rows must be non-negative")
+    if sum(map_counts.values()) > value:
+        raise ValueError("map snapshot row counts exceed total_rows")
+    return value
+
+
+def _map_aggregation_metadata(*, mapped_rows: int, omitted_rows: int) -> dict[str, object]:
+    return {
+        "unit": "dataset rows per occupied H3 cell",
+        "aggregation": "one representative point per valid polygon-bearing dataset row",
+        "includes_unlabeled_rows": True,
+        "h3_resolution": _H3_RESOLUTION,
+        "count_bands": [
+            {
+                "minimum": band.minimum,
+                "maximum": band.maximum,
+                "label": band.label,
+                "color": band.color,
+            }
+            for band in _MAP_COUNT_BANDS
+        ],
+        "mapped_rows": mapped_rows,
+        "omitted_rows": omitted_rows,
+        "omission_policy": (
+            "Missing or invalid polygon geometry, and representative points outside longitude "
+            "[-180, 180] or latitude [-90, 90], are omitted."
+        ),
+    }
+
+
+def _map_count_band(count: int) -> _MapCountBand:
+    for band in _MAP_COUNT_BANDS:
+        if count >= band.minimum and (band.maximum is None or count <= band.maximum):
+            return band
+    raise ValueError("map cell counts must be positive integers")
+
+
+def _unwrapped_boundary(cell: str) -> tuple[tuple[float, float], ...]:
+    unwrapped: list[tuple[float, float]] = []
+    previous_longitude: float | None = None
+    for latitude, longitude_value in h3.cell_to_boundary(cell):
+        unwrapped_longitude = float(longitude_value)
+        if previous_longitude is not None:
+            while unwrapped_longitude - previous_longitude > ANTIMERIDIAN_LONGITUDE_SPAN_DEGREES:
+                unwrapped_longitude -= _LON_RANGE
+            while unwrapped_longitude - previous_longitude < -ANTIMERIDIAN_LONGITUDE_SPAN_DEGREES:
+                unwrapped_longitude += _LON_RANGE
+        unwrapped.append((float(latitude), unwrapped_longitude))
+        previous_longitude = unwrapped_longitude
+    return tuple(unwrapped)
+
+
+def _map_cell_elements(cell: str, count: int, layout: _MapLayout) -> tuple[str, ...]:
+    boundary = _unwrapped_boundary(cell)
+    color = _map_count_band(count).color
+    return tuple(
+        _map_cell_element(boundary, shift, color, count, layout)
+        for shift in _visible_map_shifts(boundary)
+    )
+
+
+def _visible_map_shifts(boundary: tuple[tuple[float, float], ...]) -> tuple[float, ...]:
+    minimum_longitude = min(longitude for _latitude, longitude in boundary)
+    maximum_longitude = max(longitude for _latitude, longitude in boundary)
+    if minimum_longitude < _LON_MIN:
+        return (0.0, _LON_RANGE)
+    if maximum_longitude > _LON_MAX:
+        return (-_LON_RANGE, 0.0)
+    return (0.0,)
+
+
+def _map_cell_element(
+    boundary: tuple[tuple[float, float], ...],
+    shift: float,
+    color: str,
+    count: int,
+    layout: _MapLayout,
+) -> str:
+    points = [
+        f"{_map_x(longitude + shift, layout):.2f},{_map_y(latitude, layout):.2f}"
+        for latitude, longitude in boundary
+    ]
+    path = "M " + " L ".join(points) + " Z"
     return (
-        _coordinate_index(longitude, _LON_MIN, _LON_MAX, cell_size),
-        _coordinate_index(latitude, _LAT_MIN, _LAT_MAX, cell_size),
+        f'<path d="{path}" fill="{color}" stroke="none">'
+        f"<title>{count:,} dataset rows</title></path>"
     )
 
 
@@ -542,65 +687,51 @@ def _land_elements(layout: _MapLayout) -> list[str]:
             (f"{_map_x(longitude, layout):.2f},{_map_y(latitude, layout):.2f}")
             for longitude, latitude in landmass
         )
-        elements.append(
-            f'<polygon points="{points}" fill="#e5ebf0" stroke="#cbd5e0" stroke-width="0.8"/>'
-        )
+        elements.append(f'<polygon points="{points}" fill="#f4f1e9" stroke="none"/>')
     return elements
 
 
-def _label_colors(summaries: tuple[LabelSummary, ...]) -> dict[str | None, str]:
-    colors: dict[str | None, str] = {None: "#8a98a8"}
-    index = 0
-    for summary in summaries:
-        if summary.code is not None:
-            colors[summary.code] = _PALETTE[index % len(_PALETTE)]
-            index += 1
-    return colors
-
-
-def _legend_elements(
-    summaries: tuple[LabelSummary, ...],
-    colors: Mapping[str | None, str],
-    *,
-    x: int,
-    y: int,
-) -> list[str]:
+def _map_legend_elements(layout: _MapLayout) -> list[str]:
+    x = layout.legend_x
+    y = layout.legend_y
     elements = [
         (
             f'<text x="{x}" y="75" font-family="sans-serif" font-size="15" '
-            'font-weight="600" fill="#1f2933">EUNIS labels</text>'
+            'font-weight="600" fill="#1f2933">Rows per H3 cell</text>'
+        ),
+        (
+            f'<text x="{x}" y="96" font-family="sans-serif" font-size="10" '
+            'fill="#52606d">Fixed count bands across all cards</text>'
         ),
     ]
-    visible = summaries[:18]
-    for index, summary in enumerate(visible):
-        row_y = y + index * 24
-        code = summary.code or "—"
-        label = _truncate(summary.name, 24)
+    for index, band in enumerate(_MAP_COUNT_BANDS):
+        row_y = y + index * 28
         elements.append(
-            f'<rect x="{x}" y="{row_y - 11}" width="12" height="12" '
-            f'rx="2" fill="{colors[summary.code]}"/>'
+            f'<rect x="{x}" y="{row_y - 12}" width="15" height="15" rx="2" fill="{band.color}"/>'
         )
         elements.append(
-            f'<text x="{x + 19}" y="{row_y}" font-family="sans-serif" '
-            f'font-size="11" fill="#334e68">{html.escape(code)} · '
-            f"{html.escape(label)}</text>"
+            f'<text x="{x + 23}" y="{row_y}" font-family="sans-serif" '
+            f'font-size="11" fill="#334e68">{band.label} dataset rows</text>'
         )
-    if len(summaries) > len(visible):
-        row_y = y + len(visible) * 24 + 5
-        elements.append(
-            f'<text x="{x}" y="{row_y}" font-family="sans-serif" '
-            f'font-size="10" fill="#52606d">+ {len(summaries) - len(visible)} '
-            "more in the table</text>"
+    elements.extend(
+        (
+            f'<text x="{x}" y="252" font-family="sans-serif" font-size="10" '
+            'fill="#334e68">One representative point per valid</text>',
+            f'<text x="{x}" y="268" font-family="sans-serif" font-size="10" '
+            'fill="#334e68">polygon-bearing dataset row</text>',
+            f'<text x="{x}" y="291" font-family="sans-serif" font-size="10" '
+            'fill="#334e68">H3 resolution 3</text>',
+            f'<text x="{x}" y="307" font-family="sans-serif" font-size="10" '
+            'fill="#334e68">Counts include unlabeled rows</text>',
+            f'<text x="{x}" y="338" font-family="sans-serif" font-size="10" '
+            'fill="#52606d">Missing or invalid geometry is omitted</text>',
+            f'<text x="{x}" y="354" font-family="sans-serif" font-size="10" '
+            'fill="#52606d">Points outside longitude [-180, 180]</text>',
+            f'<text x="{x}" y="370" font-family="sans-serif" font-size="10" '
+            'fill="#52606d">or latitude [-90, 90] are omitted</text>',
         )
+    )
     return elements
-
-
-def _label_text(code: str | None, name: str) -> str:
-    return f"{code or 'No EUNIS label'} · {name}"
-
-
-def _truncate(value: str, length: int) -> str:
-    return value if len(value) <= length else f"{value[: length - 1]}…"
 
 
 def _extract_source_configs(source_readme: str | None) -> str | None:

@@ -22,17 +22,15 @@ from osm_polygon_eunis.publish import (
 )
 from osm_polygon_eunis.sources import DatasetSpec
 
-_PRE_REFACTOR_GOLDEN = {
-    "eunis/world-map.svg": "c39b39feffc29e4621ee3aaab527ef75e7dca7e2918044bf0c8bb867f050aba3",
+_CURRENT_RELEASE_GOLDEN = {
+    "eunis/world-map.svg": "ab3e13c2a1a4e2c83d2e1e5c77e5be0497e1ed00711714fe7dc78f41975784d6",
     "polygon_document_links/region.parquet": (
         "3d8c8d95ce1a7f62a59e221f52ccd17dc5ba77f3e4b47a5a110b0d643b9c78c0"
     ),
     "polygons/region.parquet": "e2d3d549a14795d938b498a60b57d614f2e96b6378c1af4fce3a0b44aeae83b4",
 }
-_PRE_REFACTOR_STABLE_MANIFEST_SHA256 = (
-    "e53ebfa8158f17de4a63c188a3fb9080ae7f2dd1359f3f19d5eef339f64a3765"
-)
-_CURRENT_README_SHA256 = "292fcd6a192a8b2c8c86967ed981c61c809ca70d7bdb95c29dc3d3bdbd57fd90"
+_CURRENT_STABLE_MANIFEST_SHA256 = "bae9475378f9b2f3fa5be47754cbf759faa52575184ea2f53cdee68cde3f4e1c"
+_CURRENT_README_SHA256 = "f1807c59164fd72baf815b1d9867e957de92e9a4271b1b5064588a4bbf74cbc6"
 
 
 class _GoldenHub:
@@ -117,11 +115,11 @@ def _stable_manifest_sha256(manifest: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def test_release_outputs_match_pre_refactor_golden_snapshot(
+def test_synthetic_release_outputs_match_golden_snapshot(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """Pin stable release outputs captured with the monolithic runner at d134a19."""
+    """Pin source shard bytes and synthetic release-card outputs."""
     spec = DatasetSpec(
         "wikidata",
         "NoeFlandre/osm-polygon-wikidata-and-wikipedia",
@@ -229,14 +227,24 @@ def test_release_outputs_match_pre_refactor_golden_snapshot(
 
     outputs = hub.repositories[spec.output_repo]
     output_hashes = {
-        path: hashlib.sha256(outputs[path]).hexdigest() for path in _PRE_REFACTOR_GOLDEN
+        path: hashlib.sha256(outputs[path]).hexdigest() for path in _CURRENT_RELEASE_GOLDEN
     }
-    assert output_hashes == _PRE_REFACTOR_GOLDEN
+    assert output_hashes == _CURRENT_RELEASE_GOLDEN
     assert hashlib.sha256(outputs["README.md"]).hexdigest() == _CURRENT_README_SHA256
 
     manifest = json.loads(outputs["eunis/manifest.json"])
     assert manifest["manifest_version"] == MANIFEST_VERSION == 5
     assert manifest["geometry_policy"] == GEOMETRY_POLICY
     assert manifest["card"]["geometry_policy"] == GEOMETRY_POLICY
-    assert _stable_manifest_sha256(manifest) == _PRE_REFACTOR_STABLE_MANIFEST_SHA256
+    assert manifest["card"]["label_distribution"] == [
+        {"code": "R11", "name": "steppe", "rows": 1, "percentage": 50.0},
+        {"code": None, "name": "No EUNIS label", "rows": 1, "percentage": 50.0},
+    ]
+    assert manifest["card"]["map_aggregation"]["unit"] == ("dataset rows per occupied H3 cell")
+    assert manifest["card"]["map_aggregation"]["aggregation"] == (
+        "one representative point per valid polygon-bearing dataset row"
+    )
+    assert manifest["card"]["map_aggregation"]["h3_resolution"] == 3
+    assert manifest["card"]["map_aggregation"]["includes_unlabeled_rows"] is True
+    assert _stable_manifest_sha256(manifest) == _CURRENT_STABLE_MANIFEST_SHA256
     assert receipt.datasets[0].verification.target_revision == "target-verified"
