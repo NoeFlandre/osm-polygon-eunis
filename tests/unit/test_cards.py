@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from io import StringIO
 from pathlib import Path
 
 import h3
@@ -68,6 +69,24 @@ def test_card_artifacts_have_distribution_table_and_static_world_map(tmp_path: P
         "README.md": first.manifest["readme_sha256"],
         "eunis/world-map.svg": first.manifest["map_sha256"],
     }
+
+
+def test_geometry_only_rows_render_map_without_changing_label_summaries() -> None:
+    card = DatasetCardAccumulator()
+    card.observe_map_row(_geometry(2.0, 48.0))
+    card.observe_map_row(None)
+    card.observe_map_row(Point(2.0, 48.0))
+
+    cell = h3.latlng_to_cell(48.5, 2.5, 3)
+    assert card.total_rows == 3
+    assert card.summaries() == ()
+    assert card.invalid_geometries == 1
+    assert card.snapshot()["map_counts"] == [[cell, 1]]
+
+    output = StringIO()
+    card.write_map_svg(output, "source")
+    assert '<title id="map-title">Source H3 coverage map</title>' in output.getvalue()
+    assert "H3 resolution 3" in output.getvalue()
 
 
 def test_card_preserves_source_viewer_configs_without_source_card_body(tmp_path: Path) -> None:

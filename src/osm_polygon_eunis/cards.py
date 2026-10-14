@@ -256,6 +256,12 @@ class DatasetCardAccumulator:
         self._record_label(code, name)
         self._record_map_cell(raw_geometry)
 
+    def observe_map_row(self, raw_geometry: object) -> None:
+        """Record one geometry-only source row without changing label counts."""
+
+        self._total_rows += 1
+        self._record_map_cell(raw_geometry)
+
     def _record_label(self, code: str | None, name: str) -> None:
         previous_name = self._names.setdefault(code, name)
         if previous_name != name:
@@ -315,7 +321,7 @@ class DatasetCardAccumulator:
         map_path = directory / _MAP_PATH
         map_path.parent.mkdir(parents=True, exist_ok=True)
         with map_path.open("w", encoding="utf-8", newline="\n") as output:
-            self._write_map(output, dataset_name)
+            self.write_map_svg(output, dataset_name)
         readme_path = directory / "README.md"
         readme_path.write_text(
             self._render_readme(
@@ -445,7 +451,9 @@ class DatasetCardAccumulator:
         )
         return "\n".join(lines) + "\n"
 
-    def _write_map(self, output: TextIO, dataset_name: str) -> None:
+    def write_map_svg(self, output: TextIO, dataset_name: str) -> None:
+        """Write the H3 map without rendering or changing the label summary."""
+
         _write_map_header(output, dataset_name, _LAYOUT)
         _write_map_plot(output, self._map_counts, _LAYOUT)
         _write_map_footer(output, _LAYOUT)
