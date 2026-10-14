@@ -13,3 +13,7 @@
 - EEA reference assets can have reuse terms for each item. Before you
   redistribute derived data, verify the notice of the exact asset. Record the
   notice with the release evidence.
+- EEA raster tiles in three GeoPackages use the same compressed-tile reader. A
+  native Q11 comparison found 36,524 false presence cells in one 256 by 256
+  tile. The other 46 layers still need a mask and value audit. See the
+  [lossless NoData correction plan](source-correction/gpkg-lossless-nodata.md).
