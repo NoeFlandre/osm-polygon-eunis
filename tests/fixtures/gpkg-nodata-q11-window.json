@@ -1,0 +1,165 @@
+{
+  "fixture_version": 1,
+  "purpose": "Q11 lossy GeoPackage window disagrees with native NoData mask",
+  "source": {
+    "source_version": "EEA EUNIS habitat probability maps v1 2021",
+    "native_gdb": {
+      "catalog_record_id": "ae2fdada-93d6-4cf1-a11c-6ebccf25d286",
+      "asset": "GDB/Wetlands_Q_Prob_100m.gdb",
+      "dataset": "Prob_Q11_100m",
+      "metadata_file": "a00000004.gdbtable",
+      "metadata_file_sha256": "a05b6afa9a8691f6449bb04d6c748b186d2dce91cb22f8d14fc39939df0b6809",
+      "nodata_value": 255,
+      "grid": {
+        "crs": "EPSG:3035",
+        "width": 47700,
+        "height": 40850,
+        "geotransform": [2580000.0, 100.0, 0.0, 5445000.0, 0.0, -100.0]
+      }
+    },
+    "geopackage": {
+      "catalog_record_id": "ae2fdada-93d6-4cf1-a11c-6ebccf25d286",
+      "asset": "GPKG/Wetlands_Q_prob_100m.gpkg",
+      "url": "https://sdi.eea.europa.eu/datashare/public.php/dav/files/sptXqwkQr5g7Bp5/eea_r_3035_100_m_eunis-hab-probability-q_p_1940-2017_v01_r00/GPKG/Wetlands_Q_prob_100m.gpkg",
+      "dataset": "Q11",
+      "size_bytes": 1196740608,
+      "tile": {
+        "zoom": 8,
+        "column": 101,
+        "row": 138,
+        "local_pixels": [[163, 48], [163, 49]]
+      },
+      "prefix_sha256": {
+        "range": "bytes=0-8388607",
+        "digest": "4f1ef141446590fa2bc95a459ec928a712583da16d1dc0d7dc53b7aede047a80"
+      },
+      "whole_file_sha256": null,
+      "note": "The recorded prefix digest is not a whole-file digest."
+    },
+    "other_geopackage_groups": [
+      {
+        "family": "Saltmarshes",
+        "catalog_record_id": "7a2d78ec-8a31-4e7b-91df-45db6e64e842",
+        "asset": "Saltmarshes_MA_prob_100m.gpkg",
+        "url": "https://sdi.eea.europa.eu/datashare/public.php/dav/files/sptXqwkQr5g7Bp5/eea_r_3035_100_m_eunis-hab-propability-ma_p_1940-2020_v01_r00/GPKG/Saltmarshes_MA_prob_100m.gpkg",
+        "size_bytes": 60710912,
+        "first_8_mib_sha256": "6fed7d77d3639569961d105e0be1d553ef3b2e8ac6b47e1558b0bd93b49ec14f",
+        "layers": ["MA221", "MA222", "MA223", "MA224", "MA225", "MA232", "MA241", "MA251", "MA252", "MA253"]
+      },
+      {
+        "family": "Sparse vegetation",
+        "catalog_record_id": "a6c48c2d-114f-406e-ba99-c9085a5f5aee",
+        "asset": "Sparsely_U_prob_100m.gpkg",
+        "url": "https://sdi.eea.europa.eu/datashare/public.php/dav/files/sptXqwkQr5g7Bp5/eea_r_3035_100_m_eunis-hab-probability-u_p_1940-2020_v01_r00/GPKG/Sparsely_U_prob_100m.gpkg",
+        "size_bytes": 260083712,
+        "first_8_mib_sha256": "e3eb4bd8f6aa11d3f6a9969a95dac75db57a95202c9b10319cdc70da15f47892",
+        "layers": ["U21", "U22", "U23", "U24", "U25", "U26", "U27", "U28", "U29", "U32", "U33", "U34", "U36", "U37", "U38", "U3A", "U3B", "U3D", "U62"]
+      }
+    ],
+    "q_layers": ["Q11", "Q12", "Q21", "Q22", "Q23", "Q24", "Q25", "Q31", "Q41", "Q42", "Q43", "Q44", "Q45", "Q46", "Q51", "Q52", "Q53", "Q54"],
+    "tools": {
+      "gdal": "3.10.3",
+      "rasterio": "1.5.2",
+      "native_reader_driver": "OpenFileGDB",
+      "tile_reader_driver": "GPKG",
+      "reader_code_commit": "9c48898e05ac83122a441e02c3844e7580e322be"
+    }
+  },
+  "tile_fixture_files": [
+    {
+      "path": "gpkg-nodata-q11-native.tif",
+      "size_bytes": 67589,
+      "sha256": "af93463e2138fd5e708c8ee386a550777387dbd09838c35f920a88036c92c8fa",
+      "meaning": "Lossless native FileGDB 256x256 Q11 value window with GDAL mask."
+    },
+    {
+      "path": "gpkg-nodata-q11-decoded.tif",
+      "size_bytes": 262848,
+      "sha256": "a9c552c68e956e2c0fb8372ff9e517d91f4f105465b08965f873471e5c27af03",
+      "meaning": "GDAL-decoded 256x256 Q11 GeoPackage raster window, including its dataset mask and alpha band."
+    }
+  ],
+  "window": {
+    "crs": "EPSG:3035",
+    "origin_global_col_row": [26018, 35375],
+    "width": 3,
+    "height": 4,
+    "native_values": [
+      [0, 0, 0],
+      [255, 255, 0],
+      [255, 255, 0],
+      [255, 255, 0]
+    ],
+    "native_gdal_mask": [
+      [255, 255, 255],
+      [0, 0, 255],
+      [0, 0, 255],
+      [0, 0, 255]
+    ],
+    "geopackage_band_1": [
+      [0, 0, 0],
+      [249, 254, 0],
+      [255, 255, 9],
+      [242, 255, 0]
+    ],
+    "geopackage_rgb_bands_equal": true,
+    "geopackage_dataset_alpha_band": [
+      [255, 255, 255],
+      [255, 255, 255],
+      [255, 255, 255],
+      [255, 255, 255]
+    ],
+    "geopackage_nodata_metadata": null,
+    "geopackage_read_masks": [
+      [255, 255, 255],
+      [255, 255, 255],
+      [255, 255, 255],
+      [255, 255, 255]
+    ],
+    "basilica_cells": [
+      {
+        "epsg3035_center": [5181950, 1907350],
+        "global_col_row": [26019, 35376],
+        "native_value": 255,
+        "native_mask": 0,
+        "geopackage_value": 254,
+        "geopackage_dataset_alpha": 255
+      },
+      {
+        "epsg3035_center": [5181950, 1907250],
+        "global_col_row": [26019, 35377],
+        "native_value": 255,
+        "native_mask": 0,
+        "geopackage_value": 255,
+        "geopackage_dataset_alpha": 255
+      }
+    ]
+  },
+  "bounded_impact": {
+    "native_presence_rule": "native_gdal_mask != 0 and native_value > 0",
+    "legacy_geopackage_presence_rule": "geopackage_band_1 > 0 and decoded alpha > 0",
+    "q11_tile_z8_col101_row138": {
+      "global_pixel_window": [25856, 35328, 256, 256],
+      "cell_count": 65536,
+      "native_nodata_cells": 33630,
+      "native_valid_zero_cells": 31906,
+      "native_positive_cells": 0,
+      "geopackage_dataset_invalid_cells": 0,
+      "geopackage_positive_cells": 36524,
+      "false_positive_presence_cells": 36524,
+      "false_positive_native_nodata_cells": 33630,
+      "false_positive_native_valid_zero_cells": 2894,
+      "false_negative_presence_cells": 0,
+      "valid_common_value_differences": 2894,
+      "geopackage_alpha_all_opaque": true
+    },
+    "basilica_3x4_window": {
+      "cell_count": 12,
+      "native_positive_cells": 0,
+      "geopackage_positive_cells": 7,
+      "positive_cells_from_native_nodata": 6,
+      "additional_positive_cells_where_native_value_is_zero": 1
+    },
+    "scope_limit": "One Q11 256x256 tile and its 3x4 subwindow only; no full-layer or published-polygon impact is claimed."
+  }
+}
