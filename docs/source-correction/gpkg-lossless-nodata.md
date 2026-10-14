@@ -23,6 +23,11 @@ valid zeros. There are no false negatives in this tile. The adjacent 3 by 4
 Basilica window accounts for seven of those false positives. These counts cover
 one tile only, not the full Q11 raster or published polygons.
 
+The lossy values range across the byte scale for native NoData cells: 31,063
+decode to 255, 258 to 254, and 2,309 to values from 1 through 253. A 254 cutoff
+would still leave 2,309 NoData cells looking like presence. The native mask
+identifies all 33,630 invalid cells directly.
+
 ## Distribution inventory
 
 The pinned EEA config resolves three GeoPackages through

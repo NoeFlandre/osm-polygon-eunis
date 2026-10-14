@@ -34,6 +34,7 @@
         "digest": "4f1ef141446590fa2bc95a459ec928a712583da16d1dc0d7dc53b7aede047a80"
       },
       "whole_file_sha256": null,
+      "raw_tile_blob_sha256": null,
       "note": "The recorded prefix digest is not a whole-file digest."
     },
     "other_geopackage_groups": [
@@ -151,6 +152,18 @@
       "false_positive_native_valid_zero_cells": 2894,
       "false_negative_presence_cells": 0,
       "valid_common_value_differences": 2894,
+      "native_nodata_geopackage_value_histogram": {
+        "0": 0,
+        "1_to_253": 2309,
+        "254": 258,
+        "255": 31063
+      },
+      "native_valid_zero_geopackage_value_histogram": {
+        "0": 29012,
+        "1_to_253": 2894,
+        "254": 0,
+        "255": 0
+      },
       "geopackage_alpha_all_opaque": true
     },
     "basilica_3x4_window": {
