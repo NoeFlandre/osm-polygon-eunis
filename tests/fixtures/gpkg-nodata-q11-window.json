@@ -3,6 +3,17 @@
   "purpose": "Q11 lossy GeoPackage window disagrees with native NoData mask",
   "source": {
     "source_version": "EEA EUNIS habitat probability maps v1 2021",
+    "asset_license": {
+      "name": "CC BY 4.0",
+      "url": "https://creativecommons.org/licenses/by/4.0/",
+      "copyright_holder": "European Environment Agency (EEA)",
+      "attribution": "European Environment Agency (EEA), EUNIS habitat probability maps v1 2021, CC BY 4.0.",
+      "verified_in_catalog_records": [
+        "ae2fdada-93d6-4cf1-a11c-6ebccf25d286",
+        "7a2d78ec-8a31-4e7b-91df-45db6e64e842",
+        "a6c48c2d-114f-406e-ba99-c9085a5f5aee"
+      ]
+    },
     "native_gdb": {
       "catalog_record_id": "ae2fdada-93d6-4cf1-a11c-6ebccf25d286",
       "asset": "GDB/Wetlands_Q_Prob_100m.gdb",
@@ -34,6 +45,8 @@
         "digest": "4f1ef141446590fa2bc95a459ec928a712583da16d1dc0d7dc53b7aede047a80"
       },
       "whole_file_sha256": null,
+      "whole_file_sha256_supplied_by_user": "a7eab477c2447b7493074b4cc5fab5bc9e118dd27fed227d5ab49dea0a991201",
+      "whole_file_sha256_local_verification": "not performed",
       "raw_tile_blob_sha256": null,
       "note": "The recorded prefix digest is not a whole-file digest."
     },

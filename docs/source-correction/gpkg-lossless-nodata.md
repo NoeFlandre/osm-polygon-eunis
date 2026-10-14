@@ -14,7 +14,19 @@ The regression fixture is
 [`tests/fixtures/gpkg-nodata-q11-window.json`](../../tests/fixtures/gpkg-nodata-q11-window.json).
 It preserves the native metadata-file SHA-256, GDAL and Rasterio versions, grid,
 cell coordinates, values, masks, and the exact bounded GeoPackage prefix digest.
-The GeoPackage digest covers only its first 8 MiB. No whole-file hash is known.
+The GeoPackage digest covers only its first 8 MiB. The two raster fixtures total
+330,437 bytes. The Q11 GeoPackage whole-file hash
+`a7eab477c2447b7493074b4cc5fab5bc9e118dd27fed227d5ab49dea0a991201` was supplied
+as independent evidence; this executor did not compute or verify a whole-file
+hash.
+
+The EEA catalog records for Q, MA, and U state CC BY 4.0 and identify the EEA as
+copyright holder. The fixture carries the attribution:
+"European Environment Agency (EEA), EUNIS habitat probability maps v1 2021,
+CC BY 4.0." See the [Q record](https://sdi.eea.europa.eu/catalogue/datahub/api/records/ae2fdada-93d6-4cf1-a11c-6ebccf25d286?language=eng),
+[MA record](https://sdi.eea.europa.eu/catalogue/datahub/api/records/7a2d78ec-8a31-4e7b-91df-45db6e64e842?language=eng),
+[U record](https://sdi.eea.europa.eu/catalogue/datahub/api/records/a6c48c2d-114f-406e-ba99-c9085a5f5aee?language=eng),
+and the [EEA legal notice](https://www.eea.europa.eu/en/legal-notice).
 
 For the full 256 by 256 Q11 tile at zoom 8, column 101, row 138, the native
 values and masks yield zero positive cells. The current GeoPackage rule yields
