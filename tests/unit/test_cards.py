@@ -147,7 +147,9 @@ def test_geometry_row_group_reads_small_parquet_batches(tmp_path: Path) -> None:
 
     assert rows == len(geometries)
     assert state == expected.snapshot()
-    assert reader.batch_sizes == [8, 8, 8, 8, 5]
+    assert reader.batch_sizes == [
+        min(GEOMETRY_MAP_BATCH_ROWS, 37 - start) for start in range(0, 37, GEOMETRY_MAP_BATCH_ROWS)
+    ]
     assert max(reader.batch_sizes) <= GEOMETRY_MAP_BATCH_ROWS
 
 
@@ -186,13 +188,15 @@ def test_geometry_batch_memory_does_not_grow_with_row_group_length() -> None:
             self.offset = offset
 
         def to_pylist(self) -> list[str]:
-            return [f"!{self.offset + index}:" + "x" * payload_bytes for index in range(8)]
+            return [
+                f"!{self.offset + index}:" + "x" * payload_bytes
+                for index in range(min(GEOMETRY_MAP_BATCH_ROWS, total_rows - self.offset))
+            ]
 
     class GeometryBatch:
-        num_rows = 8
-
         def __init__(self, offset: int) -> None:
             self.offset = offset
+            self.num_rows = min(GEOMETRY_MAP_BATCH_ROWS, total_rows - offset)
 
         def column(self, index: int) -> GeometryArray:
             assert index == 0

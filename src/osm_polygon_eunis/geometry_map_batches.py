@@ -6,22 +6,17 @@ from typing import Any
 
 from .cards import DatasetCardAccumulator
 
-GEOMETRY_MAP_BATCH_ROWS = 8
+GEOMETRY_MAP_BATCH_ROWS = 1
 
 
-def _observe_batch(
-    batch: Any,
-    accumulator: DatasetCardAccumulator,
-) -> int:
+def _decode_batch(batch: Any) -> list[object]:
     batch_rows = int(batch.num_rows)
     if batch_rows < 0 or batch_rows > GEOMETRY_MAP_BATCH_ROWS:
         raise ValueError("Parquet geometry batch exceeded the configured row bound")
     geometries = batch.column(0).to_pylist()
     if len(geometries) != batch_rows:
         raise ValueError("Parquet geometry batch row count changed during decoding")
-    for geometry in geometries:
-        accumulator.observe_map_row(geometry)
-    return batch_rows
+    return geometries
 
 
 def accumulate_geometry_row_group(
@@ -39,6 +34,10 @@ def accumulate_geometry_row_group(
         use_threads=False,
     )
     for batch in batches:
-        row_count += _observe_batch(batch, accumulator)
+        geometries = _decode_batch(batch)
         del batch
+        for geometry in geometries:
+            accumulator.observe_map_row(geometry)
+        row_count += len(geometries)
+        del geometries
     return row_count, accumulator.snapshot()
