@@ -10,7 +10,7 @@ import re
 import tempfile
 import time
 import xml.etree.ElementTree as ET  # types only; parsing goes through defusedxml
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass
 from importlib.metadata import version
 from pathlib import Path
@@ -281,6 +281,16 @@ def _classification_taxonomy_records(
     rows: Iterable[Iterable[object]],
 ) -> dict[str, tuple[str, int]]:
     records: dict[str, tuple[str, int]] = {}
+    for code, name, level in _iter_classification_taxonomy_records(rows):
+        _merge_classification_taxonomy_record(records, code, name, level)
+    if not records:
+        raise ValueError("EEA classification workbook has no Level/Code/Name rows")
+    return records
+
+
+def _iter_classification_taxonomy_records(
+    rows: Iterable[Iterable[object]],
+) -> Iterable[tuple[str, str, int]]:
     current_indexes: tuple[int, int, int] | None = None
     for raw_row in rows:
         row = tuple(raw_row)
@@ -291,14 +301,19 @@ def _classification_taxonomy_records(
         if current_indexes is None:
             continue
         record = _classification_taxonomy_record(row, current_indexes)
-        if record is None:
-            continue
-        code, name, level = record
-        if records.setdefault(code, (name, level)) != (name, level):
-            raise ValueError(f"EEA classification has conflicting name or Level for {code}")
-    if not records:
-        raise ValueError("EEA classification workbook has no Level/Code/Name rows")
-    return records
+        if record is not None:
+            yield record
+
+
+def _merge_classification_taxonomy_record(
+    records: dict[str, tuple[str, int]],
+    code: str,
+    name: str,
+    level: int,
+) -> None:
+    row_value = (name, level)
+    if records.setdefault(code, row_value) != row_value:
+        raise ValueError(f"EEA classification has conflicting name or Level for {code}")
 
 
 def _classification_taxonomy_record(
@@ -306,39 +321,57 @@ def _classification_taxonomy_record(
     indexes: tuple[int, int, int],
 ) -> tuple[str, str, int] | None:
     level_index, code_index, name_index = indexes
-    if code_index >= len(row):
-        return None
-    code = _text_value(row[code_index])
+    code = _taxonomy_cell_text(row, code_index)
     if not code:
         return None
-    if name_index >= len(row):
+    name = _required_taxonomy_name(row, name_index, code)
+    level = _taxonomy_level(row, level_index, code)
+    return code, name, level
+
+
+def _taxonomy_cell_text(row: tuple[object, ...], index: int) -> str:
+    return _text_value(row[index]) if index < len(row) else ""
+
+
+def _required_taxonomy_name(row: tuple[object, ...], index: int, code: str) -> str:
+    if index >= len(row):
         raise ValueError(f"EEA classification has a missing name for {code}")
-    name = _text_value(row[name_index])
+    name = _text_value(row[index])
     if not name:
         raise ValueError(f"EEA classification has a missing name for {code}")
-    level_value = row[level_index] if level_index < len(row) else ""
-    level_text = (
-        str(level_value)
-        if isinstance(level_value, int) and not isinstance(level_value, bool)
-        else _text_value(level_value)
-    )
+    return name
+
+
+def _taxonomy_level(row: tuple[object, ...], index: int, code: str) -> int:
+    value = row[index] if index < len(row) else ""
+    level_text = _taxonomy_level_text(value)
     if not level_text.isdecimal() or int(level_text) < 1:
         raise ValueError(f"EEA classification has an invalid Level for {code}")
-    return code, name, int(level_text)
+    return int(level_text)
+
+
+def _taxonomy_level_text(value: object) -> str:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    return _text_value(value)
 
 
 def _classification_parent_links(levels: Mapping[str, int]) -> dict[str, str]:
     parents: dict[str, str] = {}
     for code, level in levels.items():
-        prefixes = (
-            candidate
-            for candidate, parent_level in levels.items()
-            if len(candidate) < len(code) and code.startswith(candidate) and parent_level < level
-        )
-        parent = max(prefixes, key=len, default=None)
+        parent = _longest_lower_level_prefix(code, level, levels)
         if parent is not None:
             parents[code] = parent
     return parents
+
+
+def _longest_lower_level_prefix(code: str, level: int, levels: Mapping[str, int]) -> str | None:
+    for end in range(len(code) - 1, 0, -1):
+        prefix = code[:end]
+        parent_level = levels.get(prefix)
+        if parent_level is not None and parent_level < level:
+            return prefix
+    return None
 
 
 def _add_supplemental_taxonomy_labels(
@@ -346,13 +379,22 @@ def _add_supplemental_taxonomy_labels(
     supplemental_labels: Mapping[str, str] | None,
 ) -> dict[str, str]:
     for code, name in (supplemental_labels or {}).items():
-        if not code or not name.strip():
-            raise ValueError("EEA classification has an invalid supplemental label")
-        previous = labels.get(code)
-        if previous is not None and previous != name.strip():
-            raise ValueError(f"EEA supplemental label conflicts with classification for {code}")
-        labels[code] = name.strip()
+        labels[code] = _validated_supplemental_taxonomy_label(code, name, labels)
     return labels
+
+
+def _validated_supplemental_taxonomy_label(
+    code: str,
+    name: str,
+    labels: Mapping[str, str],
+) -> str:
+    normalized_name = name.strip()
+    if not code or not normalized_name:
+        raise ValueError("EEA classification has an invalid supplemental label")
+    previous = labels.get(code)
+    if previous is not None and previous != normalized_name:
+        raise ValueError(f"EEA supplemental label conflicts with classification for {code}")
+    return normalized_name
 
 
 def _classification_taxonomy_indexes(
@@ -694,15 +736,26 @@ def _fetch_arcgis_labels(
     claimed_codes: set[str] | None = None,
 ) -> dict[str, str]:
     labels = dict(fallback_labels or {})
+    for page_labels in _arcgis_label_pages(client, service_url, fallback_labels, claimed_codes):
+        _merge_labels(labels, page_labels)
+    return labels
+
+
+def _arcgis_label_pages(
+    client: _HttpClient,
+    service_url: str,
+    fallback_labels: Mapping[str, str] | None,
+    claimed_codes: set[str] | None,
+) -> Iterable[dict[str, str]]:
     offset = 0
     while True:
         page = _fetch_arcgis_page(client, service_url, offset)
         page_labels = parse_arcgis_labels(page, fallback_labels)
         if claimed_codes is not None:
             claimed_codes.update(page_labels)
-        _merge_labels(labels, page_labels)
+        yield page_labels
         if not page.get("exceededTransferLimit") or not page_labels:
-            return labels
+            return
         offset += len(page_labels)
 
 
@@ -870,6 +923,27 @@ def resolve_classification_taxonomy(
     catalog_api: str = _DEFAULT_CATALOG_API,
 ) -> EunisTaxonomy:
     """Fetch the official classification workbook and compile its verified hierarchy."""
+    entry = _classification_workbook_entry(client, record_id, catalog_api)
+    content = _classification_workbook_content(client, entry)
+    taxonomy = _parse_classification_taxonomy_workbook(content, supplemental_labels)
+    return EunisTaxonomy(
+        taxonomy.labels,
+        taxonomy.levels,
+        taxonomy.parents,
+        source_record_id=record_id,
+        source_path=entry.path,
+        source_url=entry.url,
+        source_size=entry.size,
+        source_etag=entry.etag,
+        source_sha256=hashlib.sha256(content).hexdigest(),
+    )
+
+
+def _classification_workbook_entry(
+    client: _HttpClient,
+    record_id: str,
+    catalog_api: str,
+) -> WebDavEntry:
     _links, entries = _fetch_record_entries(
         client,
         record_id,
@@ -878,30 +952,26 @@ def resolve_classification_taxonomy(
         max_depth=1,
         file_suffixes=(".xlsx",),
     )
-    entry = _select_classification_entry(entries)
+    return _select_classification_entry(entries)
+
+
+def _classification_workbook_content(client: _HttpClient, entry: WebDavEntry) -> bytes:
     if entry.size is None:
         raise ValueError("EEA classification workbook has no byte size")
     workbook = _get_with_retry(client, entry.url)
     if len(workbook.content) != entry.size:
         raise ValueError("EEA classification workbook byte count differs from metadata")
+    return workbook.content
+
+
+def _parse_classification_taxonomy_workbook(
+    content: bytes,
+    supplemental_labels: Mapping[str, str] | None,
+) -> EunisTaxonomy:
     try:
-        with ZipFile(io.BytesIO(workbook.content)) as archive:
+        with ZipFile(io.BytesIO(content)) as archive:
             rows = _xlsx_rows(archive, _shared_strings(archive))
-            taxonomy = parse_classification_taxonomy_rows(
-                rows,
-                supplemental_labels=supplemental_labels,
-            )
-        return EunisTaxonomy(
-            taxonomy.labels,
-            taxonomy.levels,
-            taxonomy.parents,
-            source_record_id=record_id,
-            source_path=entry.path,
-            source_url=entry.url,
-            source_size=entry.size,
-            source_etag=entry.etag,
-            source_sha256=hashlib.sha256(workbook.content).hexdigest(),
-        )
+            return parse_classification_taxonomy_rows(rows, supplemental_labels=supplemental_labels)
     except (BadZipFile, KeyError) as error:
         raise ValueError("EEA classification asset is not a valid XLSX workbook") from error
 
@@ -956,7 +1026,7 @@ def _resolve_group_labels(
     raster_codes = _raster_codes(entries)
     if claimed_codes is not None:
         claimed_codes.update(raster_codes)
-    if not raster_codes or any(code not in labels for code in raster_codes):
+    if _group_requires_arcgis_labels(raster_codes, labels):
         return _fetch_arcgis_labels(
             client,
             service_url,
@@ -964,6 +1034,10 @@ def _resolve_group_labels(
             claimed_codes=claimed_codes,
         )
     return labels
+
+
+def _group_requires_arcgis_labels(raster_codes: Collection[str], labels: Mapping[str, str]) -> bool:
+    return not raster_codes or any(code not in labels for code in raster_codes)
 
 
 def _vector_asset(
@@ -1117,14 +1191,30 @@ def validate_group_code_ownership(
     code_owners: dict[str, str] = {}
     root_owners: dict[str, str] = {}
     for group in groups:
-        for code in group.claimed_codes:
-            owner = code_owners.setdefault(code, group.record_id)
-            if owner != group.record_id:
-                raise ValueError(f"EUNIS code {code} is claimed by multiple EEA records")
-            root = taxonomy.root_for(code)
-            root_owner = root_owners.setdefault(root, group.record_id)
-            if root_owner != group.record_id:
-                raise ValueError(f"EUNIS hierarchy root {root} is claimed by multiple EEA records")
+        _validate_group_code_ownership(group, taxonomy, code_owners, root_owners)
+
+
+def _validate_group_code_ownership(
+    group: EeaGroup,
+    taxonomy: EunisTaxonomy,
+    code_owners: dict[str, str],
+    root_owners: dict[str, str],
+) -> None:
+    for code in group.claimed_codes:
+        _record_code_owner(code_owners, code, group.record_id, "code")
+        root = taxonomy.root_for(code)
+        _record_code_owner(root_owners, root, group.record_id, "hierarchy root")
+
+
+def _record_code_owner(
+    owners: dict[str, str],
+    code: str,
+    record_id: str,
+    code_kind: str,
+) -> None:
+    owner = owners.setdefault(code, record_id)
+    if owner != record_id:
+        raise ValueError(f"EUNIS {code_kind} {code} is claimed by multiple EEA records")
 
 
 def _stream_asset(

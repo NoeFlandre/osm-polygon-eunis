@@ -5,16 +5,19 @@ import sys
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
+from shapely.errors import GEOSException
 from shapely.geometry import GeometryCollection, Polygon, box
 
 from osm_polygon_eunis.domain import EunisResult, EunisTaxonomy, OverlapCandidate
 from osm_polygon_eunis.matching import (
     _exact_intersection_area,
+    _intersection_area,
     _percentage,
     _rank,
     _usable_polygon,
     choose_winner,
     prefer_result,
+    result_from_class_areas,
 )
 
 
@@ -43,6 +46,19 @@ def test_dominant_below_eighty_percent_is_withheld() -> None:
     assert result == EunisResult(None, None, 70.0, "test")
 
 
+def test_withheld_result_reports_the_largest_class_union_percentage() -> None:
+    result = choose_winner(
+        box(0, 0, 10, 10),
+        (
+            OverlapCandidate("R11", "steppe", box(0, 0, 7, 10)),
+            OverlapCandidate("R12", "bog", box(0, 0, 7.5, 10)),
+        ),
+        source_version="test",
+    )
+
+    assert result == EunisResult(None, None, 75.0, "test")
+
+
 def test_dominant_at_exactly_eighty_percent_is_assigned() -> None:
     result = choose_winner(
         box(0, 0, 10, 10),
@@ -51,6 +67,25 @@ def test_dominant_at_exactly_eighty_percent_is_assigned() -> None:
     )
 
     assert result == EunisResult("R11", "steppe", 80.0, "test")
+
+
+@pytest.mark.parametrize("polygon_area", [0.0, -1.0])
+def test_precomputed_class_areas_reject_nonpositive_polygon_area(polygon_area: float) -> None:
+    assert result_from_class_areas([(80.0, "R11", "steppe")], polygon_area, "test").is_empty
+
+
+def test_precomputed_class_areas_use_full_polygon_denominator_and_require_unions() -> None:
+    assigned = result_from_class_areas([(80.0, "R11", "steppe")], 100.0, "test")
+
+    assert assigned == EunisResult("R11", "steppe", 80.0, "test")
+    with pytest.raises(ValueError, match="must be unioned before selection"):
+        result_from_class_areas([(50.0, "R11", "steppe"), (40.0, "R11", "steppe")], 100.0, "test")
+
+
+def test_precomputed_nonpositive_support_areas_do_not_create_a_class() -> None:
+    result = result_from_class_areas([(0.0, "R11", "steppe"), (-5.0, "R12", "bog")], 100.0, "test")
+
+    assert result.is_empty
 
 
 def test_same_class_unions_disjoint_supports_before_the_eighty_percent_gate() -> None:
@@ -64,6 +99,18 @@ def test_same_class_unions_disjoint_supports_before_the_eighty_percent_gate() ->
     )
 
     assert result == EunisResult("Q111", "fine habitat", 85.0, "test")
+
+
+def test_same_class_supports_reject_conflicting_labels() -> None:
+    with pytest.raises(ValueError, match="conflicting names"):
+        choose_winner(
+            box(0, 0, 10, 10),
+            (
+                OverlapCandidate("Q111", "fine habitat", box(0, 0, 4, 10)),
+                OverlapCandidate("Q111", "different label", box(6, 0, 10, 10)),
+            ),
+            source_version="test",
+        )
 
 
 def test_same_class_unions_overlapping_supports_without_double_counting() -> None:
@@ -101,6 +148,33 @@ def test_class_union_error_drops_each_support(monkeypatch) -> None:
     assert len(errors) == 2
 
 
+@pytest.mark.parametrize(
+    "error",
+    [GEOSException("GEOS failure"), RuntimeError("runtime failure")],
+    ids=["geos", "runtime"],
+)
+def test_class_union_handles_supported_geometry_errors(monkeypatch, error) -> None:
+    from osm_polygon_eunis import matching
+
+    def broken_union(_geometries):
+        raise error
+
+    monkeypatch.setattr(matching, "unary_union", broken_union)
+    errors: list[None] = []
+    result = choose_winner(
+        box(0, 0, 10, 10),
+        (
+            OverlapCandidate("Q111", "fine habitat", box(0, 0, 4, 10)),
+            OverlapCandidate("Q111", "fine habitat", box(6, 0, 10, 10)),
+        ),
+        source_version="test",
+        on_error=lambda: errors.append(None),
+    )
+
+    assert result.is_empty
+    assert errors == [None, None]
+
+
 def test_unusable_class_union_drops_each_support(monkeypatch) -> None:
     from osm_polygon_eunis import matching
 
@@ -131,6 +205,25 @@ def test_distinct_qualifying_hierarchy_codes_remain_ambiguous() -> None:
     )
 
     assert result == EunisResult(None, None, 90.0, "test")
+
+
+def test_deepest_qualifying_taxonomy_node_wins_over_its_ancestor() -> None:
+    taxonomy = EunisTaxonomy(
+        labels={"Q11": "parent", "Q111": "fine habitat"},
+        levels={"Q11": 2, "Q111": 3},
+        parents={"Q111": "Q11"},
+    )
+    result = choose_winner(
+        box(0, 0, 10, 10),
+        (
+            OverlapCandidate("Q11", "parent", box(0, 0, 10, 10)),
+            OverlapCandidate("Q111", "input label", box(0, 0, 8, 10)),
+        ),
+        source_version="test",
+        taxonomy=taxonomy,
+    )
+
+    assert result == EunisResult("Q111", "fine habitat", 80.0, "test")
 
 
 def test_sibling_supports_union_to_parent_and_count_overlaps_once() -> None:
@@ -241,11 +334,42 @@ def test_exact_intersection_area_of_empty_disjoint_parts_is_zero() -> None:
     assert _exact_intersection_area(box(0, 0, 1, 1), candidate) == 0.0
 
 
+@pytest.mark.parametrize("area", [-1.0, 0.0])
+def test_intersection_area_omits_nonpositive_results(monkeypatch, area: float) -> None:
+    from osm_polygon_eunis import matching
+
+    monkeypatch.setattr(matching, "_exact_intersection_area", lambda *_args: area)
+    candidate = OverlapCandidate("R11", "steppe", box(0, 0, 1, 1))
+
+    assert _intersection_area(box(0, 0, 1, 1), candidate, lambda: None) is None
+
+
+def test_intersection_error_reports_every_unioned_support(monkeypatch) -> None:
+    from osm_polygon_eunis import matching
+
+    def broken_intersection(*_args):
+        raise GEOSException("intersection failure")
+
+    monkeypatch.setattr(matching, "_exact_intersection_area", broken_intersection)
+    errors: list[None] = []
+    candidate = OverlapCandidate("Q111", "fine habitat", box(0, 0, 1, 1))
+
+    assert (
+        _intersection_area(box(0, 0, 1, 1), candidate, lambda: errors.append(None), error_count=3)
+        is None
+    )
+    assert errors == [None, None, None]
+
+
 @pytest.mark.parametrize("area", [0.0, 200.0])
 def test_percentage_is_clamped_at_both_bounds(area: float) -> None:
     expected = 0.0 if area == 0.0 else 100.0
 
     assert _percentage(area, 100.0) == expected
+
+
+def test_percentage_is_clamped_at_zero_for_negative_area() -> None:
+    assert _percentage(-1.0, 100.0) == 0.0
 
 
 def test_zero_area_geometry_is_not_usable() -> None:
@@ -608,3 +732,26 @@ def test_choose_winner_ranks_precomputed_areas_with_candidates() -> None:
         extra_areas=[(90.0, "A0", "z")],
     )
     assert tie == EunisResult(None, None, 90.0, "v")
+
+
+def test_choose_winner_rejects_duplicate_or_unrollable_precomputed_support() -> None:
+    polygon = box(0, 0, 10, 10)
+    candidate = OverlapCandidate("Q111", "fine habitat", box(0, 0, 8, 10))
+
+    with pytest.raises(ValueError, match="must be unioned before selection"):
+        choose_winner(
+            polygon,
+            [candidate],
+            source_version="test",
+            extra_areas=[(10.0, "Q111", "fine habitat")],
+        )
+
+    taxonomy = EunisTaxonomy({"Q111": "fine habitat"}, {"Q111": 3}, {})
+    with pytest.raises(ValueError, match="cannot be rolled up"):
+        choose_winner(
+            polygon,
+            [],
+            source_version="test",
+            extra_areas=[(80.0, "Q111", "fine habitat")],
+            taxonomy=taxonomy,
+        )

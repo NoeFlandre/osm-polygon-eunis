@@ -12,6 +12,7 @@ import pytest
 
 from osm_polygon_eunis import manifest_state, release_orchestration
 from osm_polygon_eunis._protocols import HubApi, StreamClient
+from osm_polygon_eunis.domain import EunisTaxonomy
 from osm_polygon_eunis.eea import EeaGroup, RemoteAsset
 from osm_polygon_eunis.geometry import GEOMETRY_POLICY
 from osm_polygon_eunis.options import BatchLimits, ReleaseOptions
@@ -56,6 +57,49 @@ def test_reference_manifest_ignores_groups_without_assets() -> None:
     )
 
     assert manifest["assets"] == []
+
+
+def test_reference_manifest_records_classification_workbook_provenance() -> None:
+    taxonomy = EunisTaxonomy(
+        {"R11": "steppe"},
+        {"R11": 1},
+        {},
+        source_record_id="classification-record",
+        source_path="eunis-2021.xlsx",
+        source_url="https://example.test/eunis-2021.xlsx",
+        source_size=123,
+        source_etag="etag-v1",
+        source_sha256="workbook-sha256",
+    )
+    group = EeaGroup("record", "title", "folder", "service", {}, (), None, taxonomy=taxonomy)
+
+    manifest = manifest_state.reference_manifest(
+        (group,), {}, source_version="EEA-test", crs="EPSG:3035", threshold=80, config={}
+    )
+
+    assert manifest["taxonomy"] == {
+        "record_id": "classification-record",
+        "path": "eunis-2021.xlsx",
+        "url": "https://example.test/eunis-2021.xlsx",
+        "size": 123,
+        "etag": "etag-v1",
+        "sha256": "workbook-sha256",
+        "fingerprint": taxonomy.fingerprint,
+    }
+
+
+def test_reference_manifest_rejects_mixed_classification_taxonomies() -> None:
+    first = EunisTaxonomy({"R11": "steppe"}, {"R11": 1}, {})
+    second = EunisTaxonomy({"R11": "dry grassland"}, {"R11": 1}, {})
+    groups = (
+        EeaGroup("first", "first", "folder", "service", {}, (), None, taxonomy=first),
+        EeaGroup("second", "second", "folder", "service", {}, (), None, taxonomy=second),
+    )
+
+    with pytest.raises(ValueError, match="one classification taxonomy"):
+        manifest_state.reference_manifest(
+            groups, {}, source_version="EEA-test", crs="EPSG:3035", threshold=80, config={}
+        )
 
 
 @pytest.mark.parametrize(

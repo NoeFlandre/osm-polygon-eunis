@@ -11,7 +11,8 @@ from typing import Any, cast
 from huggingface_hub.errors import RepositoryNotFoundError
 
 from ._protocols import HubApi, StreamClient
-from .eea import EeaGroup
+from .domain import EunisTaxonomy
+from .eea import EeaGroup, RemoteAsset
 from .publish import (
     MANIFEST_VERSION,
     DatasetVerificationOptions,
@@ -55,48 +56,95 @@ def reference_manifest(
     config: Mapping[str, object],
 ) -> dict[str, object]:
     """Describe the reference assets and their checksums for the release manifest."""
-    assets: list[dict[str, object]] = []
-    for group in groups:
-        group_assets = [*group.raster_assets]
-        if group.vector_asset is not None:
-            group_assets.append(group.vector_asset)
-        assets.extend(
-            {
-                "record_id": asset.record_id,
-                "path": asset.path,
-                "url": asset.url,
-                "size": asset.size,
-                "etag": asset.etag,
-                "code": asset.code,
-                "name": asset.name,
-                "sha256": checksums.get(asset_key(group, asset)),
-            }
-            for asset in group_assets
-        )
+    taxonomy = _common_reference_taxonomy(groups)
     reference: dict[str, object] = {
         "source_version": source_version,
         "crs": crs,
         "threshold": threshold,
         "classification_record": config.get("classification_record"),
-        "assets": sorted(assets, key=lambda asset: (str(asset["record_id"]), str(asset["path"]))),
+        "assets": _reference_assets_manifest(groups, checksums),
     }
-    taxonomy = next((group.taxonomy for group in groups if group.taxonomy is not None), None)
     if taxonomy is not None:
-        if any(
-            group.taxonomy is not None and group.taxonomy.fingerprint != taxonomy.fingerprint
-            for group in groups
-        ):
-            raise ValueError("all EEA groups must use one classification taxonomy")
-        reference["taxonomy"] = {
-            "record_id": taxonomy.source_record_id or config.get("classification_record"),
-            "path": taxonomy.source_path,
-            "url": taxonomy.source_url,
-            "size": taxonomy.source_size,
-            "etag": taxonomy.source_etag,
-            "sha256": taxonomy.source_sha256,
-            "fingerprint": taxonomy.fingerprint,
-        }
+        reference["taxonomy"] = _taxonomy_manifest(taxonomy, config)
     return reference
+
+
+def _reference_assets_manifest(
+    groups: tuple[EeaGroup, ...],
+    checksums: Mapping[str, str],
+) -> list[dict[str, object]]:
+    assets: list[dict[str, object]] = []
+    for group in groups:
+        assets.extend(_reference_group_assets_manifest(group, checksums))
+    return sorted(assets, key=lambda asset: (str(asset["record_id"]), str(asset["path"])))
+
+
+def _reference_group_assets_manifest(
+    group: EeaGroup,
+    checksums: Mapping[str, str],
+) -> list[dict[str, object]]:
+    group_assets = [*group.raster_assets]
+    if group.vector_asset is not None:
+        group_assets.append(group.vector_asset)
+    return [_reference_asset_manifest(group, asset, checksums) for asset in group_assets]
+
+
+def _reference_asset_manifest(
+    group: EeaGroup,
+    asset: RemoteAsset,
+    checksums: Mapping[str, str],
+) -> dict[str, object]:
+    return {
+        "record_id": asset.record_id,
+        "path": asset.path,
+        "url": asset.url,
+        "size": asset.size,
+        "etag": asset.etag,
+        "code": asset.code,
+        "name": asset.name,
+        "sha256": checksums.get(asset_key(group, asset)),
+    }
+
+
+def _common_reference_taxonomy(groups: tuple[EeaGroup, ...]) -> EunisTaxonomy | None:
+    taxonomy = _first_reference_taxonomy(groups)
+    if taxonomy is None:
+        return None
+    _require_matching_reference_taxonomies(groups, taxonomy)
+    return taxonomy
+
+
+def _first_reference_taxonomy(groups: tuple[EeaGroup, ...]) -> EunisTaxonomy | None:
+    for group in groups:
+        if group.taxonomy is not None:
+            return group.taxonomy
+    return None
+
+
+def _require_matching_reference_taxonomies(
+    groups: tuple[EeaGroup, ...],
+    taxonomy: EunisTaxonomy,
+) -> None:
+    if any(
+        group.taxonomy is not None and group.taxonomy.fingerprint != taxonomy.fingerprint
+        for group in groups
+    ):
+        raise ValueError("all EEA groups must use one classification taxonomy")
+
+
+def _taxonomy_manifest(
+    taxonomy: EunisTaxonomy,
+    config: Mapping[str, object],
+) -> dict[str, object]:
+    return {
+        "record_id": taxonomy.source_record_id or config.get("classification_record"),
+        "path": taxonomy.source_path,
+        "url": taxonomy.source_url,
+        "size": taxonomy.source_size,
+        "etag": taxonomy.source_etag,
+        "sha256": taxonomy.source_sha256,
+        "fingerprint": taxonomy.fingerprint,
+    }
 
 
 def _reference_identity(reference: Mapping[str, object]) -> Mapping[str, object]:

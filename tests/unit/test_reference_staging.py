@@ -199,18 +199,36 @@ def test_worker_reference_batch_opens_local_groups_once_and_closes_on_exit(
 
     first = reference_staging.worker_reference_batch(groups, tmp_path, 3, start_index=2)
     second = reference_staging.worker_reference_batch(groups, tmp_path, 3, start_index=2)
+    updated_taxonomy = EunisTaxonomy({"R11": "updated steppe"}, {"R11": 1}, {})
+    updated_raster_group = EeaGroup(
+        "raster-record",
+        "raster",
+        "folder",
+        "service",
+        {"R11": "updated steppe"},
+        (_asset("/Prob_R11.tif"),),
+        None,
+        taxonomy=updated_taxonomy,
+    )
+    updated = reference_staging.worker_reference_batch(
+        (updated_raster_group, vector_group), tmp_path, 3, start_index=2
+    )
     third = reference_staging.worker_reference_batch((raster_group,), tmp_path, 3, start_index=4)
 
     assert first is second
     assert first == tuple(opened[:2])
+    assert updated == tuple(opened[2:4])
+    assert updated is not first
     layers = opened[0].args[0]
     assert [(layer.code, layer.name, layer.path) for layer in layers] == [
         ("R11", "steppe", tmp_path / "02-raster-r" / "R11.tif")
     ]
     assert opened[0].kwargs == {"threshold": 3, "taxonomy": taxonomy}
     assert opened[1].args[0] == tmp_path / "03-vector-r" / "habitats.gpkg"
+    assert opened[2].kwargs == {"threshold": 3, "taxonomy": updated_taxonomy}
     assert len(reference_staging._WORKER_REFERENCES) == 1
     assert all(cast(_TrackedReference, reference).closed for reference in first)
+    assert all(cast(_TrackedReference, reference).closed for reference in updated)
     assert not cast(_TrackedReference, third[0]).closed
     reference_staging.close_worker_reference_cache()
     assert all(reference.closed for reference in opened)

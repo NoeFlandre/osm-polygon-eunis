@@ -222,17 +222,38 @@ def worker_reference_batch(
 ) -> tuple[OverlapReference, ...]:
     """Reuse one opened reference batch for the lifetime of a worker process."""
 
-    key = (
+    key = _worker_reference_key(groups, root, threshold, start_index)
+    cached = _WORKER_REFERENCES.get(key)
+    if cached is not None:
+        return cached
+    close_worker_reference_cache()
+    stack, references = _open_worker_reference_batch(groups, root, threshold, start_index)
+    _WORKER_REFERENCE_STACKS[key] = stack
+    _WORKER_REFERENCES[key] = references
+    return references
+
+
+def _worker_reference_key(
+    groups: tuple[EeaGroup, ...],
+    root: Path,
+    threshold: int,
+    start_index: int,
+) -> _WorkerReferenceKey:
+    return (
         str(root),
         start_index,
         threshold,
         tuple(group.record_id for group in groups),
         tuple(group.taxonomy.fingerprint if group.taxonomy is not None else "" for group in groups),
     )
-    cached = _WORKER_REFERENCES.get(key)
-    if cached is not None:
-        return cached
-    close_worker_reference_cache()
+
+
+def _open_worker_reference_batch(
+    groups: tuple[EeaGroup, ...],
+    root: Path,
+    threshold: int,
+    start_index: int,
+) -> tuple[ExitStack, tuple[OverlapReference, ...]]:
     stack = ExitStack()
     try:
         references = tuple(
@@ -248,9 +269,7 @@ def worker_reference_batch(
     except BaseException:
         stack.close()
         raise
-    _WORKER_REFERENCE_STACKS[key] = stack
-    _WORKER_REFERENCES[key] = references
-    return references
+    return stack, references
 
 
 def close_worker_reference_cache() -> None:

@@ -70,24 +70,53 @@ def result_from_class_areas(
     original polygon area. If multiple distinct class codes qualify, the label
     stays null and the maximum class-union percentage remains in the result.
     """
-
     if polygon_area <= 0.0:
         return _empty_result()
     class_coverage = _class_coverages(overlaps, polygon_area)
     if not class_coverage:
         return _empty_result()
+    return _result_from_class_coverages(class_coverage, source_version, taxonomy)
 
+
+def _result_from_class_coverages(
+    class_coverage: dict[str, tuple[float, str]],
+    source_version: str | None,
+    taxonomy: EunisTaxonomy | None,
+) -> EunisResult:
     best_code = min(class_coverage, key=lambda code: (-class_coverage[code][0], code))
     qualifying = _qualifying_codes(class_coverage)
     if taxonomy is not None:
         qualifying = _deepest_qualifying_codes(qualifying, taxonomy)
+    return _result_for_qualifying_codes(
+        class_coverage,
+        best_code,
+        qualifying,
+        source_version,
+        taxonomy,
+    )
+
+
+def _result_for_qualifying_codes(
+    class_coverage: dict[str, tuple[float, str]],
+    best_code: str,
+    qualifying: list[str],
+    source_version: str | None,
+    taxonomy: EunisTaxonomy | None,
+) -> EunisResult:
     if not qualifying:
         return EunisResult(None, None, class_coverage[best_code][0], source_version)
-    if len(qualifying) != 1:
+    if len(qualifying) > 1:
         maximum = max(class_coverage[code][0] for code in qualifying)
         return EunisResult(None, None, maximum, source_version)
+    return _assigned_class_result(class_coverage, qualifying[0], source_version, taxonomy)
 
-    code = qualifying[0]
+
+def _assigned_class_result(
+    class_coverage: dict[str, tuple[float, str]],
+    code: str,
+    source_version: str | None,
+    taxonomy: EunisTaxonomy | None,
+) -> EunisResult:
     coverage, name = class_coverage[code]
     if taxonomy is not None:
         name = taxonomy.labels.get(code, name)
@@ -146,23 +175,50 @@ def _positive_overlaps(
     taxonomy: EunisTaxonomy | None = None,
 ) -> list[tuple[float, str, str]]:
     by_code = _group_candidates(candidates, on_error)
+    by_node = _union_supports_by_node(by_code, on_error, taxonomy)
+    return _overlap_areas_by_node(polygon, by_node, on_error)
+
+
+def _union_supports_by_node(
+    by_code: dict[str, list[OverlapCandidate]],
+    on_error: Callable[[], None],
+    taxonomy: EunisTaxonomy | None,
+) -> dict[str, list[OverlapCandidate]]:
     by_node: dict[str, list[OverlapCandidate]] = {}
     for code, supports in by_code.items():
         candidate = _class_union_candidate(code, supports, on_error)
-        if candidate is None:
-            continue
-        nodes = taxonomy.ancestors_including_self(code) if taxonomy is not None else (code,)
-        for node in nodes:
-            name = taxonomy.labels[node] if taxonomy is not None else candidate.name
-            by_node.setdefault(node, []).append(
-                OverlapCandidate(
-                    node,
-                    name,
-                    candidate.geometry,
-                    error_count=candidate.error_count,
-                )
-            )
+        if candidate is not None:
+            _append_support_to_taxonomy_nodes(by_node, candidate, taxonomy)
+    return by_node
 
+
+def _append_support_to_taxonomy_nodes(
+    by_node: dict[str, list[OverlapCandidate]],
+    candidate: OverlapCandidate,
+    taxonomy: EunisTaxonomy | None,
+) -> None:
+    nodes = (
+        taxonomy.ancestors_including_self(candidate.code)
+        if taxonomy is not None
+        else (candidate.code,)
+    )
+    for node in nodes:
+        name = taxonomy.labels[node] if taxonomy is not None else candidate.name
+        by_node.setdefault(node, []).append(
+            OverlapCandidate(
+                node,
+                name,
+                candidate.geometry,
+                error_count=candidate.error_count,
+            )
+        )
+
+
+def _overlap_areas_by_node(
+    polygon: BaseGeometry,
+    by_node: dict[str, list[OverlapCandidate]],
+    on_error: Callable[[], None],
+) -> list[tuple[float, str, str]]:
     overlaps: list[tuple[float, str, str]] = []
     for node, supports in by_node.items():
         candidate = _class_union_candidate(node, supports, on_error)
@@ -227,14 +283,23 @@ def _union_class_geometry(
     try:
         geometry = unary_union([support.geometry for support in supports])
     except (GEOSException, ValueError, RuntimeError) as error:
-        logger.warning("skipping EUNIS class %s after support union error: %s", code, error)
-        _report_errors(on_error, sum(support.error_count for support in supports))
-        return None
+        return _failed_class_union(code, supports, on_error, error)
     if not is_usable(geometry):
-        logger.warning("skipping unusable EUNIS support union for %s", code)
-        _report_errors(on_error, sum(support.error_count for support in supports))
-        return None
+        return _failed_class_union(code, supports, on_error)
     return geometry
+
+
+def _failed_class_union(
+    code: str,
+    supports: list[OverlapCandidate],
+    on_error: Callable[[], None],
+    error: Exception | None = None,
+) -> None:
+    if error is None:
+        logger.warning("skipping unusable EUNIS support union for %s", code)
+    else:
+        logger.warning("skipping EUNIS class %s after support union error: %s", code, error)
+    _report_errors(on_error, sum(support.error_count for support in supports))
 
 
 def _intersection_area(
