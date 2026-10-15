@@ -1,4 +1,5 @@
 import logging
+import math
 import subprocess
 import sys
 
@@ -98,6 +99,18 @@ def test_precomputed_nonpositive_support_does_not_hide_a_later_class() -> None:
 
 def test_precomputed_coverage_within_boundary_tolerance_is_normalized() -> None:
     result = result_from_class_areas([(79.9999999995, "R11", "steppe")], 100.0, "test")
+
+    assert result == EunisResult("R11", "steppe", 80.0, "test")
+
+
+def test_boundary_tolerance_includes_its_exact_float_limit(monkeypatch) -> None:
+    from osm_polygon_eunis import matching
+
+    percentage = math.nextafter(80.0, math.inf)
+    tolerance = percentage - 80.0
+    monkeypatch.setattr(matching, "_BOUNDARY_TOLERANCE_PERCENTAGE", tolerance)
+
+    result = result_from_class_areas([(percentage, "R11", "steppe")], 100.0, "test")
 
     assert result == EunisResult("R11", "steppe", 80.0, "test")
 
@@ -453,6 +466,20 @@ def test_intersection_area_reports_unusable_candidate(caplog) -> None:
     assert area is None
     assert errors == [None, None]
     assert caplog.messages == ["skipping unusable EUNIS candidate R11"]
+
+
+def test_intersection_error_reports_one_source_by_default(monkeypatch) -> None:
+    from osm_polygon_eunis import matching
+
+    def broken_intersection(*_args):
+        raise GEOSException("intersection failure")
+
+    monkeypatch.setattr(matching, "_exact_intersection_area", broken_intersection)
+    errors: list[None] = []
+    candidate = OverlapCandidate("R11", "steppe", box(0, 0, 1, 1))
+
+    assert _intersection_area(box(0, 0, 1, 1), candidate, lambda: errors.append(None)) is None
+    assert errors == [None]
 
 
 def test_intersection_error_reports_every_unioned_support(monkeypatch) -> None:
