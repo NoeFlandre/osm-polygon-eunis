@@ -28,7 +28,7 @@ from .grid_overlap import (
     tile_window,
     weighted_cells,
 )
-from .matching import choose_winner
+from .matching import choose_winner, result_from_class_areas
 from .raster_geometry import (
     is_epsg_3035,
     wgs84_envelope,
@@ -181,7 +181,7 @@ class RasterReference:
         self.intersection_errors += 1
 
     def overlap(self, polygon: BaseGeometry | None) -> EunisResult:
-        """Return the label with the largest actual intersection area."""
+        """Return the dominant label, withholding code and name below the assignment threshold."""
 
         if not is_usable(polygon):
             return choose_winner(polygon, (), source_version=self._source_version)
@@ -252,13 +252,11 @@ class RasterReference:
         for band in band_row_ranges(rows[0], rows[1], cols[0], cols[1]):
             cells = weighted_cells(polygon, first.transform, band, cols)
             self._accumulate_cells(areas, cells, datasets)
-        ordered = areas[list(order)]
-        best = int(np.argmax(ordered))
-        if not ordered[best] > 0.0:
-            return EunisResult(None, None, None, None)
-        layer = datasets[order[best]][0]
-        percentage = max(0.0, min(100.0, 100.0 * float(ordered[best]) / polygon_area))
-        return EunisResult(layer.code, layer.name, percentage, self._source_version)
+        class_areas = (
+            (float(areas[index]), datasets[index][0].code, datasets[index][0].name)
+            for index in order
+        )
+        return result_from_class_areas(class_areas, polygon_area, self._source_version)
 
     def _accumulate_cells(
         self,

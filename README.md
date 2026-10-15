@@ -2,9 +2,13 @@
 
 ## Purpose and release status
 
-This project adds EUNIS habitat labels to three public Hugging Face datasets. It
-selects the label with the largest actual spatial intersection between each OSM
-polygon and the official EEA EUNIS habitat probability-map reference.
+This project adds EUNIS habitat labels to three public Hugging Face datasets.
+For each exact EUNIS code, the matcher unions its reference geometries before
+measuring the intersection with an OSM polygon. It assigns a code and name only
+when exactly one code's union covers at least 80% of the full OSM polygon area;
+the 80% boundary is inclusive. Different hierarchy codes remain distinct, and
+multiple qualifying codes leave the code and name null. The reported percentage
+is the greatest per-code union coverage over the full OSM area.
 
 The three output repositories are the intended release targets. Treat a dataset
 as published only after you verify these items independently:
@@ -34,11 +38,15 @@ The tables that contain polygons receive four nullable columns:
 - `eunis_overlap_percentage`
 - `eunis_source_version`
 
-The percentage is `100 * area(polygon ∩ EUNIS reference geometry) /
-area(polygon)`. The pipeline first transforms both geometries to EPSG:3035.
-Bounding boxes can remove candidates. They never decide a label. Empty, invalid,
-or out-of-reference polygons receive null EUNIS fields. For equal-area ties, the
-pipeline uses the ascending EUNIS code.
+The percentage is `100 * area(OSM polygon ∩ union(reference geometries for one
+exact EUNIS code)) / area(OSM polygon)`. The pipeline first transforms both
+geometries to EPSG:3035. Bounding boxes can remove candidates; they never decide
+a label. An exact code is assigned only if its union coverage is at least 80%
+and no other exact code also reaches 80%. Equal or overlapping qualifying
+classes are ambiguous, and the reported percentage remains the greatest
+per-code union coverage. Below the inclusive gate, the code and name are null
+while the measured percentage remains available. Polygons without a valid
+positive-area overlap have null overlap fields.
 
 The pipeline reads bounded Parquet micro-batches. It uses bounded Arrow batches.
 It streams temporary files. It deletes the source shards after their final
@@ -52,9 +60,12 @@ The EEA resolver pins these items in the `eunis/manifest.json` of each target:
 - the official 2021 classification workbook
 - the SHA-256 checksums of the downloads
 
-The pipeline reads the EEA GeoPackages as tiled rasters of the highest
-resolution. It decodes only the tiles that intersect the polygon bbox. The final
-label still uses the actual intersection area of the cell and the polygon.
+Vector GeoPackages remain eligible reference sources. Raster-tile GeoPackages
+are rejected as ground truth until their native raster values and validity
+masks are verified. The bounded Q11 source evidence and recovery record is
+tracked separately in [PR #157](https://github.com/NoeFlandre/osm-polygon-eunis/pull/157).
+Use a validated native lossless raster and its native validity mask before
+publishing labels from raster support.
 
 Each output dataset card also contains two items:
 

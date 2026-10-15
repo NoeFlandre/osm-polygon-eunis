@@ -18,7 +18,12 @@ from shapely.wkb import loads as load_wkb
 from .domain import EPSG_LAEA_EUROPE, EunisResult, OverlapCandidate, SchemaError
 from .geometry import is_usable, repair_polygonal
 from .geopackage_sql import sql_identifier
-from .geopackage_tiles import GeoPackageTileMethods, TileLayer
+from .geopackage_tiles import (
+    GeoPackageTileMethods,
+    RasterTileSourceError,
+    TileLayer,
+    has_raster_tiles,
+)
 from .grid_overlap import WeightedCells
 from .matching import choose_winner
 
@@ -123,12 +128,29 @@ class GeoPackageReference(GeoPackageTileMethods):
         """Open the GeoPackage and validate its geometry or tile layers."""
         if self._connection is not None:
             raise RuntimeError("GeoPackage reference is already open")
-        self._connection = sqlite3.connect(f"file:{self._path}?mode=ro", uri=True)
-        self._layers = self._discover_layers(self._connection)
-        self._tile_layers = self._discover_tile_layers(self._connection)
+        connection = sqlite3.connect(f"file:{self._path}?mode=ro", uri=True)
+        self._connection = connection
+        try:
+            self._layers = self._discover_layers(connection)
+            self._reject_raster_tile_source(connection)
+            self._tile_layers = self._discover_tile_layers(connection)
+            self._require_reference_layers()
+        except BaseException:
+            self.close()
+            raise
+        return self
+
+    def _reject_raster_tile_source(self, connection: sqlite3.Connection) -> None:
+        if has_raster_tiles(connection):
+            raise RasterTileSourceError(
+                f"{self._path} contains raster tiles. They are not accepted as "
+                "ground truth; a validated native lossless raster and native "
+                "validity mask are required."
+            )
+
+    def _require_reference_layers(self) -> None:
         if not self._layers and not self._tile_layers:
             raise ValueError("GeoPackage has no EPSG:3035 geometry or tile layers")
-        return self
 
     def __exit__(self, *_args: object) -> None:
         """Close the SQLite connection and release cached geometries."""

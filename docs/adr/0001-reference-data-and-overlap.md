@@ -2,21 +2,26 @@
 
 ## Decision
 
-Use the official EEA 2021 EUNIS habitat probability-map release. Its declared
-coordinate system is EPSG:3035. The positive raster cells become reference
-cells. The matcher calculates the actual geometry intersections. It chooses the
-largest area. A polygon outside the European reference coverage receives null
-fields.
+Use the official EEA 2021 EUNIS habitat reference. Its declared coordinate
+system is EPSG:3035. For each exact EUNIS code, union its reference geometries
+before calculating the exact intersection with the OSM polygon. Divide each
+per-code intersection by the full OSM polygon area. Assign a code and name only
+when exactly one code reaches the inclusive 80% threshold. Keep hierarchy codes
+distinct; if more than one qualifies, withhold the code and name and retain the
+largest per-code union coverage. Below 80%, withhold the code and name but keep
+the measured percentage. A polygon with no valid positive-area intersection
+receives null overlap fields.
 
-The EEA raster families that are published as GeoPackages are tile pyramids.
-They are not feature layers. The adapter reads only the highest-resolution tiles
-that intersect the polygon bbox. It decodes the positive pixels into EPSG:3035
-cell geometry. Then it uses the same exact intersection matcher.
+Vector GeoPackages are queried as indexed feature layers. Raster-tile
+GeoPackages are refused as ground truth until their source values and validity
+masks are verified. Keep the bounded Q11 source evidence and recovery record in
+the separately scoped [PR #157](https://github.com/NoeFlandre/osm-polygon-eunis/pull/157).
+Raster labels require a validated native lossless raster and its native
+validity mask. Do not infer labels from an unchecked derived tile package.
 
-The raster-cell collections carry their disjoint-component invariant. This lets
-the matcher sum the exact cell intersections that Shapely calculates in a
-vectorized way. Arbitrary geometry collections still use the general overlay
-path. A bounded decoded-tile cache is a performance optimization only.
+Native raster-cell collections carry their disjoint-component invariant. The
+matcher sums exact cell intersections that Shapely calculates in a vectorized
+way. Arbitrary geometry collections still use the general overlay path.
 
 The names come from the EEA 2021 classification workbook in the catalog record
 `bfe4c237-e378-4a83-ab21-b3807f96c2e2`. The saltmarsh service has one null name

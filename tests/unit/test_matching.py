@@ -33,6 +33,119 @@ def test_largest_actual_intersection_and_percentage() -> None:
     assert result.source_version == "test"
 
 
+def test_dominant_below_eighty_percent_is_withheld() -> None:
+    result = choose_winner(
+        box(0, 0, 10, 10),
+        [OverlapCandidate("R11", "steppe", box(0, 0, 7, 10))],
+        source_version="test",
+    )
+
+    assert result == EunisResult(None, None, 70.0, "test")
+
+
+def test_dominant_at_exactly_eighty_percent_is_assigned() -> None:
+    result = choose_winner(
+        box(0, 0, 10, 10),
+        [OverlapCandidate("R11", "steppe", box(0, 0, 8, 10))],
+        source_version="test",
+    )
+
+    assert result == EunisResult("R11", "steppe", 80.0, "test")
+
+
+def test_same_class_unions_disjoint_supports_before_the_eighty_percent_gate() -> None:
+    result = choose_winner(
+        box(0, 0, 10, 10),
+        (
+            OverlapCandidate("Q111", "fine habitat", box(0, 0, 4.5, 10)),
+            OverlapCandidate("Q111", "fine habitat", box(5.5, 0, 9.5, 10)),
+        ),
+        source_version="test",
+    )
+
+    assert result == EunisResult("Q111", "fine habitat", 85.0, "test")
+
+
+def test_same_class_unions_overlapping_supports_without_double_counting() -> None:
+    result = choose_winner(
+        box(0, 0, 10, 10),
+        (
+            OverlapCandidate("Q111", "fine habitat", box(0, 0, 9, 5)),
+            OverlapCandidate("Q111", "fine habitat", box(2, 4, 10, 9)),
+        ),
+        source_version="test",
+    )
+
+    assert result == EunisResult(None, None, 78.0, "test")
+
+
+def test_class_union_error_drops_each_support(monkeypatch) -> None:
+    from osm_polygon_eunis import matching
+
+    def broken_union(_geometries):
+        raise ValueError("invalid support union")
+
+    monkeypatch.setattr(matching, "unary_union", broken_union)
+    errors: list[None] = []
+    result = choose_winner(
+        box(0, 0, 10, 10),
+        (
+            OverlapCandidate("Q111", "fine habitat", box(0, 0, 4, 10)),
+            OverlapCandidate("Q111", "fine habitat", box(6, 0, 10, 10)),
+        ),
+        source_version="test",
+        on_error=lambda: errors.append(None),
+    )
+
+    assert result.is_empty
+    assert len(errors) == 2
+
+
+def test_unusable_class_union_drops_each_support(monkeypatch) -> None:
+    from osm_polygon_eunis import matching
+
+    monkeypatch.setattr(matching, "unary_union", lambda _geometries: GeometryCollection())
+    errors: list[None] = []
+    result = choose_winner(
+        box(0, 0, 10, 10),
+        (
+            OverlapCandidate("Q111", "fine habitat", box(0, 0, 4, 10)),
+            OverlapCandidate("Q111", "fine habitat", box(6, 0, 10, 10)),
+        ),
+        source_version="test",
+        on_error=lambda: errors.append(None),
+    )
+
+    assert result.is_empty
+    assert len(errors) == 2
+
+
+def test_distinct_qualifying_hierarchy_codes_remain_ambiguous() -> None:
+    result = choose_winner(
+        box(0, 0, 10, 10),
+        (
+            OverlapCandidate("Q11", "parent class", box(0, 0, 9, 10)),
+            OverlapCandidate("Q111", "fine class", box(0, 0, 8, 10)),
+        ),
+        source_version="test",
+    )
+
+    assert result == EunisResult(None, None, 90.0, "test")
+
+
+def test_dominant_just_below_eighty_percent_is_withheld() -> None:
+    result = choose_winner(
+        box(0, 0, 10, 10),
+        [OverlapCandidate("R11", "steppe", box(0, 0, 7.99, 10))],
+        source_version="test",
+    )
+
+    assert result.code is None
+    assert result.name is None
+    assert result.overlap_percentage == pytest.approx(79.9)
+    assert result.source_version == "test"
+
+
 def test_disjoint_cell_collection_sums_exact_intersections() -> None:
     polygon = box(0.5, 0.5, 2.5, 1.5)
     cells = (box(0, 0, 1, 2), box(2, 0, 3, 2))
@@ -50,8 +163,7 @@ def test_disjoint_cell_collection_sums_exact_intersections() -> None:
         source_version="test",
     )
 
-    assert result.code == "R11"
-    assert result.overlap_percentage == 50.0
+    assert result == EunisResult(None, None, 50.0, "test")
 
 
 def test_empty_disjoint_cell_collection_has_no_overlap() -> None:
@@ -124,14 +236,16 @@ def test_bbox_touch_without_geometry_intersection_is_null() -> None:
     assert result.is_empty
 
 
-def test_equal_area_tie_uses_ascending_code() -> None:
+def test_equal_area_qualifying_classes_are_ambiguous() -> None:
     polygon = box(0, 0, 10, 10)
     candidates = (
-        OverlapCandidate("R12", "second", box(5, 0, 10, 10)),
-        OverlapCandidate("R11", "first", box(0, 0, 5, 10)),
+        OverlapCandidate("R12", "second", box(0, 0, 9, 10)),
+        OverlapCandidate("R11", "first", box(1, 0, 10, 10)),
     )
 
-    assert choose_winner(polygon, candidates, source_version="test").code == "R11"
+    assert choose_winner(polygon, candidates, source_version="test") == EunisResult(
+        None, None, 90.0, "test"
+    )
 
 
 @pytest.mark.parametrize(
@@ -189,7 +303,7 @@ def test_invalid_candidate_and_sub_unit_overlap_are_ignored() -> None:
         source_version="test",
     )
 
-    assert result.code == "R12"
+    assert result == EunisResult(None, None, 25.0, "test")
 
 
 def test_unusable_candidate_is_reported_through_error_hook(caplog) -> None:
@@ -208,19 +322,51 @@ def test_unusable_candidate_is_reported_through_error_hook(caplog) -> None:
     assert "skipping unusable EUNIS candidate R11" in caplog.messages
 
 
-def test_prefer_result_merges_reference_groups_by_percentage_then_code() -> None:
+def test_prefer_result_keeps_multiple_qualifying_reference_classes_ambiguous() -> None:
     first = choose_winner(
         box(0, 0, 10, 10),
-        (OverlapCandidate("R12", "second", box(0, 0, 5, 10)),),
+        (OverlapCandidate("R12", "second", box(0, 0, 9, 10)),),
         source_version="test",
     )
     second = choose_winner(
         box(0, 0, 10, 10),
-        (OverlapCandidate("R11", "first", box(0, 0, 5, 10)),),
+        (OverlapCandidate("R11", "first", box(0, 0, 9, 10)),),
         source_version="test",
     )
 
-    assert prefer_result(first, second).code == "R11"
+    assert prefer_result(first, second) == EunisResult(None, None, 90.0, "test")
+
+
+def test_prefer_result_ranks_withheld_measurements_by_percentage() -> None:
+    sixty = choose_winner(
+        box(0, 0, 10, 10),
+        (OverlapCandidate("R12", "grassland", box(0, 0, 6, 10)),),
+        source_version="test",
+    )
+    seventy = choose_winner(
+        box(0, 0, 10, 10),
+        (OverlapCandidate("R11", "steppe", box(0, 0, 7, 10)),),
+        source_version="test",
+    )
+
+    assert prefer_result(sixty, seventy) == EunisResult(None, None, 70.0, "test")
+    assert prefer_result(seventy, sixty) == EunisResult(None, None, 70.0, "test")
+
+
+def test_prefer_result_assigned_eighty_beats_withheld_seventy_five() -> None:
+    withheld = choose_winner(
+        box(0, 0, 10, 10),
+        (OverlapCandidate("R12", "grassland", box(0, 0, 7.5, 10)),),
+        source_version="test",
+    )
+    assigned = choose_winner(
+        box(0, 0, 10, 10),
+        (OverlapCandidate("R11", "steppe", box(0, 0, 8, 10)),),
+        source_version="test",
+    )
+
+    assert prefer_result(withheld, assigned) == EunisResult("R11", "steppe", 80.0, "test")
+    assert prefer_result(assigned, withheld) == EunisResult("R11", "steppe", 80.0, "test")
 
 
 def test_prefer_result_handles_unequal_percentages_and_version_mismatch() -> None:
@@ -244,15 +390,15 @@ def test_prefer_result_rejects_missing_overlap(percentages) -> None:
     with pytest.raises(ValueError) as error:
         prefer_result(current, candidate)
 
-    assert str(error.value) == "EUNIS rank requires a code and overlap percentage"
+    assert str(error.value) == "EUNIS rank requires an overlap percentage"
 
 
-@pytest.mark.parametrize("percentage", [None, 25.0])
-def test_rank_rejects_missing_code(percentage) -> None:
+@pytest.mark.parametrize("percentage", [None])
+def test_rank_rejects_missing_overlap(percentage) -> None:
     with pytest.raises(ValueError) as error:
         _rank(EunisResult(None, None, percentage, "test"))
 
-    assert str(error.value) == "EUNIS rank requires a code and overlap percentage"
+    assert str(error.value) == "EUNIS rank requires an overlap percentage"
 
 
 def test_prefer_result_rejects_missing_overlap_with_optimized_python() -> None:
@@ -269,7 +415,7 @@ for current_percentage, candidate_percentage in [(None, 25.0), (25.0, None), (No
     try:
         prefer_result(current, candidate)
     except ValueError as error:
-        if str(error) != "EUNIS rank requires a code and overlap percentage":
+        if str(error) != "EUNIS rank requires an overlap percentage":
             raise
     else:
         raise RuntimeError("accepted a result without an overlap percentage")
@@ -365,9 +511,10 @@ def test_intersection_error_is_reported_and_leaves_result_unchanged(monkeypatch,
     counted_log_count = sum("skipping" in record.getMessage().lower() for record in caplog.records)
     silent = choose_winner(polygon, [bad, good, bad], source_version="test")
 
+    # The failed class overlay drops both same-code source candidates.
     assert len(errors) == 2
-    assert counted == silent == EunisResult("A1", "good", 40.0, "test")
-    assert counted_log_count == 2
+    assert counted == silent == EunisResult(None, None, 40.0, "test")
+    assert counted_log_count == 1
     assert all("B1" in record.getMessage() for record in caplog.records)
     assert all("GEOS TopologyException" in record.getMessage() for record in caplog.records)
     assert all(
@@ -383,7 +530,7 @@ def test_value_error_intersection_is_counted_and_no_error_is_not(monkeypatch) ->
     errors: list[None] = []
     assert choose_winner(
         polygon, [candidate], source_version="t", on_error=lambda: errors.append(None)
-    ) == EunisResult("A1", "a", 50.0, "t")
+    ) == EunisResult(None, None, 50.0, "t")
     assert errors == []
 
     def broken(*_args):
@@ -411,8 +558,8 @@ def test_choose_winner_ranks_precomputed_areas_with_candidates() -> None:
     assert (result.code, result.name, result.overlap_percentage) == ("A1", "a", 80.0)
     tie = choose_winner(
         polygon,
-        [candidate],
+        [OverlapCandidate("B1", "b", box(0, 0, 9, 10))],
         source_version="v",
-        extra_areas=[(50.0, "A0", "z")],
+        extra_areas=[(90.0, "A0", "z")],
     )
-    assert tie.code == "A0"
+    assert tie == EunisResult(None, None, 90.0, "v")

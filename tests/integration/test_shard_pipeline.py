@@ -21,7 +21,9 @@ from osm_polygon_eunis.sources import DatasetSpec
 from osm_polygon_eunis.transform import enrich_parquet_shard
 
 
-def test_real_geometry_to_synthetic_raster_shard(tmp_path: Path, single_pixel_raster) -> None:
+def test_real_geometry_with_sparse_synthetic_raster_withholds_label(
+    tmp_path: Path, single_pixel_raster
+) -> None:
     source = tmp_path / "source.parquet"
     destination = tmp_path / "output.parquet"
     polygon = box(2.0, 48.0, 2.05, 48.05)
@@ -46,7 +48,8 @@ def test_real_geometry_to_synthetic_raster_shard(tmp_path: Path, single_pixel_ra
 
     output = pq.read_table(destination)
     assert output["polygon_id"].to_pylist() == ["france-test"]
-    assert output["eunis_code"].to_pylist() == ["R11"]
+    assert output["eunis_code"].to_pylist() == [None]
+    assert output["eunis_name"].to_pylist() == [None]
     assert output["eunis_overlap_percentage"].to_pylist() == [pytest.approx(4.822971, abs=1e-4)]
 
 
@@ -165,7 +168,11 @@ def _assert_checkpoint_state(
     signature: str,
 ) -> None:
     labels = pq.read_table(sidecar_root / "website" / f"polygons__{name}.parquet.labels.parquet")
-    assert labels["eunis_code"].to_pylist() == ["R11", "R12"]
+    assert labels["eunis_code"].to_pylist() == [None, None]
+    assert all(
+        percentage is not None and 0.0 < percentage < 80.0
+        for percentage in labels["eunis_overlap_percentage"].to_pylist()
+    )
     marker = sidecar_root / "website" / f"polygons__{name}.parquet.labels.parquet.done"
     assert marker.read_bytes() == f'{{"signature": "{signature}", "batches": [0, 1]}}'.encode()
 

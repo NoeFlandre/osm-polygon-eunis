@@ -47,5 +47,5 @@ class EunisResult:
 
     @property
     def is_empty(self) -> bool:
-        """Return whether this result has no EUNIS code."""
-        return self.code is None
+        """Return whether this result has neither a code nor an overlap measurement."""
+        return self.code is None and self.overlap_percentage is None

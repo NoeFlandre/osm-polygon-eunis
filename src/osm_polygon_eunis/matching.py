@@ -1,4 +1,4 @@
-"""Pure deterministic selection of the largest actual geometry overlap."""
+"""Select labels from exact intersections with per-code support unions."""
 
 import logging
 from collections.abc import Callable, Iterable
@@ -7,12 +7,16 @@ from typing import TypeGuard
 from shapely import area as shapely_area
 from shapely import get_parts
 from shapely import intersection as shapely_intersection
+from shapely.errors import GEOSException
 from shapely.geometry.base import BaseGeometry
+from shapely.ops import unary_union
 
 from .domain import EunisResult, OverlapCandidate
 from .geometry import is_usable
 
 logger = logging.getLogger(__name__)
+
+_MIN_ASSIGNED_PERCENTAGE = 80.0
 
 
 def _ignore_error() -> None:
@@ -31,26 +35,71 @@ def choose_winner(
     on_error: Callable[[], None] = _ignore_error,
     extra_areas: Iterable[tuple[float, str, str]] = (),
 ) -> EunisResult:
-    """Select the candidate with the largest actual intersection area.
+    """Select one exact code from same-code support unions.
 
-    ``on_error`` is called once per candidate dropped because the exact GEOS
-    intersection raised; the selected result is the same either way.
-    ``extra_areas`` are precomputed ``(area, code, name)`` overlaps that compete
-    with the candidates under the same ordering.
+    The reported percentage uses the full OSM polygon area. A code is assigned
+    only when exactly one per-code union covers at least 80% of that area.
+    ``on_error`` is called for each support candidate dropped because it is
+    unusable or its class union or exact intersection failed. ``extra_areas``
+    must contain at most one pre-unioned ``(area, code, name)`` value per code.
     """
 
     if not _usable_polygon(polygon):
         return _empty_result()
 
-    overlaps = [
-        (area, candidate.code, candidate.name)
-        for area, candidate in _positive_overlaps(polygon, candidates, on_error)
-    ]
+    overlaps = _positive_overlaps(polygon, candidates, on_error)
     overlaps.extend(extra_areas)
-    if not overlaps:
+    return result_from_class_areas(overlaps, polygon.area, source_version)
+
+
+def result_from_class_areas(
+    overlaps: Iterable[tuple[float, str, str]],
+    polygon_area: float,
+    source_version: str | None,
+) -> EunisResult:
+    """Select one exact class from pre-unioned full-polygon support areas.
+
+    A class is eligible only when its union coverage is at least 80% of the
+    original polygon area. If multiple distinct class codes qualify, the label
+    stays null and the maximum class-union percentage remains in the result.
+    """
+
+    if polygon_area <= 0.0:
         return _empty_result()
-    area, code, name = min(overlaps, key=lambda item: (-item[0], item[1]))
-    return EunisResult(code, name, _percentage(area, polygon.area), source_version)
+    class_coverage = _class_coverages(overlaps, polygon_area)
+    if not class_coverage:
+        return _empty_result()
+
+    best_code = min(class_coverage, key=lambda code: (-class_coverage[code][0], code))
+    qualifying = _qualifying_codes(class_coverage)
+    if len(qualifying) != 1:
+        return EunisResult(None, None, class_coverage[best_code][0], source_version)
+
+    code = qualifying[0]
+    coverage, name = class_coverage[code]
+    return EunisResult(code, name, coverage, source_version)
+
+
+def _class_coverages(
+    overlaps: Iterable[tuple[float, str, str]],
+    polygon_area: float,
+) -> dict[str, tuple[float, str]]:
+    by_code: dict[str, tuple[float, str]] = {}
+    for area, code, name in overlaps:
+        if area <= 0.0:
+            continue
+        if code in by_code:
+            raise ValueError(f"class support areas must be unioned before selection: {code}")
+        by_code[code] = (_percentage(area, polygon_area), name)
+    return by_code
+
+
+def _qualifying_codes(class_coverage: dict[str, tuple[float, str]]) -> list[str]:
+    return [
+        code
+        for code, (percentage, _name) in class_coverage.items()
+        if percentage >= _MIN_ASSIGNED_PERCENTAGE
+    ]
 
 
 def _usable_polygon(polygon: BaseGeometry | None) -> TypeGuard[BaseGeometry]:
@@ -61,35 +110,99 @@ def _positive_overlaps(
     polygon: BaseGeometry,
     candidates: Iterable[OverlapCandidate],
     on_error: Callable[[], None],
-) -> list[tuple[float, OverlapCandidate]]:
-    overlaps: list[tuple[float, OverlapCandidate]] = []
-    for candidate in candidates:
-        area = _intersection_area(polygon, candidate, on_error)
+) -> list[tuple[float, str, str]]:
+    by_code = _group_candidates(candidates, on_error)
+    overlaps: list[tuple[float, str, str]] = []
+    for code, supports in by_code.items():
+        candidate = _class_union_candidate(code, supports, on_error)
+        if candidate is None:
+            continue
+        area = _intersection_area(polygon, candidate, on_error, error_count=len(supports))
         if area is not None:
-            overlaps.append((area, candidate))
+            overlaps.append((area, candidate.code, candidate.name))
     return overlaps
+
+
+def _group_candidates(
+    candidates: Iterable[OverlapCandidate],
+    on_error: Callable[[], None],
+) -> dict[str, list[OverlapCandidate]]:
+    by_code: dict[str, list[OverlapCandidate]] = {}
+    for candidate in candidates:
+        if not is_usable(candidate.geometry):
+            logger.warning("skipping unusable EUNIS candidate %s", candidate.code)
+            on_error()
+            continue
+        by_code.setdefault(candidate.code, []).append(candidate)
+    return by_code
+
+
+def _class_union_candidate(
+    code: str,
+    supports: list[OverlapCandidate],
+    on_error: Callable[[], None],
+) -> OverlapCandidate | None:
+    name = _class_name(code, supports)
+    if len(supports) == 1:
+        return supports[0]
+    geometry = _union_class_geometry(code, supports, on_error)
+    if geometry is None:
+        return None
+    return OverlapCandidate(code, name, geometry)
+
+
+def _class_name(code: str, supports: list[OverlapCandidate]) -> str:
+    names = {support.name for support in supports}
+    if len(names) != 1:
+        raise ValueError(f"EUNIS class {code} has conflicting names")
+    return names.pop()
+
+
+def _union_class_geometry(
+    code: str,
+    supports: list[OverlapCandidate],
+    on_error: Callable[[], None],
+) -> BaseGeometry | None:
+    try:
+        geometry = unary_union([support.geometry for support in supports])
+    except (GEOSException, ValueError, RuntimeError) as error:
+        logger.warning("skipping EUNIS class %s after support union error: %s", code, error)
+        _report_errors(on_error, len(supports))
+        return None
+    if not is_usable(geometry):
+        logger.warning("skipping unusable EUNIS support union for %s", code)
+        _report_errors(on_error, len(supports))
+        return None
+    return geometry
 
 
 def _intersection_area(
     polygon: BaseGeometry,
     candidate: OverlapCandidate,
     on_error: Callable[[], None],
+    *,
+    error_count: int = 1,
 ) -> float | None:
     if not is_usable(candidate.geometry):
         logger.warning("skipping unusable EUNIS candidate %s", candidate.code)
-        on_error()
+        _report_errors(on_error, error_count)
         return None
     try:
         area = _exact_intersection_area(polygon, candidate)
-    except (ValueError, RuntimeError) as error:
+    except (GEOSException, ValueError, RuntimeError) as error:
         logger.warning(
             "skipping EUNIS candidate %s after intersection error: %s",
             candidate.code,
             error,
         )
-        on_error()
+        _report_errors(on_error, error_count)
         return None
     return area if area > 0.0 else None
+
+
+def _report_errors(on_error: Callable[[], None], count: int) -> None:
+    for _ in range(count):
+        on_error()
 
 
 def _exact_intersection_area(polygon: BaseGeometry, candidate: OverlapCandidate) -> float:
@@ -113,7 +226,39 @@ def prefer_result(current: EunisResult, candidate: EunisResult) -> EunisResult:
     if candidate.is_empty:
         return current
     _require_same_source_version(current, candidate)
-    return candidate if _outranks(_rank(candidate), _rank(current)) else current
+    if _qualifying_classes_conflict(current, candidate):
+        return _ambiguous_result(current, candidate)
+    if _outranks(_rank(candidate), _rank(current)):
+        return candidate
+    return current
+
+
+def _ambiguous_result(current: EunisResult, candidate: EunisResult) -> EunisResult:
+    percentage = max(
+        value
+        for value in (current.overlap_percentage, candidate.overlap_percentage)
+        if value is not None
+    )
+    return EunisResult(None, None, percentage, current.source_version)
+
+
+def _qualifying_classes_conflict(current: EunisResult, candidate: EunisResult) -> bool:
+    if _is_ambiguous(current) or _is_ambiguous(candidate):
+        return True
+    return (
+        current.code != candidate.code
+        and _meets_assignment_threshold(current)
+        and _meets_assignment_threshold(candidate)
+    )
+
+
+def _is_ambiguous(result: EunisResult) -> bool:
+    return result.code is None and _meets_assignment_threshold(result)
+
+
+def _meets_assignment_threshold(result: EunisResult) -> bool:
+    percentage = result.overlap_percentage
+    return percentage is not None and percentage >= _MIN_ASSIGNED_PERCENTAGE
 
 
 def _outranks(candidate: tuple[float, str], current: tuple[float, str]) -> bool:
@@ -123,9 +268,9 @@ def _outranks(candidate: tuple[float, str], current: tuple[float, str]) -> bool:
 
 
 def _rank(result: EunisResult) -> tuple[float, str]:
-    if result.code is None or result.overlap_percentage is None:
-        raise ValueError("EUNIS rank requires a code and overlap percentage")
-    return result.overlap_percentage, result.code
+    if result.overlap_percentage is None:
+        raise ValueError("EUNIS rank requires an overlap percentage")
+    return result.overlap_percentage, result.code or ""
 
 
 def _require_same_source_version(current: EunisResult, candidate: EunisResult) -> None:
