@@ -85,6 +85,25 @@ def test_reference_signature_includes_taxonomy_fingerprint() -> None:
     )
 
 
+def test_reference_signature_includes_claimed_codes() -> None:
+    asset = _asset("/habitats.gpkg", code=None)
+    group = EeaGroup(
+        "record",
+        "title",
+        "folder",
+        "service",
+        {"Q111": "child"},
+        (),
+        asset,
+        claimed_codes=frozenset({"Q111"}),
+    )
+    changed_group = replace(group, claimed_codes=frozenset({"Q112"}))
+
+    assert geometry_checkpoints.build_reference_signature({}, 4, (changed_group,)) != (
+        geometry_checkpoints.build_reference_signature({}, 4, (group,))
+    )
+
+
 def test_geometry_checkpoint_signature_includes_source_revision_and_shard() -> None:
     spec = DatasetSpec("website", "source", "target", "polygons/*.parquet")
     plan = DatasetPlan(spec, "revision-a", (), (), ())

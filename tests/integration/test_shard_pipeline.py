@@ -221,8 +221,8 @@ def test_parallel_reference_batch_processes_cached_geometry_shards(
     first_records = _json_events(first_log)
 
     expected_signatures = {
-        "polygons/a.parquet": "50a7639a50ba905c3aeccb50e9ae945eea28f6e0c6551231a9ebbbde023c1339",
-        "polygons/b.parquet": "a65c631602fda5e61eaab16bc6288db0497530b08aa9128049a21ae28c8903dd",
+        "polygons/a.parquet": "cff31dd4ab523c87e78e95540cea46fbc93cfa320ace3eff9f64a85c493417d6",
+        "polygons/b.parquet": "e16f9358c2cd2a5ccddb7bf4a8fa5387dac4630a5931a813c6f1cc2e124eeefc",
     }
     assert [record for record in first_records if record["event"] == "geometry_run_plan"] == [
         {
