@@ -285,6 +285,23 @@ class _FakeHttpClient:
         return self.responses[url]
 
 
+def test_classification_workbook_content_validates_metadata_size() -> None:
+    url = "https://example.test/classification.xlsx"
+    content = b"workbook"
+    client = _FakeHttpClient({url: _FakeResponse(content=content)})
+    entry = WebDavEntry("/classification.xlsx", url, len(content), None, False)
+
+    assert eea._classification_workbook_content(client, entry) == content
+
+    missing_size = WebDavEntry("/classification.xlsx", url, None, None, False)
+    with pytest.raises(ValueError, match="no byte size"):
+        eea._classification_workbook_content(_FakeHttpClient({}), missing_size)
+
+    size_mismatch = WebDavEntry("/classification.xlsx", url, len(content) + 1, None, False)
+    with pytest.raises(ValueError, match="byte count differs"):
+        eea._classification_workbook_content(client, size_mismatch)
+
+
 def test_metadata_get_retries_timeout_and_server_error(monkeypatch) -> None:
     monkeypatch.setattr(eea.time, "sleep", lambda delay: None)
 
