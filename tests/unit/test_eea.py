@@ -27,6 +27,7 @@ from osm_polygon_eunis.eea import (
     extract_share_token,
     parse_arcgis_labels,
     parse_classification_rows,
+    parse_classification_taxonomy_rows,
     parse_classification_workbook,
     parse_webdav_entries,
     raster_assets_from_entries,
@@ -89,6 +90,44 @@ def test_parse_classification_rows_accepts_multiple_sheet_headers() -> None:
         "N": "Coastal habitats",
         "V": "Vegetated man-made habitats",
     }
+
+
+def test_classification_taxonomy_uses_longest_proper_prefix_at_lower_level() -> None:
+    taxonomy = parse_classification_taxonomy_rows(
+        [
+            ["Level", "Code", "Name"],
+            [1, "A", "Root A"],
+            [4, "AB", "Higher-level number"],
+            [3, "ABC", "Child of A"],
+            [2, "X", "Root X"],
+            [2, "XY", "Same-level prefix"],
+            [3, "XYZ", "Child of X"],
+            ["Level", "Code 2018", "Name 2018"],
+            [1, "Q", "Q root"],
+            [2, "Q1", "Q child"],
+        ],
+        supplemental_labels={"MA223": "Saltmarsh"},
+    )
+
+    assert taxonomy.parents == {"AB": "A", "ABC": "A", "XYZ": "XY", "Q1": "Q"}
+    assert taxonomy.root_for("ABC") == "A"
+    assert taxonomy.root_for("MA223") == "MA223"
+    assert taxonomy.labels["MA223"] == "Saltmarsh"
+
+
+def test_classification_taxonomy_rejects_bad_levels_and_conflicting_rows() -> None:
+    with pytest.raises(ValueError, match="invalid Level"):
+        parse_classification_taxonomy_rows(
+            [["Level", "Code", "Name"], ["not-a-level", "Q1", "Child"]]
+        )
+    with pytest.raises(ValueError, match="conflicting name or Level"):
+        parse_classification_taxonomy_rows(
+            [
+                ["Level", "Code", "Name"],
+                ["1", "Q1", "Child"],
+                ["2", "Q1", "Different"],
+            ]
+        )
 
 
 def test_parse_classification_workbook_reads_shared_strings() -> None:
@@ -406,6 +445,7 @@ def test_resolve_group_uses_fallback_labels_for_code_only_service() -> None:
     )
 
     assert group.raster_assets[0].name == "coastal"
+    assert group.claimed_codes == frozenset({"N11"})
 
 
 def test_resolve_classification_labels_reads_one_workbook() -> None:
@@ -823,14 +863,21 @@ def test_config_resolution_and_asset_download(monkeypatch, tmp_path: Path) -> No
         def __exit__(self, *_args) -> None:
             return None
 
-    resolved_group = object()
+    from osm_polygon_eunis.domain import EunisTaxonomy
+
+    resolved_group = eea.EeaGroup("one", "title", "folder", "service", {"R11": "steppe"}, (), None)
+    taxonomy = EunisTaxonomy({"R11": "steppe"}, {"R11": 1}, {})
     monkeypatch.setattr(eea.httpx, "Client", lambda **kwargs: FakeClient())
     monkeypatch.setattr(
         eea,
-        "resolve_classification_labels",
-        lambda client, record: {"R11": "steppe"},
+        "resolve_classification_taxonomy",
+        lambda client, record, *, supplemental_labels: taxonomy,
     )
-    monkeypatch.setattr(eea, "_resolve_groups", lambda client, current, labels: (resolved_group,))
+    monkeypatch.setattr(
+        eea,
+        "_resolve_groups",
+        lambda client, current, labels, current_taxonomy: (resolved_group,),
+    )
     assert eea.resolve_config(config_path) == (resolved_group,)
 
     class Response:

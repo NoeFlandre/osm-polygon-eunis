@@ -23,7 +23,7 @@ from ._protocols import HubApi, StreamClient
 from .fileio import sha256_file
 from .sources import capture_revision, download_to_temp
 
-MANIFEST_VERSION = 5
+MANIFEST_VERSION = 6
 
 
 class VerificationError(ValueError):

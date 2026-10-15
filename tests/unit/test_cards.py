@@ -283,7 +283,7 @@ def test_default_card_artifacts_are_byte_identical_to_golden_hashes(tmp_path: Pa
         print(json.dumps(dict(artifacts.hashes), indent=2, sort_keys=True))  # noqa: T201
 
     assert dict(artifacts.hashes) == {
-        "README.md": "0ae2d67b0d5d2a85c7bbee1aaaef918c3d27c7ad78b009ad5fbf321dbbd56848",
+        "README.md": "4feaeb56082ae8b5b03bcbc8de728769e1e85eceda71f294f0a990215f057047",
         "eunis/world-map.svg": "adb1d18e0876692cb71143402828c0aaa5a2df98762e9b43bcb6353d8fdbf731",
     }
 

@@ -21,3 +21,7 @@ This file contains the release notes for this project. The version numbers are i
   re-publishes every shard. Progress files written before this change carry no
   source commit, so the first run after upgrading re-publishes every shard.
   A run without a resolvable source commit fails instead of resuming.
+- Roll up EUNIS support through verified 2021 taxonomy ancestry, unioning
+  sibling vector geometries and OR-ing descendant raster masks. Require a
+  native raster validity signal and preserve NoData masking. Bump the overlap
+  kernel version so old sidecars are not reused.

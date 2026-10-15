@@ -33,7 +33,7 @@ def test_reference_signature_is_order_independent_and_uses_current_kernel() -> N
         {
             "checksums": {"a": "1", "b": "2"},
             "threshold": 4,
-            "kernel": 4,
+            "kernel": 5,
             "reference_groups": [],
         },
         sort_keys=True,
@@ -60,6 +60,29 @@ def test_reference_signature_includes_reference_version_and_labels() -> None:
         != initial
     )
     assert geometry_checkpoints.build_reference_signature({}, 4, (relabeled_group,)) != initial
+
+
+def test_reference_signature_includes_taxonomy_fingerprint() -> None:
+    from osm_polygon_eunis.domain import EunisTaxonomy
+
+    asset = _asset("/habitats.gpkg", code=None)
+    taxonomy = EunisTaxonomy({"Q11": "parent"}, {"Q11": 2}, {})
+    changed = EunisTaxonomy({"Q11": "parent"}, {"Q11": 3}, {})
+    group = EeaGroup(
+        "record",
+        "title",
+        "folder",
+        "service",
+        {"Q11": "parent"},
+        (),
+        asset,
+        taxonomy=taxonomy,
+    )
+    changed_group = replace(group, taxonomy=changed)
+
+    assert geometry_checkpoints.build_reference_signature({}, 4, (changed_group,)) != (
+        geometry_checkpoints.build_reference_signature({}, 4, (group,))
+    )
 
 
 def test_geometry_checkpoint_signature_includes_source_revision_and_shard() -> None:

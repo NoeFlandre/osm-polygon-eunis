@@ -23,10 +23,11 @@ from .transform import (
 _DEFAULT_LIMITS = BatchLimits()
 
 
-_WORKER_REFERENCE_STACKS: dict[tuple[str, int, int, tuple[str, ...]], ExitStack] = {}
+_WorkerReferenceKey = tuple[str, int, int, tuple[str, ...], tuple[str, ...]]
+_WORKER_REFERENCE_STACKS: dict[_WorkerReferenceKey, ExitStack] = {}
 
 
-_WORKER_REFERENCES: dict[tuple[str, int, int, tuple[str, ...]], tuple[OverlapReference, ...]] = {}
+_WORKER_REFERENCES: dict[_WorkerReferenceKey, tuple[OverlapReference, ...]] = {}
 
 
 def _asset_filename(asset: RemoteAsset) -> str:
@@ -142,7 +143,7 @@ def _open_local_raster_reference(
         )
         for asset in group.raster_assets
     )
-    with RasterReference(layers, threshold=threshold) as reference:
+    with RasterReference(layers, threshold=threshold, taxonomy=group.taxonomy) as reference:
         yield reference
 
 
@@ -160,6 +161,7 @@ def _open_local_vector_reference(
         dict(group.labels),
         source_version=asset.source_version,
         threshold=threshold,
+        taxonomy=group.taxonomy,
     ) as reference:
         yield reference
 
@@ -220,7 +222,13 @@ def worker_reference_batch(
 ) -> tuple[OverlapReference, ...]:
     """Reuse one opened reference batch for the lifetime of a worker process."""
 
-    key = (str(root), start_index, threshold, tuple(group.record_id for group in groups))
+    key = (
+        str(root),
+        start_index,
+        threshold,
+        tuple(group.record_id for group in groups),
+        tuple(group.taxonomy.fingerprint if group.taxonomy is not None else "" for group in groups),
+    )
     cached = _WORKER_REFERENCES.get(key)
     if cached is not None:
         return cached
@@ -275,7 +283,11 @@ def _raster_group_reference(
                 source_version=asset.source_version,
             )
         )
-    with RasterReference(tuple(layers), threshold=threshold) as reference:
+    with RasterReference(
+        tuple(layers),
+        threshold=threshold,
+        taxonomy=group.taxonomy,
+    ) as reference:
         yield reference
 
 
@@ -299,6 +311,7 @@ def _vector_group_reference(
         dict(group.labels),
         source_version=asset.source_version,
         threshold=threshold,
+        taxonomy=group.taxonomy,
     ) as reference:
         yield reference
 

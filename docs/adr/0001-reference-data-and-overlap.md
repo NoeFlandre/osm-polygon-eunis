@@ -3,21 +3,27 @@
 ## Decision
 
 Use the official EEA 2021 EUNIS habitat reference. Its declared coordinate
-system is EPSG:3035. For each exact EUNIS code, union its reference geometries
-before calculating the exact intersection with the OSM polygon. Divide each
-per-code intersection by the full OSM polygon area. Assign a code and name only
-when exactly one code reaches the inclusive 80% threshold. Keep hierarchy codes
-distinct; if more than one qualifies, withhold the code and name and retain the
-largest per-code union coverage. Below 80%, withhold the code and name but keep
-the measured percentage. A polygon with no valid positive-area intersection
-receives null overlap fields.
+system is EPSG:3035. For each taxonomy node, union support from the node and all
+descendants before calculating the exact intersection with the OSM polygon.
+Divide each node's intersection by the full OSM polygon area. The taxonomy is
+read from the workbook's Level/Code/Name records: a code's parent is the
+longest proper code prefix present at a strictly lower Level. Assign the most
+specific qualifying node only when one qualifying node remains after removing
+its qualifying ancestors and its coverage reaches the inclusive 80% threshold.
+If multiple qualifying sibling nodes remain, withhold the code and name and
+retain their maximum coverage. Below 80%, withhold the code and name but keep
+the highest measured hierarchy-node coverage. A polygon with no valid
+positive-area intersection receives null overlap fields.
 
 Vector GeoPackages are queried as indexed feature layers. Raster-tile
 GeoPackages are refused as ground truth until their source values and validity
 masks are verified. Keep the bounded Q11 source evidence and recovery record in
 the separately scoped [PR #157](https://github.com/NoeFlandre/osm-polygon-eunis/pull/157).
-Raster labels require a validated native lossless raster and its native
-validity mask. Do not infer labels from an unchecked derived tile package.
+Raster labels require a validated native lossless raster with a native
+validity signal. Exclude NoData and masked pixels before thresholding. Roll up
+each taxonomy node by pixel-wise OR of its own and descendant masks, never by
+summing child areas. Fail closed when a raster has no native validity signal.
+Do not infer labels from an unchecked derived tile package.
 
 Native raster-cell collections carry their disjoint-component invariant. The
 matcher sums exact cell intersections that Shapely calculates in a vectorized

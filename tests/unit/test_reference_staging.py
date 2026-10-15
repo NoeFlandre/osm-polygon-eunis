@@ -11,6 +11,7 @@ import pytest
 
 from osm_polygon_eunis import reference_cache, reference_staging
 from osm_polygon_eunis._protocols import StreamClient
+from osm_polygon_eunis.domain import EunisTaxonomy
 from osm_polygon_eunis.eea import EeaGroup, RemoteAsset
 
 
@@ -104,6 +105,7 @@ def test_open_reference_group_reuses_client_for_raster_and_vector(
     monkeypatch.setattr(reference_staging, "GeoPackageReference", FakeReference)
     client = cast(StreamClient, object())
     checksums: dict[str, str] = {}
+    taxonomy = EunisTaxonomy({"R11": "steppe"}, {"R11": 1}, {})
     raster_group = EeaGroup(
         "raster-record",
         "raster",
@@ -112,6 +114,7 @@ def test_open_reference_group_reuses_client_for_raster_and_vector(
         {"R11": "steppe"},
         (_asset("/Prob_R11.tif"),),
         None,
+        taxonomy=taxonomy,
     )
     vector_group = EeaGroup(
         "vector-record",
@@ -172,8 +175,16 @@ def test_worker_reference_batch_opens_local_groups_once_and_closes_on_exit(
 
     monkeypatch.setattr(reference_staging, "RasterReference", fake_reference)
     monkeypatch.setattr(reference_staging, "GeoPackageReference", fake_reference)
+    taxonomy = EunisTaxonomy({"R11": "steppe"}, {"R11": 1}, {})
     raster_group = EeaGroup(
-        "raster-record", "raster", "folder", "service", {}, (_asset("/Prob_R11.tif"),), None
+        "raster-record",
+        "raster",
+        "folder",
+        "service",
+        {"R11": "steppe"},
+        (_asset("/Prob_R11.tif"),),
+        None,
+        taxonomy=taxonomy,
     )
     vector_group = EeaGroup(
         "vector-record",
@@ -196,7 +207,7 @@ def test_worker_reference_batch_opens_local_groups_once_and_closes_on_exit(
     assert [(layer.code, layer.name, layer.path) for layer in layers] == [
         ("R11", "steppe", tmp_path / "02-raster-r" / "R11.tif")
     ]
-    assert opened[0].kwargs == {"threshold": 3}
+    assert opened[0].kwargs == {"threshold": 3, "taxonomy": taxonomy}
     assert opened[1].args[0] == tmp_path / "03-vector-r" / "habitats.gpkg"
     assert len(reference_staging._WORKER_REFERENCES) == 1
     assert all(cast(_TrackedReference, reference).closed for reference in first)

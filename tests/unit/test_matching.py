@@ -7,7 +7,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 from shapely.geometry import GeometryCollection, Polygon, box
 
-from osm_polygon_eunis.domain import EunisResult, OverlapCandidate
+from osm_polygon_eunis.domain import EunisResult, EunisTaxonomy, OverlapCandidate
 from osm_polygon_eunis.matching import (
     _exact_intersection_area,
     _percentage,
@@ -128,6 +128,44 @@ def test_distinct_qualifying_hierarchy_codes_remain_ambiguous() -> None:
             OverlapCandidate("Q111", "fine class", box(0, 0, 8, 10)),
         ),
         source_version="test",
+    )
+
+    assert result == EunisResult(None, None, 90.0, "test")
+
+
+def test_sibling_supports_union_to_parent_and_count_overlaps_once() -> None:
+    taxonomy = EunisTaxonomy(
+        labels={"Q11": "parent", "Q111": "first child", "Q112": "second child"},
+        levels={"Q11": 2, "Q111": 3, "Q112": 3},
+        parents={"Q111": "Q11", "Q112": "Q11"},
+    )
+    result = choose_winner(
+        box(0, 0, 10, 10),
+        (
+            OverlapCandidate("Q111", "first child", box(0, 0, 5, 10)),
+            OverlapCandidate("Q112", "second child", box(3, 0, 8, 10)),
+        ),
+        source_version="test",
+        taxonomy=taxonomy,
+    )
+
+    assert result == EunisResult("Q11", "parent", 80.0, "test")
+
+
+def test_qualifying_sibling_classes_remain_ambiguous_after_parent_rollup() -> None:
+    taxonomy = EunisTaxonomy(
+        labels={"Q11": "parent", "Q111": "first child", "Q112": "second child"},
+        levels={"Q11": 2, "Q111": 3, "Q112": 3},
+        parents={"Q111": "Q11", "Q112": "Q11"},
+    )
+    result = choose_winner(
+        box(0, 0, 10, 10),
+        (
+            OverlapCandidate("Q111", "first child", box(0, 0, 9, 10)),
+            OverlapCandidate("Q112", "second child", box(1, 0, 10, 10)),
+        ),
+        source_version="test",
+        taxonomy=taxonomy,
     )
 
     assert result == EunisResult(None, None, 90.0, "test")
@@ -367,6 +405,13 @@ def test_prefer_result_assigned_eighty_beats_withheld_seventy_five() -> None:
 
     assert prefer_result(withheld, assigned) == EunisResult("R11", "steppe", 80.0, "test")
     assert prefer_result(assigned, withheld) == EunisResult("R11", "steppe", 80.0, "test")
+
+
+def test_exactly_eighty_percent_ambiguous_result_stays_ambiguous_when_merged() -> None:
+    ambiguous = EunisResult(None, None, 80.0, "test")
+    larger_assignment = EunisResult("R11", "steppe", 90.0, "test")
+
+    assert prefer_result(ambiguous, larger_assignment) == EunisResult(None, None, 90.0, "test")
 
 
 def test_prefer_result_handles_unequal_percentages_and_version_mismatch() -> None:

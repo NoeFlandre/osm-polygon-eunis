@@ -401,15 +401,24 @@ class DatasetCardAccumulator:
                 "",
                 "## Method",
                 "",
-                "EUNIS labels are selected by the largest actual polygon intersection "
-                "area after transforming geometries to EPSG:3035. Bounding boxes are "
-                "used only to prune candidates. Polygon and multipolygon inputs are "
+                "For each EUNIS taxonomy node, support from that node and its "
+                "descendants is unioned before measuring coverage over the full OSM "
+                "polygon area in EPSG:3035. Parent links come from the 2021 workbook: "
+                "the parent is the longest proper code prefix with a lower Level. "
+                "The inclusive 80% gate applies to the node union. A qualifying "
+                "descendant takes precedence over its ancestor; multiple qualifying "
+                "sibling nodes remain ambiguous. Below 80%, the code and name are "
+                "null and the greatest measured node coverage is retained. Bounding "
+                "boxes only prune candidates. Polygon and multipolygon inputs are "
                 "accepted; polygon parts of mixed geometry collections are retained. "
                 "WGS84 edges are densified to at most "
                 f"{GEOMETRY_POLICY['wgs84_max_segment_length_degrees']} degrees before "
                 "projection. Polygons spanning more than 180 degrees of longitude, "
                 "collapsed polygons, and non-areal geometries are rejected and counted "
-                "as invalid. Out-of-reference polygons receive null EUNIS fields.",
+                "as invalid. Raster TIFFs without a native validity signal are "
+                "rejected, and NoData or masked cells do not count as habitat. "
+                "Raster-tile GeoPackages remain ineligible until source values and "
+                "masks are validated. Out-of-reference polygons receive null EUNIS fields.",
                 "",
                 f"Source: `{source_repo}` at `{source_revision}`.",
                 f"Output: `{target_repo}`.",

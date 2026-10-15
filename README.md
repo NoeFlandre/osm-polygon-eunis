@@ -3,12 +3,13 @@
 ## Purpose and release status
 
 This project adds EUNIS habitat labels to three public Hugging Face datasets.
-For each exact EUNIS code, the matcher unions its reference geometries before
-measuring the intersection with an OSM polygon. It assigns a code and name only
-when exactly one code's union covers at least 80% of the full OSM polygon area;
-the 80% boundary is inclusive. Different hierarchy codes remain distinct, and
-multiple qualifying codes leave the code and name null. The reported percentage
-is the greatest per-code union coverage over the full OSM area.
+The matcher unions reference support for each EUNIS classification node and
+measures it against the full OSM polygon area. Parent support is the geometric
+union of support for that node and its descendants, so overlapping sibling
+support is counted once. It assigns a code only when one most-specific
+qualifying node remains after hierarchy roll-up and its coverage is at least
+80%; the boundary is inclusive. Multiple qualifying sibling classes are
+ambiguous. The percentage is measured over the full OSM polygon area.
 
 The three output repositories are the intended release targets. Treat a dataset
 as published only after you verify these items independently:
@@ -38,14 +39,18 @@ The tables that contain polygons receive four nullable columns:
 - `eunis_overlap_percentage`
 - `eunis_source_version`
 
-The percentage is `100 * area(OSM polygon ∩ union(reference geometries for one
-exact EUNIS code)) / area(OSM polygon)`. The pipeline first transforms both
-geometries to EPSG:3035. Bounding boxes can remove candidates; they never decide
-a label. An exact code is assigned only if its union coverage is at least 80%
-and no other exact code also reaches 80%. Equal or overlapping qualifying
-classes are ambiguous, and the reported percentage remains the greatest
-per-code union coverage. Below the inclusive gate, the code and name are null
-while the measured percentage remains available. Polygons without a valid
+For each hierarchy node, coverage is `100 * area(OSM polygon ∩ union(reference
+supports for the node and its descendants)) / area(OSM polygon)`. The pipeline
+first transforms both geometries to EPSG:3035. Bounding boxes select
+candidates; they never decide a label. Parent rasters are aggregated by
+pixel-wise OR of their descendant masks. The 2021 EEA workbook supplies the
+Level/Code/Name records; each code's parent is the longest proper code prefix
+in that workbook with a strictly lower Level. A node is assigned when it
+reaches the inclusive 80% gate and no qualifying proper descendant exists.
+Qualifying sibling nodes remain ambiguous; their code and name are null, and
+the reported percentage is the maximum coverage among those sibling nodes.
+Below the gate, the code and name are null and the highest measured
+hierarchy-node coverage remains available. Polygons without a valid
 positive-area overlap have null overlap fields.
 
 The pipeline reads bounded Parquet micro-batches. It uses bounded Arrow batches.
@@ -62,10 +67,10 @@ The EEA resolver pins these items in the `eunis/manifest.json` of each target:
 
 Vector GeoPackages remain eligible reference sources. Raster-tile GeoPackages
 are rejected as ground truth until their native raster values and validity
-masks are verified. The bounded Q11 source evidence and recovery record is
-tracked separately in [PR #157](https://github.com/NoeFlandre/osm-polygon-eunis/pull/157).
-Use a validated native lossless raster and its native validity mask before
-publishing labels from raster support.
+masks are verified. Raster TIFFs without a native validity signal are rejected;
+NoData and native mask values are excluded before thresholding. The bounded Q11
+source evidence and recovery record is tracked separately in [PR
+#157](https://github.com/NoeFlandre/osm-polygon-eunis/pull/157).
 
 Each output dataset card also contains two items:
 

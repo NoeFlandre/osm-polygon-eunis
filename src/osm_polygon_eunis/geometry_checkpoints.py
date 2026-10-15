@@ -36,6 +36,13 @@ def _reference_group_signature(group: EeaGroup) -> dict[str, object]:
     return {
         "record_id": group.record_id,
         "labels": dict(sorted(group.labels.items())),
+        "claimed_codes": sorted(group.claimed_codes),
+        "taxonomy_fingerprint": (
+            group.taxonomy.fingerprint if group.taxonomy is not None else None
+        ),
+        "taxonomy_source_sha256": (
+            group.taxonomy.source_sha256 if group.taxonomy is not None else None
+        ),
         "assets": [
             {
                 "path": asset.path,

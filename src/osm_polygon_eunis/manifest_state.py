@@ -73,13 +73,30 @@ def reference_manifest(
             }
             for asset in group_assets
         )
-    return {
+    reference: dict[str, object] = {
         "source_version": source_version,
         "crs": crs,
         "threshold": threshold,
         "classification_record": config.get("classification_record"),
         "assets": sorted(assets, key=lambda asset: (str(asset["record_id"]), str(asset["path"]))),
     }
+    taxonomy = next((group.taxonomy for group in groups if group.taxonomy is not None), None)
+    if taxonomy is not None:
+        if any(
+            group.taxonomy is not None and group.taxonomy.fingerprint != taxonomy.fingerprint
+            for group in groups
+        ):
+            raise ValueError("all EEA groups must use one classification taxonomy")
+        reference["taxonomy"] = {
+            "record_id": taxonomy.source_record_id or config.get("classification_record"),
+            "path": taxonomy.source_path,
+            "url": taxonomy.source_url,
+            "size": taxonomy.source_size,
+            "etag": taxonomy.source_etag,
+            "sha256": taxonomy.source_sha256,
+            "fingerprint": taxonomy.fingerprint,
+        }
+    return reference
 
 
 def _reference_identity(reference: Mapping[str, object]) -> Mapping[str, object]:

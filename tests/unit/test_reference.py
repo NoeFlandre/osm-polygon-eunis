@@ -21,7 +21,7 @@ from shapely.wkb import dumps
 import osm_polygon_eunis.geopackage_reference as geopackage_module
 import osm_polygon_eunis.geopackage_tiles as tiles_module
 import osm_polygon_eunis.raster_reference as raster_module
-from osm_polygon_eunis.domain import EunisResult
+from osm_polygon_eunis.domain import EunisResult, EunisTaxonomy
 from osm_polygon_eunis.geopackage_reference import GeoPackageReference
 from osm_polygon_eunis.raster_reference import (
     RasterLayer,
@@ -145,6 +145,29 @@ def _write_raster(path: Path, values: list[list[int]]) -> Path:
     return path
 
 
+def _write_grid_raster(
+    path: Path,
+    values: list[list[int]],
+    *,
+    nodata: int | None = 0,
+) -> Path:
+    array = np.asarray(values, dtype="uint8")
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        width=array.shape[1],
+        height=array.shape[0],
+        count=1,
+        dtype="uint8",
+        crs="EPSG:3035",
+        transform=from_origin(0, array.shape[0], 1, 1),
+        nodata=nodata,
+    ) as dataset:
+        dataset.write(array, 1)
+    return path
+
+
 def test_parse_layer_code() -> None:
     assert parse_layer_code("Prob_R11_100m.tif") == "R11"
 
@@ -163,6 +186,77 @@ def test_actual_cell_intersection_drives_percentage(tmp_path: Path) -> None:
     result = reference.overlap(box(1, 11, 19, 19))
 
     assert result == EunisResult(None, None, 50.0, "EEA-test")
+
+
+def test_native_nodata_value_is_masked_before_habitat_threshold(tmp_path: Path) -> None:
+    raster = _write_grid_raster(
+        tmp_path / "Prob_R11_100m.tif",
+        [[255, 1]],
+        nodata=255,
+    )
+
+    with RasterReference((RasterLayer("R11", "steppe", raster, "EEA-test"),)) as reference:
+        result = reference.overlap(box(0, 0, 2, 1))
+
+    assert result == EunisResult(None, None, 50.0, "EEA-test")
+
+
+def test_raster_without_native_validity_mask_fails_closed(tmp_path: Path) -> None:
+    raster = _write_grid_raster(
+        tmp_path / "Prob_R11_100m.tif",
+        [[1, 0]],
+        nodata=None,
+    )
+
+    with pytest.raises(ValueError, match="no native validity mask"):
+        RasterReference((RasterLayer("R11", "steppe", raster, "EEA-test"),)).__enter__()
+
+
+def test_sibling_raster_supports_roll_up_as_pixel_union(tmp_path: Path) -> None:
+    first = _write_grid_raster(
+        tmp_path / "Prob_Q111_100m.tif",
+        [[1, 1, 1, 1, 0, 0, 0, 0, 0, 0]],
+    )
+    second = _write_grid_raster(
+        tmp_path / "Prob_Q112_100m.tif",
+        [[0, 0, 0, 1, 1, 1, 1, 1, 0, 0]],
+    )
+    taxonomy = EunisTaxonomy(
+        labels={"Q11": "parent", "Q111": "first child", "Q112": "second child"},
+        levels={"Q11": 2, "Q111": 3, "Q112": 3},
+        parents={"Q111": "Q11", "Q112": "Q11"},
+    )
+
+    with RasterReference(
+        (
+            RasterLayer("Q111", "first child", first, "EEA-test"),
+            RasterLayer("Q112", "second child", second, "EEA-test"),
+        ),
+        taxonomy=taxonomy,
+    ) as reference:
+        result = reference.overlap(box(0, 0, 10, 1))
+
+    assert result == EunisResult("Q11", "parent", 80.0, "EEA-test")
+
+
+def test_duplicate_raster_layers_for_one_code_union_before_threshold(tmp_path: Path) -> None:
+    first = _write_grid_raster(
+        tmp_path / "first.tif",
+        [[1, 1, 1, 1, 0, 0, 0, 0, 0, 0]],
+    )
+    second = _write_grid_raster(
+        tmp_path / "second.tif",
+        [[0, 0, 0, 0, 1, 1, 1, 1, 0, 0]],
+    )
+    layers = (
+        RasterLayer("Q111", "fine habitat", first, "EEA-test"),
+        RasterLayer("Q111", "fine habitat", second, "EEA-test"),
+    )
+
+    with RasterReference(layers) as reference:
+        result = reference.overlap(box(0, 0, 10, 1))
+
+    assert result == EunisResult("Q111", "fine habitat", 80.0, "EEA-test")
 
 
 def test_bbox_touch_without_actual_intersection_is_null(tmp_path: Path) -> None:
@@ -300,8 +394,10 @@ def test_raster_tile_cache_evicts_oldest_tile_at_its_byte_budget(tmp_path: Path)
 
     with reference:
         datasets = reference._datasets
-        reference._tile_stack(datasets, 0, 0)
-        reference._tile_stack(datasets, 0, 1)
+        classes = reference._shared_grid_order(datasets)
+        assert classes is not None
+        reference._tile_stack(datasets, classes, 0, 0)
+        reference._tile_stack(datasets, classes, 0, 1)
 
         assert list(reference._stack_cache) == [(0, 1)]
         assert reference.tile_cache_bytes == tile_bytes

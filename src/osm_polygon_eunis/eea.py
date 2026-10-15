@@ -24,7 +24,7 @@ from ._protocols import HttpClient as _HttpClient
 from ._protocols import HttpResponse as _HttpResponse
 from ._protocols import RequestClient as _RequestClient
 from ._protocols import StreamClient
-from .domain import SchemaError
+from .domain import EunisTaxonomy, SchemaError
 from .fileio import write_chunks
 from .raster_reference import parse_layer_code
 
@@ -95,6 +95,8 @@ class EeaGroup:
     labels: Mapping[str, str]
     raster_assets: tuple[RemoteAsset, ...]
     vector_asset: RemoteAsset | None
+    taxonomy: EunisTaxonomy | None = None
+    claimed_codes: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,6 +262,109 @@ def parse_classification_rows(rows: Iterable[Iterable[object]]) -> dict[str, str
     if not labels:
         raise ValueError("EEA classification workbook has no code/name rows")
     return labels
+
+
+def parse_classification_taxonomy_rows(
+    rows: Iterable[Iterable[object]],
+    *,
+    supplemental_labels: Mapping[str, str] | None = None,
+) -> EunisTaxonomy:
+    """Parse repeated Level/Code/Name headers and compile verified parent links."""
+    records = _classification_taxonomy_records(rows)
+    labels = {code: name for code, (name, _level) in records.items()}
+    levels = {code: level for code, (_name, level) in records.items()}
+    labels = _add_supplemental_taxonomy_labels(labels, supplemental_labels)
+    return EunisTaxonomy(labels, levels, _classification_parent_links(levels))
+
+
+def _classification_taxonomy_records(
+    rows: Iterable[Iterable[object]],
+) -> dict[str, tuple[str, int]]:
+    records: dict[str, tuple[str, int]] = {}
+    current_indexes: tuple[int, int, int] | None = None
+    for raw_row in rows:
+        row = tuple(raw_row)
+        indexes = _classification_taxonomy_indexes(row)
+        if indexes is not None:
+            current_indexes = indexes
+            continue
+        if current_indexes is None:
+            continue
+        record = _classification_taxonomy_record(row, current_indexes)
+        if record is None:
+            continue
+        code, name, level = record
+        if records.setdefault(code, (name, level)) != (name, level):
+            raise ValueError(f"EEA classification has conflicting name or Level for {code}")
+    if not records:
+        raise ValueError("EEA classification workbook has no Level/Code/Name rows")
+    return records
+
+
+def _classification_taxonomy_record(
+    row: tuple[object, ...],
+    indexes: tuple[int, int, int],
+) -> tuple[str, str, int] | None:
+    level_index, code_index, name_index = indexes
+    if code_index >= len(row):
+        return None
+    code = _text_value(row[code_index])
+    if not code:
+        return None
+    if name_index >= len(row):
+        raise ValueError(f"EEA classification has a missing name for {code}")
+    name = _text_value(row[name_index])
+    if not name:
+        raise ValueError(f"EEA classification has a missing name for {code}")
+    level_value = row[level_index] if level_index < len(row) else ""
+    level_text = (
+        str(level_value)
+        if isinstance(level_value, int) and not isinstance(level_value, bool)
+        else _text_value(level_value)
+    )
+    if not level_text.isdecimal() or int(level_text) < 1:
+        raise ValueError(f"EEA classification has an invalid Level for {code}")
+    return code, name, int(level_text)
+
+
+def _classification_parent_links(levels: Mapping[str, int]) -> dict[str, str]:
+    parents: dict[str, str] = {}
+    for code, level in levels.items():
+        prefixes = (
+            candidate
+            for candidate, parent_level in levels.items()
+            if len(candidate) < len(code) and code.startswith(candidate) and parent_level < level
+        )
+        parent = max(prefixes, key=len, default=None)
+        if parent is not None:
+            parents[code] = parent
+    return parents
+
+
+def _add_supplemental_taxonomy_labels(
+    labels: dict[str, str],
+    supplemental_labels: Mapping[str, str] | None,
+) -> dict[str, str]:
+    for code, name in (supplemental_labels or {}).items():
+        if not code or not name.strip():
+            raise ValueError("EEA classification has an invalid supplemental label")
+        previous = labels.get(code)
+        if previous is not None and previous != name.strip():
+            raise ValueError(f"EEA supplemental label conflicts with classification for {code}")
+        labels[code] = name.strip()
+    return labels
+
+
+def _classification_taxonomy_indexes(
+    row: tuple[object, ...],
+) -> tuple[int, int, int] | None:
+    headers = {_normalise_header(value): index for index, value in enumerate(row)}
+    level_index = _find_header_index(headers, {"level"})
+    code_index = _find_header_index(headers, {"code", "code2018"})
+    name_index = _find_header_index(headers, {"name", "name2018"})
+    if level_index is None or code_index is None or name_index is None:
+        return None
+    return level_index, code_index, name_index
 
 
 def _merge_label(labels: dict[str, str], code: str, name: str, source: str) -> None:
@@ -585,12 +690,16 @@ def _fetch_arcgis_labels(
     client: _HttpClient,
     service_url: str,
     fallback_labels: Mapping[str, str] | None = None,
+    *,
+    claimed_codes: set[str] | None = None,
 ) -> dict[str, str]:
     labels = dict(fallback_labels or {})
     offset = 0
     while True:
         page = _fetch_arcgis_page(client, service_url, offset)
         page_labels = parse_arcgis_labels(page, fallback_labels)
+        if claimed_codes is not None:
+            claimed_codes.update(page_labels)
         _merge_labels(labels, page_labels)
         if not page.get("exceededTransferLimit") or not page_labels:
             return labels
@@ -753,12 +862,57 @@ def resolve_classification_labels(
     return parse_classification_workbook(workbook.content)
 
 
+def resolve_classification_taxonomy(
+    client: _HttpClient,
+    record_id: str,
+    *,
+    supplemental_labels: Mapping[str, str] | None = None,
+    catalog_api: str = _DEFAULT_CATALOG_API,
+) -> EunisTaxonomy:
+    """Fetch the official classification workbook and compile its verified hierarchy."""
+    _links, entries = _fetch_record_entries(
+        client,
+        record_id,
+        catalog_api,
+        _classification_links,
+        max_depth=1,
+        file_suffixes=(".xlsx",),
+    )
+    entry = _select_classification_entry(entries)
+    if entry.size is None:
+        raise ValueError("EEA classification workbook has no byte size")
+    workbook = _get_with_retry(client, entry.url)
+    if len(workbook.content) != entry.size:
+        raise ValueError("EEA classification workbook byte count differs from metadata")
+    try:
+        with ZipFile(io.BytesIO(workbook.content)) as archive:
+            rows = _xlsx_rows(archive, _shared_strings(archive))
+            taxonomy = parse_classification_taxonomy_rows(
+                rows,
+                supplemental_labels=supplemental_labels,
+            )
+        return EunisTaxonomy(
+            taxonomy.labels,
+            taxonomy.levels,
+            taxonomy.parents,
+            source_record_id=record_id,
+            source_path=entry.path,
+            source_url=entry.url,
+            source_size=entry.size,
+            source_etag=entry.etag,
+            source_sha256=hashlib.sha256(workbook.content).hexdigest(),
+        )
+    except (BadZipFile, KeyError) as error:
+        raise ValueError("EEA classification asset is not a valid XLSX workbook") from error
+
+
 def resolve_group(
     client: _HttpClient,
     record_id: str,
     *,
     source_version: str,
     fallback_labels: Mapping[str, str] | None = None,
+    taxonomy: EunisTaxonomy | None = None,
     catalog_api: str = _DEFAULT_CATALOG_API,
 ) -> EeaGroup:
     """Resolve one official catalog record without downloading its data."""
@@ -766,7 +920,8 @@ def resolve_group(
     (title, folder_url, service_url), entries = _fetch_record_entries(
         client, record_id, catalog_api, catalog_links
     )
-    labels = _resolve_group_labels(client, service_url, entries, fallback_labels)
+    claimed_codes: set[str] = set()
+    labels = _resolve_group_labels(client, service_url, entries, fallback_labels, claimed_codes)
     raster_assets = raster_assets_from_entries(
         entries,
         labels,
@@ -776,7 +931,18 @@ def resolve_group(
     vector_asset = _vector_asset(entries, record_id, source_version)
     if not raster_assets and vector_asset is None:
         raise ValueError(f"EEA record has no GeoTIFF or GeoPackage assets: {record_id}")
-    return EeaGroup(record_id, title, folder_url, service_url, labels, raster_assets, vector_asset)
+    claimed_codes.update(asset.code for asset in raster_assets if asset.code is not None)
+    return EeaGroup(
+        record_id,
+        title,
+        folder_url,
+        service_url,
+        labels,
+        raster_assets,
+        vector_asset,
+        taxonomy,
+        frozenset(claimed_codes),
+    )
 
 
 def _resolve_group_labels(
@@ -784,11 +950,19 @@ def _resolve_group_labels(
     service_url: str,
     entries: Iterable[WebDavEntry],
     fallback_labels: Mapping[str, str] | None,
+    claimed_codes: set[str] | None = None,
 ) -> dict[str, str]:
     labels = dict(fallback_labels or {})
     raster_codes = _raster_codes(entries)
+    if claimed_codes is not None:
+        claimed_codes.update(raster_codes)
     if not raster_codes or any(code not in labels for code in raster_codes):
-        return _fetch_arcgis_labels(client, service_url, labels)
+        return _fetch_arcgis_labels(
+            client,
+            service_url,
+            labels,
+            claimed_codes=claimed_codes,
+        )
     return labels
 
 
@@ -862,9 +1036,14 @@ def resolve_config_data(config: object) -> tuple[EeaGroup, ...]:
         follow_redirects=True,
         timeout=_METADATA_TIMEOUT_SECONDS,
     ) as client:
-        labels = resolve_classification_labels(client, settings.classification_record)
-        labels.update(settings.supplemental_labels)
-        return _resolve_groups(client, settings, labels)
+        taxonomy = resolve_classification_taxonomy(
+            client,
+            settings.classification_record,
+            supplemental_labels=settings.supplemental_labels,
+        )
+        groups = _resolve_groups(client, settings, taxonomy.labels, taxonomy)
+        validate_group_code_ownership(groups, taxonomy)
+        return groups
 
 
 @dataclass(frozen=True, slots=True)
@@ -916,6 +1095,7 @@ def _resolve_groups(
     client: _HttpClient,
     settings: _ConfigSettings,
     labels: Mapping[str, str],
+    taxonomy: EunisTaxonomy | None = None,
 ) -> tuple[EeaGroup, ...]:
     return tuple(
         resolve_group(
@@ -923,9 +1103,28 @@ def _resolve_groups(
             record_id,
             source_version=settings.source_version,
             fallback_labels=labels,
+            taxonomy=taxonomy,
         )
         for record_id in settings.record_ids
     )
+
+
+def validate_group_code_ownership(
+    groups: Iterable[EeaGroup],
+    taxonomy: EunisTaxonomy,
+) -> None:
+    """Reject reference groups that claim the same leaf code or hierarchy root."""
+    code_owners: dict[str, str] = {}
+    root_owners: dict[str, str] = {}
+    for group in groups:
+        for code in group.claimed_codes:
+            owner = code_owners.setdefault(code, group.record_id)
+            if owner != group.record_id:
+                raise ValueError(f"EUNIS code {code} is claimed by multiple EEA records")
+            root = taxonomy.root_for(code)
+            root_owner = root_owners.setdefault(root, group.record_id)
+            if root_owner != group.record_id:
+                raise ValueError(f"EUNIS hierarchy root {root} is claimed by multiple EEA records")
 
 
 def _stream_asset(

@@ -11,12 +11,13 @@ from shapely.errors import GEOSException
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 
-from .domain import EunisResult, OverlapCandidate
+from .domain import EunisResult, EunisTaxonomy, OverlapCandidate
 from .geometry import is_usable
 
 logger = logging.getLogger(__name__)
 
 _MIN_ASSIGNED_PERCENTAGE = 80.0
+_BOUNDARY_TOLERANCE_PERCENTAGE = 1e-9
 
 
 def _ignore_error() -> None:
@@ -34,6 +35,7 @@ def choose_winner(
     source_version: str | None,
     on_error: Callable[[], None] = _ignore_error,
     extra_areas: Iterable[tuple[float, str, str]] = (),
+    taxonomy: EunisTaxonomy | None = None,
 ) -> EunisResult:
     """Select one exact code from same-code support unions.
 
@@ -47,15 +49,20 @@ def choose_winner(
     if not _usable_polygon(polygon):
         return _empty_result()
 
-    overlaps = _positive_overlaps(polygon, candidates, on_error)
+    overlaps = _positive_overlaps(polygon, candidates, on_error, taxonomy)
+    extra_areas = tuple(extra_areas)
+    if taxonomy is not None and extra_areas:
+        raise ValueError("scalar support areas cannot be rolled up through an EUNIS hierarchy")
     overlaps.extend(extra_areas)
-    return result_from_class_areas(overlaps, polygon.area, source_version)
+    return result_from_class_areas(overlaps, polygon.area, source_version, taxonomy=taxonomy)
 
 
 def result_from_class_areas(
     overlaps: Iterable[tuple[float, str, str]],
     polygon_area: float,
     source_version: str | None,
+    *,
+    taxonomy: EunisTaxonomy | None = None,
 ) -> EunisResult:
     """Select one exact class from pre-unioned full-polygon support areas.
 
@@ -72,12 +79,35 @@ def result_from_class_areas(
 
     best_code = min(class_coverage, key=lambda code: (-class_coverage[code][0], code))
     qualifying = _qualifying_codes(class_coverage)
-    if len(qualifying) != 1:
+    if taxonomy is not None:
+        qualifying = _deepest_qualifying_codes(qualifying, taxonomy)
+    if not qualifying:
         return EunisResult(None, None, class_coverage[best_code][0], source_version)
+    if len(qualifying) != 1:
+        maximum = max(class_coverage[code][0] for code in qualifying)
+        return EunisResult(None, None, maximum, source_version)
 
     code = qualifying[0]
     coverage, name = class_coverage[code]
+    if taxonomy is not None:
+        name = taxonomy.labels.get(code, name)
     return EunisResult(code, name, coverage, source_version)
+
+
+def _deepest_qualifying_codes(
+    qualifying: list[str],
+    taxonomy: EunisTaxonomy,
+) -> list[str]:
+    qualifying_set = set(qualifying)
+    return [
+        code
+        for code in qualifying
+        if not any(
+            code in taxonomy.ancestors_including_self(other)[1:]
+            for other in qualifying_set
+            if other != code
+        )
+    ]
 
 
 def _class_coverages(
@@ -90,7 +120,10 @@ def _class_coverages(
             continue
         if code in by_code:
             raise ValueError(f"class support areas must be unioned before selection: {code}")
-        by_code[code] = (_percentage(area, polygon_area), name)
+        percentage = _percentage(area, polygon_area)
+        if abs(percentage - _MIN_ASSIGNED_PERCENTAGE) <= _BOUNDARY_TOLERANCE_PERCENTAGE:
+            percentage = _MIN_ASSIGNED_PERCENTAGE
+        by_code[code] = (percentage, name)
     return by_code
 
 
@@ -98,7 +131,7 @@ def _qualifying_codes(class_coverage: dict[str, tuple[float, str]]) -> list[str]
     return [
         code
         for code, (percentage, _name) in class_coverage.items()
-        if percentage >= _MIN_ASSIGNED_PERCENTAGE
+        if percentage >= _MIN_ASSIGNED_PERCENTAGE - _BOUNDARY_TOLERANCE_PERCENTAGE
     ]
 
 
@@ -110,14 +143,37 @@ def _positive_overlaps(
     polygon: BaseGeometry,
     candidates: Iterable[OverlapCandidate],
     on_error: Callable[[], None],
+    taxonomy: EunisTaxonomy | None = None,
 ) -> list[tuple[float, str, str]]:
     by_code = _group_candidates(candidates, on_error)
-    overlaps: list[tuple[float, str, str]] = []
+    by_node: dict[str, list[OverlapCandidate]] = {}
     for code, supports in by_code.items():
         candidate = _class_union_candidate(code, supports, on_error)
         if candidate is None:
             continue
-        area = _intersection_area(polygon, candidate, on_error, error_count=len(supports))
+        nodes = taxonomy.ancestors_including_self(code) if taxonomy is not None else (code,)
+        for node in nodes:
+            name = taxonomy.labels[node] if taxonomy is not None else candidate.name
+            by_node.setdefault(node, []).append(
+                OverlapCandidate(
+                    node,
+                    name,
+                    candidate.geometry,
+                    error_count=candidate.error_count,
+                )
+            )
+
+    overlaps: list[tuple[float, str, str]] = []
+    for node, supports in by_node.items():
+        candidate = _class_union_candidate(node, supports, on_error)
+        if candidate is None:
+            continue
+        area = _intersection_area(
+            polygon,
+            candidate,
+            on_error,
+            error_count=sum(support.error_count for support in supports),
+        )
         if area is not None:
             overlaps.append((area, candidate.code, candidate.name))
     return overlaps
@@ -131,7 +187,7 @@ def _group_candidates(
     for candidate in candidates:
         if not is_usable(candidate.geometry):
             logger.warning("skipping unusable EUNIS candidate %s", candidate.code)
-            on_error()
+            _report_errors(on_error, candidate.error_count)
             continue
         by_code.setdefault(candidate.code, []).append(candidate)
     return by_code
@@ -148,7 +204,12 @@ def _class_union_candidate(
     geometry = _union_class_geometry(code, supports, on_error)
     if geometry is None:
         return None
-    return OverlapCandidate(code, name, geometry)
+    return OverlapCandidate(
+        code,
+        name,
+        geometry,
+        error_count=sum(support.error_count for support in supports),
+    )
 
 
 def _class_name(code: str, supports: list[OverlapCandidate]) -> str:
@@ -167,11 +228,11 @@ def _union_class_geometry(
         geometry = unary_union([support.geometry for support in supports])
     except (GEOSException, ValueError, RuntimeError) as error:
         logger.warning("skipping EUNIS class %s after support union error: %s", code, error)
-        _report_errors(on_error, len(supports))
+        _report_errors(on_error, sum(support.error_count for support in supports))
         return None
     if not is_usable(geometry):
         logger.warning("skipping unusable EUNIS support union for %s", code)
-        _report_errors(on_error, len(supports))
+        _report_errors(on_error, sum(support.error_count for support in supports))
         return None
     return geometry
 
