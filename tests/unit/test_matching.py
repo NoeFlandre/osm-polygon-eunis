@@ -12,7 +12,9 @@ from osm_polygon_eunis.domain import EunisResult, EunisTaxonomy, OverlapCandidat
 from osm_polygon_eunis.matching import (
     _exact_intersection_area,
     _intersection_area,
+    _overlap_areas_by_node,
     _percentage,
+    _qualifying_classes_conflict,
     _rank,
     _usable_polygon,
     choose_winner,
@@ -88,6 +90,18 @@ def test_precomputed_nonpositive_support_areas_do_not_create_a_class() -> None:
     assert result.is_empty
 
 
+def test_precomputed_nonpositive_support_does_not_hide_a_later_class() -> None:
+    result = result_from_class_areas([(0.0, "R12", "bog"), (80.0, "R11", "steppe")], 100.0, "test")
+
+    assert result == EunisResult("R11", "steppe", 80.0, "test")
+
+
+def test_precomputed_coverage_within_boundary_tolerance_is_normalized() -> None:
+    result = result_from_class_areas([(79.9999999995, "R11", "steppe")], 100.0, "test")
+
+    assert result == EunisResult("R11", "steppe", 80.0, "test")
+
+
 def test_same_class_unions_disjoint_supports_before_the_eighty_percent_gate() -> None:
     result = choose_winner(
         box(0, 0, 10, 10),
@@ -102,7 +116,7 @@ def test_same_class_unions_disjoint_supports_before_the_eighty_percent_gate() ->
 
 
 def test_same_class_supports_reject_conflicting_labels() -> None:
-    with pytest.raises(ValueError, match="conflicting names"):
+    with pytest.raises(ValueError) as error:
         choose_winner(
             box(0, 0, 10, 10),
             (
@@ -111,6 +125,8 @@ def test_same_class_supports_reject_conflicting_labels() -> None:
             ),
             source_version="test",
         )
+
+    assert str(error.value) == "EUNIS class Q111 has conflicting names"
 
 
 def test_same_class_unions_overlapping_supports_without_double_counting() -> None:
@@ -126,7 +142,7 @@ def test_same_class_unions_overlapping_supports_without_double_counting() -> Non
     assert result == EunisResult(None, None, 78.0, "test")
 
 
-def test_class_union_error_drops_each_support(monkeypatch) -> None:
+def test_class_union_error_drops_each_support(monkeypatch, caplog) -> None:
     from osm_polygon_eunis import matching
 
     def broken_union(_geometries):
@@ -134,18 +150,22 @@ def test_class_union_error_drops_each_support(monkeypatch) -> None:
 
     monkeypatch.setattr(matching, "unary_union", broken_union)
     errors: list[None] = []
-    result = choose_winner(
-        box(0, 0, 10, 10),
-        (
-            OverlapCandidate("Q111", "fine habitat", box(0, 0, 4, 10)),
-            OverlapCandidate("Q111", "fine habitat", box(6, 0, 10, 10)),
-        ),
-        source_version="test",
-        on_error=lambda: errors.append(None),
-    )
+    with caplog.at_level(logging.WARNING, logger=matching.__name__):
+        result = choose_winner(
+            box(0, 0, 10, 10),
+            (
+                OverlapCandidate("Q111", "fine habitat", box(0, 0, 4, 10)),
+                OverlapCandidate("Q111", "fine habitat", box(6, 0, 10, 10)),
+            ),
+            source_version="test",
+            on_error=lambda: errors.append(None),
+        )
 
     assert result.is_empty
     assert len(errors) == 2
+    assert caplog.messages == [
+        "skipping EUNIS class Q111 after support union error: invalid support union"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -175,23 +195,51 @@ def test_class_union_handles_supported_geometry_errors(monkeypatch, error) -> No
     assert errors == [None, None]
 
 
-def test_unusable_class_union_drops_each_support(monkeypatch) -> None:
+def test_unusable_class_union_drops_each_support(monkeypatch, caplog) -> None:
     from osm_polygon_eunis import matching
 
     monkeypatch.setattr(matching, "unary_union", lambda _geometries: GeometryCollection())
     errors: list[None] = []
-    result = choose_winner(
-        box(0, 0, 10, 10),
-        (
-            OverlapCandidate("Q111", "fine habitat", box(0, 0, 4, 10)),
-            OverlapCandidate("Q111", "fine habitat", box(6, 0, 10, 10)),
-        ),
-        source_version="test",
-        on_error=lambda: errors.append(None),
-    )
+    with caplog.at_level(logging.WARNING, logger=matching.__name__):
+        result = choose_winner(
+            box(0, 0, 10, 10),
+            (
+                OverlapCandidate("Q111", "fine habitat", box(0, 0, 4, 10)),
+                OverlapCandidate("Q111", "fine habitat", box(6, 0, 10, 10)),
+            ),
+            source_version="test",
+            on_error=lambda: errors.append(None),
+        )
 
     assert result.is_empty
     assert len(errors) == 2
+    assert caplog.messages == ["skipping unusable EUNIS support union for Q111"]
+
+
+def test_failed_node_union_reports_errors_and_keeps_later_node(monkeypatch, caplog) -> None:
+    from osm_polygon_eunis import matching
+
+    def broken_union(_geometries):
+        raise ValueError("invalid node union")
+
+    monkeypatch.setattr(matching, "unary_union", broken_union)
+    supports = {
+        "Q111": [
+            OverlapCandidate("Q111", "fine habitat", box(0, 0, 1, 1), error_count=2),
+            OverlapCandidate("Q111", "fine habitat", box(1, 0, 2, 1), error_count=3),
+        ],
+        "R11": [OverlapCandidate("R11", "steppe", box(0, 0, 1, 1))],
+    }
+    errors: list[None] = []
+
+    with caplog.at_level(logging.WARNING, logger=matching.__name__):
+        result = _overlap_areas_by_node(box(0, 0, 1, 1), supports, lambda: errors.append(None))
+
+    assert result == [(1.0, "R11", "steppe")]
+    assert errors == [None, None, None, None, None]
+    assert caplog.messages == [
+        "skipping EUNIS class Q111 after support union error: invalid node union"
+    ]
 
 
 def test_distinct_qualifying_hierarchy_codes_remain_ambiguous() -> None:
@@ -224,6 +272,42 @@ def test_deepest_qualifying_taxonomy_node_wins_over_its_ancestor() -> None:
     )
 
     assert result == EunisResult("Q111", "fine habitat", 80.0, "test")
+
+
+def test_precomputed_class_area_uses_taxonomy_label_and_preserves_unknown_label() -> None:
+    taxonomy = EunisTaxonomy(
+        labels={"Q11": "parent", "Q111": "canonical fine habitat"},
+        levels={"Q11": 2, "Q111": 3},
+        parents={"Q111": "Q11"},
+    )
+
+    assigned = result_from_class_areas(
+        [(100.0, "Q11", "input parent"), (80.0, "Q111", "input child")],
+        100.0,
+        "test",
+        taxonomy=taxonomy,
+    )
+    isolated = result_from_class_areas(
+        [(80.0, "Q999", "input fallback")], 100.0, "test", taxonomy=taxonomy
+    )
+
+    assert assigned == EunisResult("Q111", "canonical fine habitat", 80.0, "test")
+    assert isolated == EunisResult("Q999", "input fallback", 80.0, "test")
+
+
+def test_taxonomy_does_not_accept_precomputed_scalar_support_areas() -> None:
+    taxonomy = EunisTaxonomy({"Q11": "parent"}, {"Q11": 2}, {})
+
+    with pytest.raises(ValueError) as error:
+        choose_winner(
+            box(0, 0, 10, 10),
+            (),
+            source_version="test",
+            extra_areas=[(80.0, "Q11", "parent")],
+            taxonomy=taxonomy,
+        )
+
+    assert str(error.value) == "scalar support areas cannot be rolled up through an EUNIS hierarchy"
 
 
 def test_sibling_supports_union_to_parent_and_count_overlaps_once() -> None:
@@ -334,6 +418,18 @@ def test_exact_intersection_area_of_empty_disjoint_parts_is_zero() -> None:
     assert _exact_intersection_area(box(0, 0, 1, 1), candidate) == 0.0
 
 
+def test_exact_intersection_area_sums_nonempty_disjoint_parts() -> None:
+    polygon = box(0, 0, 3, 2)
+    candidate = OverlapCandidate(
+        "R11",
+        "steppe",
+        GeometryCollection((box(0, 0, 1, 2), box(2, 0, 3, 2))),
+        components_are_disjoint=True,
+    )
+
+    assert _exact_intersection_area(polygon, candidate) == 4.0
+
+
 @pytest.mark.parametrize("area", [-1.0, 0.0])
 def test_intersection_area_omits_nonpositive_results(monkeypatch, area: float) -> None:
     from osm_polygon_eunis import matching
@@ -342,6 +438,21 @@ def test_intersection_area_omits_nonpositive_results(monkeypatch, area: float) -
     candidate = OverlapCandidate("R11", "steppe", box(0, 0, 1, 1))
 
     assert _intersection_area(box(0, 0, 1, 1), candidate, lambda: None) is None
+
+
+def test_intersection_area_reports_unusable_candidate(caplog) -> None:
+    errors: list[None] = []
+    invalid = Polygon([(0, 0), (2, 2), (0, 2), (2, 0), (0, 0)])
+    candidate = OverlapCandidate("R11", "invalid", invalid)
+
+    with caplog.at_level(logging.WARNING):
+        area = _intersection_area(
+            box(0, 0, 1, 1), candidate, lambda: errors.append(None), error_count=2
+        )
+
+    assert area is None
+    assert errors == [None, None]
+    assert caplog.messages == ["skipping unusable EUNIS candidate R11"]
 
 
 def test_intersection_error_reports_every_unioned_support(monkeypatch) -> None:
@@ -538,6 +649,13 @@ def test_exactly_eighty_percent_ambiguous_result_stays_ambiguous_when_merged() -
     assert prefer_result(ambiguous, larger_assignment) == EunisResult(None, None, 90.0, "test")
 
 
+def test_ambiguity_conflict_flag_survives_a_below_threshold_class() -> None:
+    ambiguous = EunisResult(None, None, 85.0, "test")
+    below_threshold = EunisResult("R11", "steppe", 70.0, "test")
+
+    assert _qualifying_classes_conflict(ambiguous, below_threshold)
+
+
 def test_prefer_result_handles_unequal_percentages_and_version_mismatch() -> None:
     current = EunisResult("R11", "current", 25.0, "test")
     candidate = EunisResult("R12", "candidate", 50.0, "test")
@@ -568,6 +686,10 @@ def test_rank_rejects_missing_overlap(percentage) -> None:
         _rank(EunisResult(None, None, percentage, "test"))
 
     assert str(error.value) == "EUNIS rank requires an overlap percentage"
+
+
+def test_rank_uses_an_empty_code_for_a_withheld_result() -> None:
+    assert _rank(EunisResult(None, None, 50.0, "test")) == (50.0, "")
 
 
 def test_prefer_result_rejects_missing_overlap_with_optimized_python() -> None:
@@ -680,7 +802,7 @@ def test_intersection_error_is_reported_and_leaves_result_unchanged(monkeypatch,
     counted_log_count = sum("skipping" in record.getMessage().lower() for record in caplog.records)
     silent = choose_winner(polygon, [bad, good, bad], source_version="test")
 
-    # The failed class overlay drops both same-code source candidates.
+    # The failed class intersection drops both same-code source candidates.
     assert len(errors) == 2
     assert counted == silent == EunisResult(None, None, 40.0, "test")
     assert counted_log_count == 1

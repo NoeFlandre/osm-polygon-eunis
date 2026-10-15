@@ -160,7 +160,7 @@ def _qualifying_codes(class_coverage: dict[str, tuple[float, str]]) -> list[str]
     return [
         code
         for code, (percentage, _name) in class_coverage.items()
-        if percentage >= _MIN_ASSIGNED_PERCENTAGE - _BOUNDARY_TOLERANCE_PERCENTAGE
+        if percentage >= _MIN_ASSIGNED_PERCENTAGE
     ]
 
 

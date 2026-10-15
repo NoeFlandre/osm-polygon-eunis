@@ -88,6 +88,23 @@ def test_reference_manifest_records_classification_workbook_provenance() -> None
     }
 
 
+def test_reference_manifest_uses_config_record_when_taxonomy_has_no_record_id() -> None:
+    taxonomy = EunisTaxonomy({"Q11": "parent"}, {"Q11": 2}, {})
+    group = EeaGroup("record", "title", "folder", "service", {}, (), None, taxonomy=taxonomy)
+
+    manifest = manifest_state.reference_manifest(
+        (group,),
+        {},
+        source_version="EEA-test",
+        crs="EPSG:3035",
+        threshold=80,
+        config={"classification_record": "clc-2018"},
+    )
+
+    taxonomy_manifest = cast(Mapping[str, object], manifest["taxonomy"])
+    assert taxonomy_manifest["record_id"] == "clc-2018"
+
+
 def test_reference_manifest_rejects_mixed_classification_taxonomies() -> None:
     first = EunisTaxonomy({"R11": "steppe"}, {"R11": 1}, {})
     second = EunisTaxonomy({"R11": "dry grassland"}, {"R11": 1}, {})
@@ -96,10 +113,12 @@ def test_reference_manifest_rejects_mixed_classification_taxonomies() -> None:
         EeaGroup("second", "second", "folder", "service", {}, (), None, taxonomy=second),
     )
 
-    with pytest.raises(ValueError, match="one classification taxonomy"):
+    with pytest.raises(ValueError) as error:
         manifest_state.reference_manifest(
             groups, {}, source_version="EEA-test", crs="EPSG:3035", threshold=80, config={}
         )
+
+    assert str(error.value) == "all EEA groups must use one classification taxonomy"
 
 
 @pytest.mark.parametrize(
