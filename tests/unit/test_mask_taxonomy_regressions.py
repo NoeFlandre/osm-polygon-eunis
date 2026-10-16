@@ -132,7 +132,12 @@ def _compression_dataset(
     )
 
 
-def _append_lossy_tiff_directory(path: Path, *, subifd: bool) -> None:
+def _append_lossy_tiff_directory(
+    path: Path,
+    *,
+    subifd: bool,
+    subifd_field_type: int = 4,
+) -> None:
     content = bytearray(path.read_bytes())
     endian = "<" if content[:2] == b"II" else ">"
     assert struct.unpack(f"{endian}H", content[2:4])[0] == 42
@@ -148,7 +153,7 @@ def _append_lossy_tiff_directory(path: Path, *, subifd: bool) -> None:
     if subifd:
         wrapper_offset = align(len(content))
         child_offset = wrapper_offset + 2 + 12 + 4
-        subifd_entry = struct.pack(f"{endian}HHI", 330, 4, 1) + struct.pack(
+        subifd_entry = struct.pack(f"{endian}HHI", 330, subifd_field_type, 1) + struct.pack(
             f"{endian}I", child_offset
         )
         wrapper_ifd = (
@@ -168,6 +173,74 @@ def _append_lossy_tiff_directory(path: Path, *, subifd: bool) -> None:
     content.extend(lossy_ifd)
     content[next_pointer : next_pointer + 4] = struct.pack(f"{endian}I", child_offset)
     path.write_bytes(content)
+
+
+def _append_lossy_tiff_subifd_array(path: Path, *, invalid_payload: bool = False) -> None:
+    content = bytearray(path.read_bytes())
+    endian = "<" if content[:2] == b"II" else ">"
+    first_ifd = struct.unpack(f"{endian}I", content[4:8])[0]
+    wrapper_offset = (len(content) + 3) // 4 * 4
+    array_offset = wrapper_offset + 2 + 12 + 4
+    child_start = array_offset + 3 * 4
+    child_offsets = (child_start, child_start + 18, child_start + 36)
+    payload_offset = len(content) + 64 if invalid_payload else array_offset
+    subifd_entry = struct.pack(f"{endian}HHI", 330, 4, 3) + struct.pack(
+        f"{endian}I", payload_offset
+    )
+    wrapper_ifd = struct.pack(f"{endian}H", 1) + subifd_entry + struct.pack(f"{endian}I", first_ifd)
+    content.extend(b"\0" * (wrapper_offset - len(content)))
+    content.extend(wrapper_ifd)
+    if not invalid_payload:
+        content.extend(struct.pack(f"{endian}3I", *child_offsets))
+        for compression_code in (8, 7, 8):
+            compression_entry = (
+                struct.pack(f"{endian}HHI", 259, 3, 1)
+                + struct.pack(f"{endian}H", compression_code)
+                + b"\0\0"
+            )
+            content.extend(
+                struct.pack(f"{endian}H", 1) + compression_entry + struct.pack(f"{endian}I", 0)
+            )
+    content[4:8] = struct.pack(f"{endian}I", wrapper_offset)
+    path.write_bytes(content)
+
+
+def _append_duplicate_compression_ifd(path: Path) -> None:
+    content = bytearray(path.read_bytes())
+    endian = "<" if content[:2] == b"II" else ">"
+    first_ifd = struct.unpack(f"{endian}I", content[4:8])[0]
+    entry_count = struct.unpack(f"{endian}H", content[first_ifd : first_ifd + 2])[0]
+    next_pointer = first_ifd + 2 + entry_count * 12
+    child_offset = (len(content) + 3) // 4 * 4
+    compression_entry = (
+        struct.pack(f"{endian}HHI", 259, 3, 1) + struct.pack(f"{endian}H", 8) + b"\0\0"
+    )
+    duplicate_ifd = (
+        struct.pack(f"{endian}H", 2)
+        + compression_entry
+        + compression_entry
+        + struct.pack(f"{endian}I", 0)
+    )
+    content.extend(b"\0" * (child_offset - len(content)))
+    content.extend(duplicate_ifd)
+    content[next_pointer : next_pointer + 4] = struct.pack(f"{endian}I", child_offset)
+    path.write_bytes(content)
+
+
+def _replace_first_ifd_next_offset(path: Path, offset: int) -> None:
+    content = bytearray(path.read_bytes())
+    endian = "<" if content[:2] == b"II" else ">"
+    first_ifd = struct.unpack(f"{endian}I", content[4:8])[0]
+    entry_count = struct.unpack(f"{endian}H", content[first_ifd : first_ifd + 2])[0]
+    next_pointer = first_ifd + 2 + entry_count * 12
+    content[next_pointer : next_pointer + 4] = struct.pack(f"{endian}I", offset)
+    path.write_bytes(content)
+
+
+def _write_minimal_bigtiff(path: Path, *, offset_size: int = 8) -> Path:
+    header = b"II" + struct.pack("<HHHQ", 43, offset_size, 0, 16)
+    path.write_bytes(header + struct.pack("<QQ", 0, 0))
+    return path
 
 
 @pytest.mark.parametrize(
@@ -191,6 +264,101 @@ def test_lossy_tiff_overview_is_rejected(
 
     with pytest.raises(ValueError, match="unverified compression"):
         RasterReference._validate_native_mask(dataset, raster)
+
+
+def test_lossy_tiff_out_of_line_subifd_array_is_rejected(tmp_path: Path) -> None:
+    raster = _write_masked_raster(
+        tmp_path / "overview-array.tif", internal_mask=True, compression=None
+    )
+    _append_lossy_tiff_subifd_array(raster)
+
+    with pytest.raises(ValueError, match="unverified compression in a TIFF directory"):
+        RasterReference._validate_native_mask(
+            _compression_dataset("GTiff", None, path=raster),
+            raster,
+        )
+
+
+def test_invalid_subifd_payload_offset_is_rejected(tmp_path: Path) -> None:
+    raster = _write_masked_raster(tmp_path / "invalid-subifd-array.tif", internal_mask=True)
+    _append_lossy_tiff_subifd_array(raster, invalid_payload=True)
+
+    with pytest.raises(ValueError, match="no verifiable compression metadata"):
+        RasterReference._validate_native_mask(
+            _compression_dataset("GTiff", "deflate", path=raster),
+            raster,
+        )
+
+
+def test_unsupported_subifd_type_is_rejected(tmp_path: Path) -> None:
+    raster = _write_masked_raster(tmp_path / "invalid-subifd-type.tif", internal_mask=True)
+    _append_lossy_tiff_directory(raster, subifd=True, subifd_field_type=5)
+
+    with pytest.raises(ValueError, match="no verifiable compression metadata"):
+        RasterReference._validate_native_mask(
+            _compression_dataset("GTiff", "deflate", path=raster),
+            raster,
+        )
+
+
+def test_duplicate_tiff_compression_tags_are_rejected(tmp_path: Path) -> None:
+    raster = _write_masked_raster(tmp_path / "duplicate-compression.tif", internal_mask=True)
+    _append_duplicate_compression_ifd(raster)
+
+    with pytest.raises(ValueError, match="no verifiable compression metadata"):
+        RasterReference._validate_native_mask(
+            _compression_dataset("GTiff", "deflate", path=raster),
+            raster,
+        )
+
+
+def test_tiff_ifd_cycle_is_rejected(tmp_path: Path) -> None:
+    raster = _write_masked_raster(tmp_path / "cyclic-ifd.tif", internal_mask=True)
+    first_ifd = struct.unpack("<I", raster.read_bytes()[4:8])[0]
+    _replace_first_ifd_next_offset(raster, first_ifd)
+
+    with pytest.raises(ValueError, match="no verifiable compression metadata"):
+        RasterReference._validate_native_mask(
+            _compression_dataset("GTiff", "deflate", path=raster),
+            raster,
+        )
+
+
+def test_out_of_bounds_tiff_next_ifd_offset_is_rejected(tmp_path: Path) -> None:
+    raster = _write_masked_raster(tmp_path / "invalid-next-ifd.tif", internal_mask=True)
+    _replace_first_ifd_next_offset(raster, raster.stat().st_size + 1)
+
+    with pytest.raises(ValueError, match="no verifiable compression metadata"):
+        RasterReference._validate_native_mask(
+            _compression_dataset("GTiff", "deflate", path=raster),
+            raster,
+        )
+
+
+def test_bigtiff_uses_the_default_uncompressed_code(tmp_path: Path) -> None:
+    raster = _write_minimal_bigtiff(tmp_path / "default-compression.tif")
+
+    RasterReference._validate_native_mask(
+        _compression_dataset("GTiff", None, path=raster),
+        raster,
+    )
+
+
+def test_bigtiff_with_unsupported_header_is_rejected(tmp_path: Path) -> None:
+    raster = _write_minimal_bigtiff(tmp_path / "unsupported-bigtiff.tif", offset_size=4)
+
+    with pytest.raises(ValueError, match="no verifiable compression metadata"):
+        RasterReference._validate_native_mask(
+            _compression_dataset("GTiff", None, path=raster),
+            raster,
+        )
+
+
+def test_non_string_compression_metadata_is_rejected(tmp_path: Path) -> None:
+    dataset = _compression_dataset("GTiff", object())
+
+    with pytest.raises(ValueError, match="unverified compression: <non-string>"):
+        RasterReference._validate_native_mask(dataset, tmp_path / "not-used.tif")
 
 
 def test_uncompressed_internal_mask_is_accepted_after_tiff_tag_verification(tmp_path: Path) -> None:
