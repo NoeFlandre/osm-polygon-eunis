@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 _MIN_ASSIGNED_PERCENTAGE = 80.0
 _MAX_PERCENTAGE = 100.0
 _BOUNDARY_TOLERANCE_PERCENTAGE = 1e-9
+_NONFINITE_AREA_ERROR = (
+    "class support and polygon areas must be finite, with a positive polygon area"
+)
 
 
 def _ignore_error() -> None:
@@ -147,10 +150,7 @@ def _class_coverages(
 ) -> dict[str, tuple[float, str]]:
     by_code: dict[str, tuple[float, str]] = {}
     for area, code, name in overlaps:
-        if not math.isfinite(area):
-            raise ValueError(
-                "class support and polygon areas must be finite, with a positive polygon area"
-            )
+        _require_finite_support_area(area)
         if area <= 0.0:
             continue
         if code in by_code:
@@ -346,11 +346,14 @@ def _exact_intersection_area(polygon: BaseGeometry, candidate: OverlapCandidate)
     return float(shapely_area(shapely_intersection(polygon, components)).sum())
 
 
+def _require_finite_support_area(area: float) -> None:
+    if not math.isfinite(area):
+        raise ValueError(_NONFINITE_AREA_ERROR)
+
+
 def _percentage(area: float, polygon_area: float) -> float:
     if not _finite_areas(area, polygon_area):
-        raise ValueError(
-            "class support and polygon areas must be finite, with a positive polygon area"
-        )
+        raise ValueError(_NONFINITE_AREA_ERROR)
     percentage = 100.0 * area / polygon_area
     return _bounded_percentage(percentage)
 
