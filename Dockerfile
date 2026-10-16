@@ -12,7 +12,7 @@ COPY src/ src/
 COPY config/ config/
 RUN uv sync --locked --no-dev --no-editable
 
-FROM python:3.12-slim-bookworm@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258 AS runtime
+FROM python:3.15-slim-bookworm@sha256:122756f3fe72c4f5d3d71897888204ee85774bc79de952555b8a474e1d0a5d53 AS runtime
 
 RUN apt-get update \
     && apt-get install --no-install-recommends -y libexpat1 \
