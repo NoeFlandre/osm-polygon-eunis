@@ -93,19 +93,29 @@ def test_precomputed_nonpositive_support_areas_do_not_create_a_class() -> None:
 
 @pytest.mark.parametrize("area", [math.nan, math.inf])
 def test_precomputed_nonfinite_support_areas_are_rejected(area: float) -> None:
-    with pytest.raises(ValueError, match="must be finite"):
+    with pytest.raises(ValueError) as error:
         result_from_class_areas([(area, "R11", "steppe")], 100.0, "test")
+
+    assert str(error.value) == (
+        "class support and polygon areas must be finite, with a positive polygon area"
+    )
 
 
 @pytest.mark.parametrize("polygon_area", [math.nan, math.inf])
 def test_precomputed_nonfinite_polygon_areas_are_rejected(polygon_area: float) -> None:
-    with pytest.raises(ValueError, match="must be finite"):
+    with pytest.raises(ValueError) as error:
         result_from_class_areas([(80.0, "R11", "steppe")], polygon_area, "test")
+
+    assert str(error.value) == (
+        "class support and polygon areas must be finite, with a positive polygon area"
+    )
 
 
 def test_precomputed_support_area_cannot_exceed_the_full_polygon_area() -> None:
-    with pytest.raises(ValueError, match="exceeds polygon area"):
+    with pytest.raises(ValueError) as error:
         result_from_class_areas([(100.1, "R11", "steppe")], 100.0, "test")
+
+    assert str(error.value) == "class support area exceeds polygon area"
 
 
 def test_precomputed_nonpositive_support_does_not_hide_a_later_class() -> None:
@@ -524,14 +534,37 @@ def test_percentage_clamps_only_roundoff_above_full_polygon_area() -> None:
     assert _percentage(math.nextafter(100.0, math.inf), 100.0) == 100.0
 
 
+def test_percentage_clamps_at_the_exact_full_area_tolerance(monkeypatch) -> None:
+    from osm_polygon_eunis import matching
+
+    area = math.nextafter(100.0, math.inf)
+    tolerance = area - 100.0
+    monkeypatch.setattr(matching, "_BOUNDARY_TOLERANCE_PERCENTAGE", tolerance)
+
+    assert _percentage(area, 100.0) == 100.0
+
+
 def test_percentage_rejects_material_area_overrun() -> None:
-    with pytest.raises(ValueError, match="exceeds polygon area"):
+    with pytest.raises(ValueError) as error:
         _percentage(200.0, 100.0)
+
+    assert str(error.value) == "class support area exceeds polygon area"
 
 
 def test_percentage_rejects_overflow_from_finite_areas() -> None:
-    with pytest.raises(ValueError, match="percentage must be finite"):
+    with pytest.raises(ValueError) as error:
         _percentage(1e308, 1e-308)
+
+    assert str(error.value) == "class overlap percentage must be finite"
+
+
+def test_percentage_rejects_zero_polygon_area() -> None:
+    with pytest.raises(ValueError) as error:
+        _percentage(80.0, 0.0)
+
+    assert str(error.value) == (
+        "class support and polygon areas must be finite, with a positive polygon area"
+    )
 
 
 def test_percentage_is_clamped_at_zero_for_negative_area() -> None:
