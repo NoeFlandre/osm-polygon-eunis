@@ -368,5 +368,9 @@ class RasterReference:
     ) -> np.ndarray | None:
         data = dataset.read(1, window=window, masked=True)
         values = np.asarray(data)
-        valid = (~np.ma.getmaskarray(data)) & (values > self._threshold)
-        return valid if valid.any() else None
+        valid = (~np.ma.getmaskarray(data)) & np.isfinite(values)
+        nodata = dataset.nodata
+        if nodata is not None:
+            valid &= values != nodata
+        present = valid & (values > self._threshold)
+        return present if present.any() else None

@@ -201,6 +201,43 @@ def test_native_nodata_value_is_masked_before_habitat_threshold(tmp_path: Path) 
     assert result == EunisResult(None, None, 50.0, "EEA-test")
 
 
+def test_declared_nodata_is_excluded_when_internal_mask_marks_it_valid(tmp_path: Path) -> None:
+    raster = _write_grid_raster(
+        tmp_path / "Prob_R11_100m.tif",
+        [[255, 1]],
+        nodata=255,
+    )
+    with rasterio.Env(GDAL_TIFF_INTERNAL_MASK=True), rasterio.open(raster, "r+") as dataset:
+        dataset.write_mask(np.array([[255, 255]], dtype="uint8"))
+
+    with RasterReference((RasterLayer("R11", "steppe", raster, "EEA-test"),)) as reference:
+        result = reference.overlap(box(0, 0, 2, 1))
+
+    assert result == EunisResult(None, None, 50.0, "EEA-test")
+
+
+def test_nonfinite_raster_values_are_not_habitat(tmp_path: Path) -> None:
+    raster = tmp_path / "Prob_R11_100m.tif"
+    with rasterio.open(
+        raster,
+        "w",
+        driver="GTiff",
+        width=4,
+        height=1,
+        count=1,
+        dtype="float32",
+        crs="EPSG:3035",
+        transform=from_origin(0, 1, 1, 1),
+        nodata=0.0,
+    ) as dataset:
+        dataset.write(np.array([[np.inf, 1.0, np.nan, 0.0]], dtype="float32"), 1)
+
+    with RasterReference((RasterLayer("R11", "steppe", raster, "EEA-test"),)) as reference:
+        result = reference.overlap(box(0, 0, 4, 1))
+
+    assert result == EunisResult(None, None, 25.0, "EEA-test")
+
+
 def test_raster_without_native_validity_mask_fails_closed(tmp_path: Path) -> None:
     raster = _write_grid_raster(
         tmp_path / "Prob_R11_100m.tif",

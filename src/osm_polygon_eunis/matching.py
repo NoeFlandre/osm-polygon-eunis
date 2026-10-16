@@ -1,6 +1,7 @@
 """Select labels from exact intersections with per-code support unions."""
 
 import logging
+import math
 from collections.abc import Callable, Iterable
 from typing import TypeGuard
 
@@ -17,6 +18,7 @@ from .geometry import is_usable
 logger = logging.getLogger(__name__)
 
 _MIN_ASSIGNED_PERCENTAGE = 80.0
+_MAX_PERCENTAGE = 100.0
 _BOUNDARY_TOLERANCE_PERCENTAGE = 1e-9
 
 
@@ -341,7 +343,18 @@ def _exact_intersection_area(polygon: BaseGeometry, candidate: OverlapCandidate)
 
 
 def _percentage(area: float, polygon_area: float) -> float:
-    return max(0.0, min(100.0, 100.0 * area / float(polygon_area)))
+    if not math.isfinite(area) or not math.isfinite(polygon_area) or polygon_area <= 0.0:
+        raise ValueError(
+            "class support and polygon areas must be finite, with a positive polygon area"
+        )
+    percentage = 100.0 * area / float(polygon_area)
+    if not math.isfinite(percentage):
+        raise ValueError("class overlap percentage must be finite")
+    if percentage > _MAX_PERCENTAGE:
+        if percentage - _MAX_PERCENTAGE <= _BOUNDARY_TOLERANCE_PERCENTAGE:
+            return _MAX_PERCENTAGE
+        raise ValueError("class support area exceeds polygon area")
+    return max(0.0, percentage)
 
 
 def prefer_result(current: EunisResult, candidate: EunisResult) -> EunisResult:

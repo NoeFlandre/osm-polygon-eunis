@@ -91,6 +91,17 @@ def test_precomputed_nonpositive_support_areas_do_not_create_a_class() -> None:
     assert result.is_empty
 
 
+@pytest.mark.parametrize("area", [math.nan, math.inf])
+def test_precomputed_nonfinite_support_areas_are_rejected(area: float) -> None:
+    with pytest.raises(ValueError, match="must be finite"):
+        result_from_class_areas([(area, "R11", "steppe")], 100.0, "test")
+
+
+def test_precomputed_support_area_cannot_exceed_the_full_polygon_area() -> None:
+    with pytest.raises(ValueError, match="exceeds polygon area"):
+        result_from_class_areas([(100.1, "R11", "steppe")], 100.0, "test")
+
+
 def test_precomputed_nonpositive_support_does_not_hide_a_later_class() -> None:
     result = result_from_class_areas([(0.0, "R12", "bog"), (80.0, "R11", "steppe")], 100.0, "test")
 
@@ -499,11 +510,17 @@ def test_intersection_error_reports_every_unioned_support(monkeypatch) -> None:
     assert errors == [None, None, None]
 
 
-@pytest.mark.parametrize("area", [0.0, 200.0])
-def test_percentage_is_clamped_at_both_bounds(area: float) -> None:
-    expected = 0.0 if area == 0.0 else 100.0
+def test_percentage_is_clamped_at_zero() -> None:
+    assert _percentage(0.0, 100.0) == 0.0
 
-    assert _percentage(area, 100.0) == expected
+
+def test_percentage_clamps_only_roundoff_above_full_polygon_area() -> None:
+    assert _percentage(math.nextafter(100.0, math.inf), 100.0) == 100.0
+
+
+def test_percentage_rejects_material_area_overrun() -> None:
+    with pytest.raises(ValueError, match="exceeds polygon area"):
+        _percentage(200.0, 100.0)
 
 
 def test_percentage_is_clamped_at_zero_for_negative_area() -> None:
