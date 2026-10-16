@@ -293,19 +293,24 @@ def _iter_classification_taxonomy_records(
 ) -> Iterable[tuple[str, str, int]]:
     current_indexes: tuple[int, int, int] | None = None
     for raw_row in rows:
-        row = tuple(raw_row)
-        if not row:
-            current_indexes = None
-            continue
-        indexes = _classification_taxonomy_indexes(row)
-        if indexes is not None:
-            current_indexes = indexes
-            continue
-        if current_indexes is None:
-            continue
-        record = _classification_taxonomy_record(row, current_indexes)
+        current_indexes, record = _classification_taxonomy_row(raw_row, current_indexes)
         if record is not None:
             yield record
+
+
+def _classification_taxonomy_row(
+    raw_row: Iterable[object],
+    current_indexes: tuple[int, int, int] | None,
+) -> tuple[tuple[int, int, int] | None, tuple[str, str, int] | None]:
+    row = tuple(raw_row)
+    if not row:
+        return None, None
+    indexes = _classification_taxonomy_indexes(row)
+    if indexes is not None:
+        return indexes, None
+    if current_indexes is None:
+        return None, None
+    return current_indexes, _classification_taxonomy_record(row, current_indexes)
 
 
 def _merge_classification_taxonomy_record(
@@ -492,16 +497,20 @@ def _shared_string_value(shared_strings: tuple[str, ...], raw: str) -> str:
 
 
 def _xlsx_rows(archive: ZipFile, shared_strings: tuple[str, ...]) -> Iterable[tuple[str, ...]]:
-    sheet_paths = sorted(
-        path
-        for path in archive.namelist()
-        if path.startswith("xl/worksheets/sheet") and path.endswith(".xml")
-    )
+    sheet_paths = _xlsx_sheet_paths(archive)
     for index, path in enumerate(sheet_paths):
         if index:
             yield ()
         root = _safe_fromstring(archive.read(path))
         yield from _sheet_rows(root, shared_strings)
+
+
+def _xlsx_sheet_paths(archive: ZipFile) -> tuple[str, ...]:
+    return tuple(sorted(filter(_is_xlsx_worksheet_path, archive.namelist())))
+
+
+def _is_xlsx_worksheet_path(path: str) -> bool:
+    return path.startswith("xl/worksheets/sheet") and path.endswith(".xml")
 
 
 def _sheet_rows(
