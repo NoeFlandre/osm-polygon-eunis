@@ -147,6 +147,10 @@ def _class_coverages(
 ) -> dict[str, tuple[float, str]]:
     by_code: dict[str, tuple[float, str]] = {}
     for area, code, name in overlaps:
+        if not math.isfinite(area):
+            raise ValueError(
+                "class support and polygon areas must be finite, with a positive polygon area"
+            )
         if area <= 0.0:
             continue
         if code in by_code:

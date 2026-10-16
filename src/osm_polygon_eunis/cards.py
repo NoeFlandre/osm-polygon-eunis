@@ -416,9 +416,13 @@ class DatasetCardAccumulator:
                 "projection. Polygons spanning more than 180 degrees of longitude, "
                 "collapsed polygons, and non-areal geometries are rejected and counted "
                 "as invalid. Raster TIFFs without a native validity signal are "
-                "rejected, and NoData or masked cells do not count as habitat. "
-                "Raster-tile GeoPackages remain ineligible until source values and "
-                "masks are validated. Out-of-reference polygons receive null EUNIS fields.",
+                "rejected. NoData or masked cells are excluded; valid cells strictly "
+                "above the configured raster-value cutoff contribute binary modeled "
+                "support, not probability-weighted area or observed habitat. This "
+                "source-value cutoff is distinct from the inclusive 80% polygon-area "
+                "gate. Raster-tile GeoPackages remain ineligible until source values, "
+                "masks, and lineage are validated. Out-of-reference polygons receive "
+                "null EUNIS fields.",
                 "",
                 f"Source: `{source_repo}` at `{source_revision}`.",
                 f"Output: `{target_repo}`.",

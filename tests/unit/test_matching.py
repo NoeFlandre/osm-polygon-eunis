@@ -91,7 +91,7 @@ def test_precomputed_nonpositive_support_areas_do_not_create_a_class() -> None:
     assert result.is_empty
 
 
-@pytest.mark.parametrize("area", [math.nan, math.inf])
+@pytest.mark.parametrize("area", [math.nan, math.inf, -math.inf])
 def test_precomputed_nonfinite_support_areas_are_rejected(area: float) -> None:
     with pytest.raises(ValueError) as error:
         result_from_class_areas([(area, "R11", "steppe")], 100.0, "test")

@@ -53,6 +53,14 @@ Below the gate, the code and name are null and the highest measured
 hierarchy-node coverage remains available. Polygons without a valid
 positive-area overlap have null overlap fields.
 
+For raster references, valid cells with values strictly greater than the
+configured `threshold` contribute binary modeled support; their probability
+values are not used as area weights. The EEA 2021 configuration sets this
+source-value cutoff to `0`, so each valid nonzero cell contributes equally. This
+cutoff is separate from the inclusive 80% polygon-area coverage gate. These
+results describe overlap with modeled support, not observed habitat or
+ground-truth occurrence.
+
 The pipeline reads bounded Parquet micro-batches. It uses bounded Arrow batches.
 It streams temporary files. It deletes the source shards after their final
 reference pass. It does not mirror a complete input dataset or output dataset on
@@ -66,11 +74,11 @@ The EEA resolver pins these items in the `eunis/manifest.json` of each target:
 - the SHA-256 checksums of the downloads
 
 Vector GeoPackages remain eligible reference sources. Raster-tile GeoPackages
-are rejected as ground truth until their native raster values and validity
-masks are verified. Raster TIFFs without a native validity signal are rejected;
-NoData and native mask values are excluded before thresholding. The bounded Q11
-source evidence and recovery record is tracked separately in [PR
-#157](https://github.com/NoeFlandre/osm-polygon-eunis/pull/157).
+are rejected as reference sources until their native raster values, validity
+masks, and source lineage are verified. Raster TIFFs without a native validity
+signal are rejected; NoData and native mask values are excluded before
+thresholding. The bounded Q11 source evidence and recovery record is tracked
+separately in [PR #157](https://github.com/NoeFlandre/osm-polygon-eunis/pull/157).
 
 Each output dataset card also contains two items:
 

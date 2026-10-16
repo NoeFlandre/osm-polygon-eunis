@@ -59,8 +59,10 @@ class RasterReference:
         """Prepare raster layers for exact overlap queries.
 
         Args:
-            layers: Probability rasters that share one source version.
-            threshold: Minimum raster value counted as habitat presence.
+            layers: Probability rasters that share one source version. Valid cells
+                above the cutoff define modeled support, not observed habitat.
+            threshold: Strict raster-value cutoff; only values greater than it count
+                as modeled support.
             tile_cache_bytes: Maximum estimated memory retained for tile geometries.
             taxonomy: Verified classification hierarchy used for parent roll-up.
 
