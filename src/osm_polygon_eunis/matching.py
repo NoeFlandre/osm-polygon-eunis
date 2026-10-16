@@ -45,10 +45,12 @@ def choose_winner(
     """Select one exact code from same-code support unions.
 
     The reported percentage uses the full OSM polygon area. A code is assigned
-    only when exactly one per-code union covers at least 80% of that area.
-    ``on_error`` is called for each support candidate dropped because it is
-    unusable or its class union or exact intersection failed. ``extra_areas``
-    must contain at most one pre-unioned ``(area, code, name)`` value per code.
+    only when exactly one qualifying per-code union remains. With a taxonomy,
+    qualifying ancestors are removed when a qualifying descendant exists;
+    without a taxonomy, multiple qualifying codes are ambiguous. ``on_error``
+    is called for each support candidate dropped because it is unusable or its
+    class union or exact intersection failed. ``extra_areas`` must contain at
+    most one pre-unioned ``(area, code, name)`` value per code.
     """
 
     if not _usable_polygon(polygon):
@@ -69,11 +71,12 @@ def result_from_class_areas(
     *,
     taxonomy: EunisTaxonomy | None = None,
 ) -> EunisResult:
-    """Select one exact class from pre-unioned full-polygon support areas.
+    """Select one class from pre-unioned support areas over the full polygon.
 
-    A class is eligible only when its union coverage is at least 80% of the
-    original polygon area. If multiple distinct class codes qualify, the label
-    stays null and the maximum class-union percentage remains in the result.
+    A class qualifies at 80% coverage of the original polygon area. With a
+    taxonomy, qualifying ancestors are removed when a qualifying descendant
+    exists. If no class qualifies or multiple codes remain after pruning, the
+    label stays null and the maximum class-union percentage remains in the result.
     """
     if polygon_area <= 0.0:
         return _empty_result()
@@ -373,7 +376,12 @@ def _bounded_percentage(percentage: float) -> float:
 
 
 def prefer_result(current: EunisResult, candidate: EunisResult) -> EunisResult:
-    """Keep the larger exact-overlap result across streamed reference groups."""
+    """Merge exact-overlap results from streamed reference groups.
+
+    Distinct qualifying codes, or an already ambiguous result, leave the merged
+    code and name unset while preserving the larger measured overlap. Otherwise,
+    the higher-ranked result is kept.
+    """
 
     if current.is_empty:
         return candidate

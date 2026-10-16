@@ -43,7 +43,7 @@ class TiffFileLayout(NamedTuple):
 
 
 def tiff_endian(header: bytes) -> str | None:
-    """Return the TIFF byte-order marker, or None for an invalid header."""
+    """Return the TIFF struct prefix (`<` or `>`), or None for an invalid header."""
     if len(header) < _TIFF_CLASSIC_HEADER_SIZE:
         return None
     if header[:2] == b"II":

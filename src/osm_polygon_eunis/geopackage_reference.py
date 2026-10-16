@@ -112,7 +112,8 @@ class GeoPackageReference(GeoPackageTileMethods):
             path: Read-only GeoPackage path.
             labels: EUNIS code to display-name mapping.
             source_version: Immutable version recorded in output labels.
-            threshold: Minimum raster value counted as habitat presence.
+            threshold: Legacy pixel cutoff for decoder helpers; opening rejects
+                GeoPackages containing raster tiles.
             taxonomy: Verified classification hierarchy used for parent roll-up.
 
         Raises:
@@ -134,7 +135,7 @@ class GeoPackageReference(GeoPackageTileMethods):
         self._tile_cache: OrderedDict[tuple[str, int, int], BaseGeometry | None] = OrderedDict()
 
     def __enter__(self) -> GeoPackageReference:
-        """Open the GeoPackage and validate its geometry or tile layers."""
+        """Open read-only, validate geometry layers, and reject raster-tile sources."""
         if self._connection is not None:
             raise RuntimeError("GeoPackage reference is already open")
         connection = sqlite3.connect(f"file:{self._path}?mode=ro", uri=True)

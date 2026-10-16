@@ -1,4 +1,5 @@
-# ruff: noqa: D100
+"""Build stable signatures for resumable geometry-processing checkpoints."""
+
 from __future__ import annotations
 
 import hashlib

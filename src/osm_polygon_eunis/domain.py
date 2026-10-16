@@ -55,7 +55,7 @@ class EunisTaxonomy:
     source_sha256: str | None = None
 
     def __post_init__(self) -> None:
-        """Require labels for every node that hierarchy scoring can emit."""
+        """Require display labels for every code declared in this taxonomy."""
         taxonomy_codes = set(self.levels) | set(self.parents) | set(self.parents.values())
         missing = sorted(
             code

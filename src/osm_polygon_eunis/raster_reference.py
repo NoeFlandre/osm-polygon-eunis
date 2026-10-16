@@ -29,6 +29,8 @@ from .matching import choose_winner, result_from_class_areas
 from .raster_geometry import is_epsg_3035, wgs84_envelope  # noqa: F401
 from .raster_validation import validate_native_mask
 
+# Preserve the raster_reference.wgs84_envelope compatibility import.
+
 RasterLayer = raster_aggregation.RasterLayer
 parse_layer_code = raster_aggregation.parse_layer_code
 _RasterClass = raster_aggregation.RasterClass
@@ -174,7 +176,11 @@ class RasterReference:
         self.intersection_errors += 1
 
     def overlap(self, polygon: BaseGeometry | None) -> EunisResult:
-        """Return the dominant label, withholding code and name below the assignment threshold."""
+        """Return the unique class label meeting the 80% threshold, if any.
+
+        The code and name remain unset when no class qualifies or qualifying classes
+        are ambiguous. A measured overlap percentage is retained in either case.
+        """
 
         if not is_usable(polygon):
             return choose_winner(
