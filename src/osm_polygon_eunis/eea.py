@@ -294,6 +294,9 @@ def _iter_classification_taxonomy_records(
     current_indexes: tuple[int, int, int] | None = None
     for raw_row in rows:
         row = tuple(raw_row)
+        if not row:
+            current_indexes = None
+            continue
         indexes = _classification_taxonomy_indexes(row)
         if indexes is not None:
             current_indexes = indexes
@@ -494,7 +497,9 @@ def _xlsx_rows(archive: ZipFile, shared_strings: tuple[str, ...]) -> Iterable[tu
         for path in archive.namelist()
         if path.startswith("xl/worksheets/sheet") and path.endswith(".xml")
     )
-    for path in sheet_paths:
+    for index, path in enumerate(sheet_paths):
+        if index:
+            yield ()
         root = _safe_fromstring(archive.read(path))
         yield from _sheet_rows(root, shared_strings)
 

@@ -151,6 +151,39 @@ def test_parse_classification_workbook_reads_shared_strings() -> None:
     assert parse_classification_workbook(workbook.getvalue()) == {"R11": "Pannonian steppe"}
 
 
+def test_classification_taxonomy_headers_do_not_leak_between_sheets() -> None:
+    workbook = io.BytesIO()
+    with zipfile.ZipFile(workbook, "w") as archive:
+        archive.writestr(
+            "xl/sharedStrings.xml",
+            '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            "<si><t>Level</t></si><si><t>Code</t></si><si><t>Name</t></si>"
+            "<si><t>1</t></si><si><t>N</t></si><si><t>Coastal habitats</t></si>"
+            "<si><t>Name 2021</t></si><si><t>R11</t></si><si><t>Other note</t></si></sst>",
+        )
+        archive.writestr(
+            "xl/worksheets/sheet1.xml",
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            '<sheetData><row r="1"><c r="A1" t="s"><v>0</v></c>'
+            '<c r="B1" t="s"><v>1</v></c><c r="C1" t="s"><v>2</v></c></row>'
+            '<row r="2"><c r="A2" t="s"><v>3</v></c>'
+            '<c r="B2" t="s"><v>4</v></c><c r="C2" t="s"><v>5</v></c>'
+            "</row></sheetData></worksheet>",
+        )
+        archive.writestr(
+            "xl/worksheets/sheet2.xml",
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            '<sheetData><row r="1"><c r="A1" t="s"><v>6</v></c>'
+            '<c r="B1" t="s"><v>7</v></c><c r="C1" t="s"><v>8</v></c>'
+            "</row></sheetData></worksheet>",
+        )
+
+    taxonomy = eea._parse_classification_taxonomy_workbook(workbook.getvalue(), None)
+
+    assert taxonomy.labels == {"N": "Coastal habitats"}
+    assert taxonomy.levels == {"N": 1}
+
+
 def test_classification_entry_selection_decodes_webdav_path() -> None:
     entries = (
         WebDavEntry("/other.xlsx", "https://example.test/other.xlsx", 1, None, False),
