@@ -343,11 +343,19 @@ def _exact_intersection_area(polygon: BaseGeometry, candidate: OverlapCandidate)
 
 
 def _percentage(area: float, polygon_area: float) -> float:
-    if not math.isfinite(area) or not math.isfinite(polygon_area) or polygon_area <= 0.0:
+    if not _finite_areas(area, polygon_area):
         raise ValueError(
             "class support and polygon areas must be finite, with a positive polygon area"
         )
-    percentage = 100.0 * area / float(polygon_area)
+    percentage = 100.0 * area / polygon_area
+    return _bounded_percentage(percentage)
+
+
+def _finite_areas(area: float, polygon_area: float) -> bool:
+    return math.isfinite(area) and math.isfinite(polygon_area) and polygon_area > 0.0
+
+
+def _bounded_percentage(percentage: float) -> float:
     if not math.isfinite(percentage):
         raise ValueError("class overlap percentage must be finite")
     if percentage > _MAX_PERCENTAGE:

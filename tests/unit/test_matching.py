@@ -97,6 +97,12 @@ def test_precomputed_nonfinite_support_areas_are_rejected(area: float) -> None:
         result_from_class_areas([(area, "R11", "steppe")], 100.0, "test")
 
 
+@pytest.mark.parametrize("polygon_area", [math.nan, math.inf])
+def test_precomputed_nonfinite_polygon_areas_are_rejected(polygon_area: float) -> None:
+    with pytest.raises(ValueError, match="must be finite"):
+        result_from_class_areas([(80.0, "R11", "steppe")], polygon_area, "test")
+
+
 def test_precomputed_support_area_cannot_exceed_the_full_polygon_area() -> None:
     with pytest.raises(ValueError, match="exceeds polygon area"):
         result_from_class_areas([(100.1, "R11", "steppe")], 100.0, "test")
@@ -521,6 +527,11 @@ def test_percentage_clamps_only_roundoff_above_full_polygon_area() -> None:
 def test_percentage_rejects_material_area_overrun() -> None:
     with pytest.raises(ValueError, match="exceeds polygon area"):
         _percentage(200.0, 100.0)
+
+
+def test_percentage_rejects_overflow_from_finite_areas() -> None:
+    with pytest.raises(ValueError, match="percentage must be finite"):
+        _percentage(1e308, 1e-308)
 
 
 def test_percentage_is_clamped_at_zero_for_negative_area() -> None:
