@@ -129,7 +129,9 @@ def _class_label(
     taxonomy: EunisTaxonomy | None,
 ) -> str | None:
     if taxonomy is not None:
-        return taxonomy.labels.get(code)
+        name = taxonomy.labels.get(code)
+        if name is not None:
+            return name
     names = names_by_code.get(code, set())
     if _has_conflicting_names(names):
         return None

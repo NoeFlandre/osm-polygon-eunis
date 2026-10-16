@@ -209,7 +209,7 @@ def _append_support_to_taxonomy_nodes(
         else (candidate.code,)
     )
     for node in nodes:
-        name = taxonomy.labels[node] if taxonomy is not None else candidate.name
+        name = taxonomy.labels.get(node, candidate.name) if taxonomy is not None else candidate.name
         by_node.setdefault(node, []).append(
             OverlapCandidate(
                 node,

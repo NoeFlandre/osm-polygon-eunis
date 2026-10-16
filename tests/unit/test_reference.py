@@ -553,6 +553,32 @@ def test_geopackage_reference_uses_rtree_as_candidate_filter(tmp_path: Path) -> 
     assert result.overlap_percentage == 100.0
 
 
+def test_geopackage_keeps_unmapped_taxonomy_code_as_an_isolated_root(tmp_path: Path) -> None:
+    database = tmp_path / "saltmarshes.gpkg"
+    taxonomy = EunisTaxonomy(
+        labels={"MA223": "configured saltmarsh root"},
+        levels={},
+        parents={},
+    )
+    reference = GeoPackageReference(
+        database,
+        {"MA221": "Atlantic saltmarsh driftlines"},
+        source_version="EEA-test",
+        taxonomy=taxonomy,
+    )
+    _write_geopackage(database, (("MA221", box(0, 0, 10, 10)),))
+
+    with reference:
+        result = reference.overlap(box(0, 0, 10, 10))
+
+    assert result == EunisResult(
+        "MA221",
+        "Atlantic saltmarsh driftlines",
+        100.0,
+        "EEA-test",
+    )
+
+
 def test_geopackage_unions_disjoint_features_of_the_same_class(tmp_path: Path) -> None:
     database = tmp_path / "habitats.gpkg"
     reference = GeoPackageReference(
@@ -572,6 +598,29 @@ def test_geopackage_unions_disjoint_features_of_the_same_class(tmp_path: Path) -
         result = reference.overlap(box(0, 0, 10, 10))
 
     assert result == EunisResult("Q111", "Fine habitat", 85.0, "EEA-test")
+
+
+def test_raster_reference_uses_source_label_for_unmapped_taxonomy_root(tmp_path: Path) -> None:
+    raster = _write_raster(tmp_path / "Prob_MA221_100m.tif", [[1]])
+    taxonomy = EunisTaxonomy(
+        labels={"MA223": "configured saltmarsh root"},
+        levels={},
+        parents={},
+    )
+    reference = RasterReference(
+        (RasterLayer("MA221", "Atlantic saltmarsh driftlines", raster, "EEA-test"),),
+        taxonomy=taxonomy,
+    )
+
+    with reference:
+        result = reference.overlap(box(1, 11, 9, 19))
+
+    assert result == EunisResult(
+        "MA221",
+        "Atlantic saltmarsh driftlines",
+        100.0,
+        "EEA-test",
+    )
 
 
 def test_raster_reference_keeps_multiple_qualifying_classes_ambiguous(tmp_path: Path) -> None:
