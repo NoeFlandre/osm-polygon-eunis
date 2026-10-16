@@ -335,6 +335,22 @@ def test_precomputed_class_area_uses_taxonomy_label_and_preserves_unknown_label(
     assert isolated == EunisResult("Q999", "input fallback", 80.0, "test")
 
 
+def test_unknown_taxonomy_root_keeps_the_candidate_label() -> None:
+    taxonomy = EunisTaxonomy(
+        labels={"MA223": "configured saltmarsh root"},
+        levels={},
+        parents={},
+    )
+    result = choose_winner(
+        box(0, 0, 10, 10),
+        [OverlapCandidate("MA221", "Atlantic saltmarsh driftlines", box(0, 0, 10, 10))],
+        source_version="test",
+        taxonomy=taxonomy,
+    )
+
+    assert result == EunisResult("MA221", "Atlantic saltmarsh driftlines", 100.0, "test")
+
+
 def test_taxonomy_does_not_accept_precomputed_scalar_support_areas() -> None:
     taxonomy = EunisTaxonomy({"Q11": "parent"}, {"Q11": 2}, {})
 
