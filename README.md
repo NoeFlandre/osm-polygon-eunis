@@ -11,6 +11,13 @@ qualifying node remains after hierarchy roll-up and its coverage is at least
 80%; the boundary is inclusive. Multiple qualifying sibling classes are
 ambiguous. The percentage is measured over the full OSM polygon area.
 
+The 80% coverage rule uses the full original OSM polygon area, including
+uncovered and NoData areas. It is separate from the EEA source-value cutoff.
+
+At `threshold: 0`, valid raster cells contribute binary modeled support only
+when their values are greater than zero. The scientific status of this cutoff
+remains provisional pending source evaluation.
+
 The three output repositories are the intended release targets. Treat a dataset
 as published only after you verify these items independently:
 

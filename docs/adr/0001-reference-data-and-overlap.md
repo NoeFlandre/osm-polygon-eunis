@@ -15,6 +15,13 @@ retain their maximum coverage. Below 80%, withhold the code and name but keep
 the highest measured hierarchy-node coverage. A polygon with no valid
 positive-area intersection receives null overlap fields.
 
+The 80% coverage rule uses the full original OSM polygon area, including
+uncovered and NoData areas. It is separate from the EEA source-value cutoff.
+
+At `threshold: 0`, valid raster cells contribute modeled support only when their
+values are greater than zero. The scientific status of this cutoff remains
+provisional pending source evaluation.
+
 Vector GeoPackages are queried as indexed feature layers. Raster-tile
 GeoPackages are refused as ground truth until their source values and validity
 masks are verified. Keep the bounded Q11 source evidence and recovery record in
