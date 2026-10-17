@@ -21,6 +21,10 @@ dependencies = [
 osm-polygon-eunis = "osm_polygon_eunis.cli:main"
 
 [dependency-groups]
+census = [
+  "duckdb>=1,<2",
+  "h3>=4,<5",
+]
 dev = [
   "coverage[toml]>=7.6,<8",
   "hypothesis>=6.120,<7",

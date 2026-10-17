@@ -27,6 +27,7 @@ from scripts.eunis_geometry_census_sources import (
 )
 from scripts.eunis_geometry_first_census import (
     _annotate_geometry_rows,
+    _parse_production_geometry,
     _validate_native_inventory,
 )
 
@@ -403,21 +404,36 @@ def test_wiki_uniqueness_counts_links_before_project_hash_and_geometry_filters()
     assert "geometry IS NOT NULL" in sql[filtered_where:]
 
 
-def test_geometry_row_annotation_is_lazy(monkeypatch) -> None:
-    import scripts.eunis_geometry_first_census as runner
-
-    monkeypatch.setattr(runner, "_geometry", lambda value: value)
+def test_geometry_row_annotation_is_lazy() -> None:
     consumed: list[int] = []
+    raw_geometry = "not-json"
 
     def rows():
         consumed.append(1)
-        yield {"geometry": type("Geometry", (), {"geom_type": "Polygon"})()}
+        yield {"geometry": raw_geometry}
 
     annotated = _annotate_geometry_rows(rows(), stream="website", raw_urls=("raw-url",))
     assert consumed == []
     row = next(iter(annotated))
     assert consumed == [1]
+    assert row["geometry"] == raw_geometry
     assert row["_raw_polygon_url"] == "raw-url"
+
+
+def test_census_uses_production_geometry_repair_and_malformed_policy() -> None:
+    bowtie = json.dumps(
+        {
+            "type": "Polygon",
+            "coordinates": [[[0, 0], [2, 2], [0, 2], [2, 0], [0, 0]]],
+        }
+    )
+
+    repaired = _parse_production_geometry(bowtie)
+
+    assert repaired is not None
+    assert repaired.is_valid
+    assert repaired.area == 2.0
+    assert _parse_production_geometry("not-json") is None
 
 
 def test_region_runner_keeps_geometry_cursor_live_during_text_fetch(  # noqa: C901
@@ -427,7 +443,6 @@ def test_region_runner_keeps_geometry_cursor_live_during_text_fetch(  # noqa: C9
 
     import scripts.eunis_geometry_first_census as runner
 
-    monkeypatch.setattr(runner, "_geometry", lambda value: value)
     monkeypatch.setattr(
         runner,
         "_json_row",
@@ -442,6 +457,7 @@ def test_region_runner_keeps_geometry_cursor_live_during_text_fetch(  # noqa: C9
     monkeypatch.setattr(runner, "_load_completed_region", lambda *args: None)
     monkeypatch.setattr(runner, "_write_new_json", lambda *args: None)
     geometry_module = ModuleType("osm_polygon_eunis.geometry")
+    monkeypatch.setattr(geometry_module, "parse_geometry", lambda geometry: geometry, raising=False)
     monkeypatch.setattr(geometry_module, "to_equal_area", lambda geometry: geometry, raising=False)
     package_module = ModuleType("osm_polygon_eunis")
     package_module.__path__ = []
@@ -599,7 +615,7 @@ def test_run_resume_signature_includes_algorithm_and_code_fingerprint(
     first: dict[str, object] = {
         "created_at_utc": "first-time",
         "algorithm_fingerprint": {
-            "algorithm_version": "geometry-first-v2",
+            "algorithm_version": "geometry-first-v3",
             "assignment_gate": "unique >=80%",
             "code_sha256": "code-a",
         },
@@ -854,16 +870,21 @@ def test_httpfs_preflight_requires_an_existing_extension_without_installing() ->
     from scripts.eunis_geometry_first_census import _load_httpfs
 
     class Database:
-        statements: list[str]
-
-        def __init__(self) -> None:
+        def __init__(self, *, installed: bool) -> None:
             self.statements = []
+            self.installed = installed
 
-        def execute(self, statement: str) -> None:
+        def execute(self, statement: str) -> Database:
             self.statements.append(statement)
-            raise OSError("missing extension")
+            if statement.startswith("LOAD "):
+                raise OSError("missing extension")
 
-    database = Database()
+            return self
+
+        def fetchone(self) -> tuple[bool]:
+            return (self.installed,)
+
+    database = Database(installed=False)
     try:
         _load_httpfs(database)
     except RuntimeError as error:
@@ -871,4 +892,28 @@ def test_httpfs_preflight_requires_an_existing_extension_without_installing() ->
         assert "does not install extensions" in str(error)
     else:
         raise AssertionError("missing httpfs extension must fail before source access")
-    assert database.statements == ["LOAD httpfs"]
+    assert database.statements == [
+        "SET autoinstall_known_extensions=false",
+        "SET autoload_known_extensions=false",
+        "SELECT installed FROM duckdb_extensions() WHERE extension_name='httpfs'",
+    ]
+
+
+def test_httpfs_is_loaded_only_after_installed_status_is_verified() -> None:
+    from scripts.eunis_geometry_first_census import _load_httpfs
+
+    class Database:
+        def __init__(self) -> None:
+            self.statements = []
+
+        def execute(self, statement: str) -> Database:
+            self.statements.append(statement)
+            return self
+
+        def fetchone(self) -> tuple[bool]:
+            return (True,)
+
+    database = Database()
+    _load_httpfs(database)
+
+    assert database.statements[-1] == "LOAD httpfs"

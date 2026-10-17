@@ -37,7 +37,6 @@ from .eunis_geometry_census_sources import (
     RAW_PINS,
     SOURCE_VERSION,
     TARGET,
-    _geometry,
     _geometry_parameters,
     _geometry_rows,
     _json_row,
@@ -53,7 +52,7 @@ def _source_streams(source: str) -> tuple[str, ...]:
     return ("wikipedia", "wikivoyage") if source == "wiki" else (source,)
 
 
-_CENSUS_ALGORITHM_VERSION = "geometry-first-v2"
+_CENSUS_ALGORITHM_VERSION = "geometry-first-v3"
 _ASSIGNMENT_GATE = (
     "unique production assignment with inclusive "
     f">={MINIMUM_NATIVE_OVERLAP_PERCENTAGE:g}% polygon coverage"
@@ -104,6 +103,22 @@ def _unique_text_mapping(
 
 def _load_httpfs(db: Any) -> None:
     """Require an already available httpfs extension without installing it."""
+    try:
+        db.execute("SET autoinstall_known_extensions=false")
+        db.execute("SET autoload_known_extensions=false")
+        extension = db.execute(
+            "SELECT installed FROM duckdb_extensions() WHERE extension_name='httpfs'"
+        ).fetchone()
+    except Exception as error:
+        raise RuntimeError(
+            "could not verify DuckDB's httpfs extension cache; "
+            "the census does not install extensions"
+        ) from error
+    if extension is None or extension[0] is not True:
+        raise RuntimeError(
+            "DuckDB's httpfs extension must already be available in its configured "
+            "extension cache; the census does not install extensions"
+        )
     try:
         db.execute("LOAD httpfs")
     except Exception as error:
@@ -312,13 +327,19 @@ def _annotate_geometry_rows(
 ) -> Any:
     """Attach text-fetch URLs without materializing the bounded row stream."""
     for row in rows:
-        row["geometry"] = _geometry(row["geometry"])
         if stream == "website":
             row["_raw_polygon_url"] = raw_urls[0]
         else:
             row["_raw_text_url"] = raw_urls[0]
             row["_raw_polygon_url"] = raw_urls[1]
         yield row
+
+
+def _parse_production_geometry(value: object) -> Any:
+    """Apply the production parser's repair and malformed-input policy."""
+    from osm_polygon_eunis.geometry import parse_geometry  # noqa: PLC0415
+
+    return parse_geometry(value)
 
 
 def _prepare_run(
@@ -379,8 +400,8 @@ def _process_region(  # noqa: C901, PLR0913, PLR0915
     def classify(value: object) -> Any:
         from osm_polygon_eunis.geometry import to_equal_area  # noqa: PLC0415
 
-        geometry = _geometry(value)
-        if geometry.is_empty or not geometry.is_valid:
+        geometry = _parse_production_geometry(value)
+        if geometry is None or geometry.is_empty or not geometry.is_valid:
             counts.invalid_geometry_rows += 1
             return None
         if not geometry.intersects(native_extent):
@@ -512,14 +533,13 @@ def main() -> int:  # noqa: C901, PLR0912, PLR0915
 
     sys.path.insert(0, str((args.source_root / "src").resolve()))
     duckdb = import_module("duckdb")
-    from shapely.geometry import box  # noqa: PLC0415
-
     from osm_polygon_eunis.domain import EunisTaxonomy  # noqa: PLC0415
     from osm_polygon_eunis.raster_aggregation import (  # noqa: PLC0415
         RasterLayer,
         parse_layer_code,
     )
     from osm_polygon_eunis.raster_reference import RasterReference  # noqa: PLC0415
+    from shapely.geometry import box  # noqa: PLC0415
 
     with args.taxonomy.open(encoding="utf-8") as stream:
         taxonomy_doc = json.load(stream)
