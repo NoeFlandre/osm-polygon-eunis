@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 
+__all__ = [
+    "require_exact_asset_scope",
+    "select_assets_for_codes",
+]
+
 NativeAssetRecord = Mapping[str, object]
 
 
