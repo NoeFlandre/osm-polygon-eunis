@@ -81,8 +81,7 @@ def _label_paths(stream: str) -> list[str]:
         parsed_url = urllib.parse.urlsplit(url)
         if parsed_url.scheme != "https" or parsed_url.hostname != "huggingface.co":
             raise ValueError(f"unexpected pinned label URL: {url}")
-        request = urllib.request.Request(url, headers={"Accept": "application/json"})  # noqa: S310
-        with urllib.request.urlopen(request, timeout=45) as response:  # noqa: S310
+        with urllib.request.urlopen(url, timeout=45) as response:  # noqa: S310
             payload = json.load(response)
             next_url = _next_page(response.headers.get("Link", ""), payload)
         entries = payload if isinstance(payload, list) else payload.get("items")

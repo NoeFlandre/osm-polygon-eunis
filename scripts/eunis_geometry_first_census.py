@@ -206,6 +206,7 @@ def _validate_downloaded_native_asset(  # noqa: C901, PLR0913
     taxonomy_labels: Mapping[str, object],
     parse_layer_code: Any,
     seen_codes: set[str],
+    *,
     resolved_paths: set[Path],
 ) -> tuple[Mapping[str, object], Path, int]:
     if not isinstance(asset, dict):
@@ -290,7 +291,7 @@ def _validate_native_inventory(  # noqa: PLR0913
             taxonomy_labels,
             parse_layer_code,
             seen_codes,
-            resolved_paths,
+            resolved_paths=resolved_paths,
         )
         actual_total += size
         validated.append((record, path))
@@ -511,13 +512,14 @@ def main() -> int:  # noqa: C901, PLR0912, PLR0915
 
     sys.path.insert(0, str((args.source_root / "src").resolve()))
     duckdb = import_module("duckdb")
+    from shapely.geometry import box  # noqa: PLC0415
+
     from osm_polygon_eunis.domain import EunisTaxonomy  # noqa: PLC0415
     from osm_polygon_eunis.raster_aggregation import (  # noqa: PLC0415
         RasterLayer,
         parse_layer_code,
     )
     from osm_polygon_eunis.raster_reference import RasterReference  # noqa: PLC0415
-    from shapely.geometry import box  # noqa: PLC0415
 
     with args.taxonomy.open(encoding="utf-8") as stream:
         taxonomy_doc = json.load(stream)
