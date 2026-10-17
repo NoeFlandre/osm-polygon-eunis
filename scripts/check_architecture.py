@@ -18,6 +18,7 @@ MODULES = {
 LAYERS = (
     "_protocols",
     "domain",
+    "native_asset_scope",
     "options",
     "fileio",
     "geometry",
