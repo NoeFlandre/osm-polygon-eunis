@@ -370,6 +370,46 @@ def _prepare_run(
     return signature
 
 
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be an integer greater than zero") from error
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be an integer greater than zero")
+    return parsed
+
+
+def _run_region_checkpoints(
+    regions: Sequence[tuple[str, str, str]],
+    *,
+    output_dir: Path,
+    max_new_regions: int | None,
+    process_region: Any,
+    index_region: Any,
+) -> tuple[int, int, int]:
+    """Visit and reindex completed checkpoints, bounding only new completions."""
+    newly_completed = 0
+    visited = 0
+    unvisited = 0
+    for source, stream, label_path in regions:
+        shard = label_path.rsplit("/", 1)[-1].removesuffix("-latest.parquet")
+        checkpoint = output_dir / "checkpoints" / stream / f"{shard}.json"
+        output = output_dir / "regions" / stream / f"{shard}.jsonl"
+        existed = checkpoint.exists()
+        if not existed and max_new_regions is not None and newly_completed >= max_new_regions:
+            if output.exists() or output.with_name(output.name + ".partial").exists():
+                raise FileExistsError(f"region output exists without a checkpoint: {output}")
+            unvisited += 1
+            continue
+        payload = process_region(source, stream, label_path)
+        index_region(source, output_dir / "regions" / stream / f"{payload['shard']}.jsonl")
+        visited += 1
+        if not existed:
+            newly_completed += 1
+    return newly_completed, visited, unvisited
+
+
 def _process_region(  # noqa: C901, PLR0913, PLR0915
     db: Any,
     output_dir: Path,
@@ -488,7 +528,7 @@ def _process_region(  # noqa: C901, PLR0913, PLR0915
     return checkpoint_payload
 
 
-def main() -> int:  # noqa: C901, PLR0912, PLR0915
+def main() -> int:  # noqa: C901, PLR0915
     """Run the bounded census over the selected pinned sources."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -524,6 +564,11 @@ def main() -> int:  # noqa: C901, PLR0912, PLR0915
         default=("website", "description", "wiki"),
     )
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--max-new-regions",
+        type=_positive_int,
+        help="stop before the next uncheckpointed region after this many new checkpoints",
+    )
     args = parser.parse_args()
     if not args.temp_dir.is_dir():
         raise SystemExit("--temp-dir must already exist as job-local scratch")
@@ -635,6 +680,12 @@ def main() -> int:  # noqa: C901, PLR0912, PLR0915
     db.execute("SET enable_progress_bar=false")
     run_signature = _prepare_run(args.output_dir, run_payload, resume=args.resume)
     index = _open_index(args.output_dir / "eligible-index.sqlite")
+    regions = tuple(
+        (source, stream, label_path)
+        for source in args.sources
+        for stream in _source_streams(source)
+        for label_path in path_inventory[stream]
+    )
     with RasterReference(
         tuple(layers),
         threshold=0,
@@ -644,52 +695,69 @@ def main() -> int:  # noqa: C901, PLR0912, PLR0915
         if reference.source_extent_wgs84 is None:
             raise ValueError("native EEA source extent is unavailable")
         native_extent = box(*reference.source_extent_wgs84)
-        for source in args.sources:
-            for stream in _source_streams(source):
-                label_repo, label_revision = LABEL_PINS[stream]
-                raw_repo, raw_revision = RAW_PINS[stream]
-                for label_path in path_inventory[stream]:
-                    filename = label_path.rsplit("/", 1)[-1]
-                    raw_paths = _raw_paths(stream, filename)
-                    raw_urls = tuple(_url(raw_repo, raw_revision, path) for path in raw_paths)
-                    payload = _process_region(
-                        db,
-                        args.output_dir,
-                        source=source,
-                        stream=stream,
-                        label_path=label_path,
-                        label_url=_url(label_repo, label_revision, label_path),
-                        raw_paths=raw_paths,
-                        raw_urls=raw_urls,
-                        run_signature=run_signature,
-                        reference=reference,
-                        native_extent=native_extent,
-                    )
-                    _index_region(
-                        index,
-                        source,
-                        args.output_dir / "regions" / stream / f"{payload['shard']}.jsonl",
-                    )
-                    print(
-                        json.dumps(
-                            {
-                                "source": source,
-                                "stream": stream,
-                                "shard": payload["shard"],
-                                "checkpoint": str(
-                                    args.output_dir
-                                    / "checkpoints"
-                                    / stream
-                                    / f"{payload['shard']}.json"
-                                ),
-                                "candidate_rows": payload["candidate_rows"],
-                                "output_sha256": payload["output_sha256"],
-                            },
-                            sort_keys=True,
+
+        def process_region(source: str, stream: str, label_path: str) -> dict[str, object]:
+            label_repo, label_revision = LABEL_PINS[stream]
+            raw_repo, raw_revision = RAW_PINS[stream]
+            filename = label_path.rsplit("/", 1)[-1]
+            raw_paths = _raw_paths(stream, filename)
+            raw_urls = tuple(_url(raw_repo, raw_revision, path) for path in raw_paths)
+            payload = _process_region(
+                db,
+                args.output_dir,
+                source=source,
+                stream=stream,
+                label_path=label_path,
+                label_url=_url(label_repo, label_revision, label_path),
+                raw_paths=raw_paths,
+                raw_urls=raw_urls,
+                run_signature=run_signature,
+                reference=reference,
+                native_extent=native_extent,
+            )
+            print(
+                json.dumps(
+                    {
+                        "source": source,
+                        "stream": stream,
+                        "shard": payload["shard"],
+                        "checkpoint": str(
+                            args.output_dir / "checkpoints" / stream / f"{payload['shard']}.json"
                         ),
-                        flush=True,
-                    )
+                        "candidate_rows": payload["candidate_rows"],
+                        "output_sha256": payload["output_sha256"],
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+            return payload
+
+        newly_completed, visited, unvisited = _run_region_checkpoints(
+            regions,
+            output_dir=args.output_dir,
+            max_new_regions=args.max_new_regions,
+            process_region=process_region,
+            index_region=lambda source, output: _index_region(index, source, output),
+        )
     summary = _summary(index, args.sources)
+    if unvisited:
+        print(
+            json.dumps(
+                {
+                    "status": "incomplete",
+                    "newly_completed_regions": newly_completed,
+                    "visited_regions": visited,
+                    "unvisited_regions": unvisited,
+                    "summary": summary,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        index.close()
+        db.close()
+        return 0
     completion = {
         "run_signature": run_signature,
         "completed_at_utc": datetime.now(UTC).isoformat(),

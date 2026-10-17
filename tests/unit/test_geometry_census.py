@@ -28,6 +28,7 @@ from scripts.eunis_geometry_census_sources import (
 from scripts.eunis_geometry_first_census import (
     _annotate_geometry_rows,
     _parse_production_geometry,
+    _run_region_checkpoints,
     _validate_native_inventory,
 )
 
@@ -864,6 +865,110 @@ def test_partial_region_artifact_is_preserved_and_resume_fails_closed(
     else:
         raise AssertionError("orphan partial region should prevent unsafe resume")
     assert partial.read_text(encoding="utf-8") == "unfinished\n"
+
+
+def test_region_budget_resumes_same_output_and_counts_only_new_checkpoints(
+    tmp_path: Path,
+) -> None:
+    regions = [("website", "website", f"labels/{name}-latest.parquet") for name in "abcd"]
+    created: list[str] = []
+    indexed: list[str] = []
+
+    def process(source: str, stream: str, label_path: str) -> dict[str, object]:
+        assert source == "website"
+        shard = label_path.rsplit("/", 1)[-1].removesuffix("-latest.parquet")
+        output = tmp_path / "regions" / stream / f"{shard}.jsonl"
+        checkpoint = tmp_path / "checkpoints" / stream / f"{shard}.json"
+        if checkpoint.exists():
+            return cast(dict[str, object], _load_completed_region(checkpoint, output, "sig"))
+        output.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        content = f"{shard}\n"
+        output.write_text(content, encoding="utf-8")
+        checkpoint.write_text(
+            json.dumps(
+                {
+                    "signature": "sig",
+                    "shard": shard,
+                    "output_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                }
+            ),
+            encoding="utf-8",
+        )
+        created.append(shard)
+        return {"shard": shard}
+
+    first = _run_region_checkpoints(
+        regions,
+        output_dir=tmp_path,
+        max_new_regions=2,
+        process_region=process,
+        index_region=lambda source, output: indexed.append(output.stem),
+    )
+    assert first == (2, 2, 2)
+    assert created == ["a", "b"]
+    assert indexed == ["a", "b"]
+
+    def resume(source: str, stream: str, label_path: str) -> dict[str, object]:
+        shard = label_path.rsplit("/", 1)[-1].removesuffix("-latest.parquet")
+        if shard in {"a", "b"}:
+            assert (tmp_path / "checkpoints" / stream / f"{shard}.json").is_file()
+        return process(source, stream, label_path)
+
+    created.clear()
+    indexed.clear()
+    second = _run_region_checkpoints(
+        regions,
+        output_dir=tmp_path,
+        max_new_regions=1,
+        process_region=resume,
+        index_region=lambda source, output: indexed.append(output.stem),
+    )
+    assert second == (1, 3, 1)
+    assert created == ["c"]
+    assert indexed == ["a", "b", "c"]
+    assert (tmp_path / "checkpoints" / "website" / "a.json").is_file()
+    assert (tmp_path / "checkpoints" / "website" / "b.json").is_file()
+    assert (tmp_path / "checkpoints" / "website" / "c.json").is_file()
+    assert not (tmp_path / "checkpoints" / "website" / "d.json").exists()
+
+
+def test_region_budget_does_not_hide_orphan_partial_artifact(tmp_path: Path) -> None:
+    regions = [("website", "website", f"labels/{name}-latest.parquet") for name in "abcd"]
+    checkpoint = tmp_path / "checkpoints" / "website" / "a.json"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_text("checkpoint\n", encoding="utf-8")
+    orphan = tmp_path / "regions" / "website" / "c.jsonl.partial"
+    orphan.parent.mkdir(parents=True)
+    orphan.write_text("preserve me\n", encoding="utf-8")
+    indexed: list[str] = []
+
+    def process(source: str, stream: str, label_path: str) -> dict[str, object]:
+        assert source == "website"
+        shard = label_path.rsplit("/", 1)[-1].removesuffix("-latest.parquet")
+        if shard == "a":
+            return {"shard": shard}
+        output = tmp_path / "regions" / stream / f"{shard}.jsonl"
+        checkpoint = tmp_path / "checkpoints" / stream / f"{shard}.json"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(f"{shard}\n", encoding="utf-8")
+        checkpoint.write_text("valid checkpoint\n", encoding="utf-8")
+        return {"shard": shard}
+
+    try:
+        _run_region_checkpoints(
+            regions,
+            output_dir=tmp_path,
+            max_new_regions=1,
+            process_region=process,
+            index_region=lambda source, output: indexed.append(output.stem),
+        )
+    except FileExistsError as error:
+        assert "without a checkpoint" in str(error)
+    else:
+        raise AssertionError("budget boundary must not skip an orphan partial artifact")
+    assert orphan.read_text(encoding="utf-8") == "preserve me\n"
 
 
 def test_httpfs_preflight_requires_an_existing_extension_without_installing() -> None:
