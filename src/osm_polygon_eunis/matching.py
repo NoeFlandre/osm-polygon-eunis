@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 _MIN_ASSIGNED_PERCENTAGE = 80.0
 _MAX_PERCENTAGE = 100.0
 _BOUNDARY_TOLERANCE_PERCENTAGE = 1e-9
+_MAX_PERCENTAGE_ROUNDING_TOLERANCE = 1e-8
 _NONFINITE_AREA_ERROR = (
     "class support and polygon areas must be finite, with a positive polygon area"
 )
@@ -369,7 +370,7 @@ def _bounded_percentage(percentage: float) -> float:
     if not math.isfinite(percentage):
         raise ValueError("class overlap percentage must be finite")
     if percentage > _MAX_PERCENTAGE:
-        if percentage - _MAX_PERCENTAGE <= _BOUNDARY_TOLERANCE_PERCENTAGE:
+        if percentage - _MAX_PERCENTAGE <= _MAX_PERCENTAGE_ROUNDING_TOLERANCE:
             return _MAX_PERCENTAGE
         raise ValueError("class support area exceeds polygon area")
     return max(0.0, percentage)

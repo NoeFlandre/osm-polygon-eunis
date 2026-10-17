@@ -118,6 +118,35 @@ def test_precomputed_support_area_cannot_exceed_the_full_polygon_area() -> None:
     assert str(error.value) == "class support area exceeds polygon area"
 
 
+@pytest.mark.parametrize(
+    ("support_area", "polygon_area", "codes"),
+    [
+        pytest.param(
+            195.1521603930019,
+            195.1521603882745,
+            ("T1H", "T1F", "T1E"),
+            id="thueringen",
+        ),
+        pytest.param(
+            40.825887750524174,
+            40.82588774909813,
+            ("T1H", "T1E", "T1B"),
+            id="alsace",
+        ),
+    ],
+)
+def test_overlay_rounding_overage_preserves_ambiguous_full_coverage(
+    support_area: float,
+    polygon_area: float,
+    codes: tuple[str, ...],
+) -> None:
+    result = result_from_class_areas(
+        [(support_area, code, code) for code in codes], polygon_area, "EEA-test"
+    )
+
+    assert result == EunisResult(None, None, 100.0, "EEA-test")
+
+
 def test_precomputed_nonpositive_support_does_not_hide_a_later_class() -> None:
     result = result_from_class_areas([(0.0, "R12", "bog"), (80.0, "R11", "steppe")], 100.0, "test")
 
@@ -555,7 +584,7 @@ def test_percentage_clamps_at_the_exact_full_area_tolerance(monkeypatch) -> None
 
     area = math.nextafter(100.0, math.inf)
     tolerance = area - 100.0
-    monkeypatch.setattr(matching, "_BOUNDARY_TOLERANCE_PERCENTAGE", tolerance)
+    monkeypatch.setattr(matching, "_MAX_PERCENTAGE_ROUNDING_TOLERANCE", tolerance)
 
     assert _percentage(area, 100.0) == 100.0
 
