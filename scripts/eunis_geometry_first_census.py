@@ -533,13 +533,14 @@ def main() -> int:  # noqa: C901, PLR0912, PLR0915
 
     sys.path.insert(0, str((args.source_root / "src").resolve()))
     duckdb = import_module("duckdb")
+    from shapely.geometry import box  # noqa: PLC0415
+
     from osm_polygon_eunis.domain import EunisTaxonomy  # noqa: PLC0415
     from osm_polygon_eunis.raster_aggregation import (  # noqa: PLC0415
         RasterLayer,
         parse_layer_code,
     )
     from osm_polygon_eunis.raster_reference import RasterReference  # noqa: PLC0415
-    from shapely.geometry import box  # noqa: PLC0415
 
     with args.taxonomy.open(encoding="utf-8") as stream:
         taxonomy_doc = json.load(stream)
