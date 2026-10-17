@@ -32,7 +32,7 @@ _PRE_REFACTOR_GOLDEN = {
 _PRE_REFACTOR_STABLE_MANIFEST_SHA256 = (
     "e53ebfa8158f17de4a63c188a3fb9080ae7f2dd1359f3f19d5eef339f64a3765"
 )
-_CURRENT_README_SHA256 = "292fcd6a192a8b2c8c86967ed981c61c809ca70d7bdb95c29dc3d3bdbd57fd90"
+_CURRENT_README_SHA256 = "c01465de06a732e25d919c4dfceb46b326bab516040b6e2ee379965bb37fa927"
 
 
 class _GoldenHub:
@@ -235,7 +235,7 @@ def test_release_outputs_match_pre_refactor_golden_snapshot(
     assert hashlib.sha256(outputs["README.md"]).hexdigest() == _CURRENT_README_SHA256
 
     manifest = json.loads(outputs["eunis/manifest.json"])
-    assert manifest["manifest_version"] == MANIFEST_VERSION == 5
+    assert manifest["manifest_version"] == MANIFEST_VERSION == 6
     assert manifest["geometry_policy"] == GEOMETRY_POLICY
     assert manifest["card"]["geometry_policy"] == GEOMETRY_POLICY
     assert _stable_manifest_sha256(manifest) == _PRE_REFACTOR_STABLE_MANIFEST_SHA256

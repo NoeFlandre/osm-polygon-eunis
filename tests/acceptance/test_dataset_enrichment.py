@@ -32,7 +32,7 @@ class _GeometryReference:
 def source_shard(tmp_path: Path, acceptance_state) -> None:
     polygon = box(2.0, 48.0, 2.05, 48.05)
     polygon_projected = to_equal_area(polygon)
-    first = to_equal_area(box(2.0, 48.0, 2.04, 48.05))
+    first = to_equal_area(box(2.0, 48.0, 2.045, 48.05))
     second = to_equal_area(box(2.0, 48.0, 2.02, 48.05))
     assert polygon_projected is not None
     assert first is not None
@@ -88,7 +88,7 @@ def larger_intersection_label(state) -> None:
 @then("the stored overlap percentage is the intersection percentage")
 def overlap_percentage(state) -> None:
     percentage = state["output"]["eunis_overlap_percentage"].to_pylist()[0]
-    assert percentage == pytest.approx(80.0, abs=0.01)
+    assert percentage == pytest.approx(90.0, abs=0.01)
 
 
 @given("a polygon shard outside the EUNIS reference extent")
@@ -159,10 +159,13 @@ def eunis_labels_are_null(state) -> None:
         assert output[field].to_pylist() == [None]
 
 
-@then("the lower EUNIS code wins the tie")
-def lower_eunis_code_wins_tie(state) -> None:
-    assert state["output"]["eunis_code"].to_pylist() == ["R11"]
-    assert state["output"]["eunis_name"].to_pylist() == ["earlier code"]
+@then("the qualifying EUNIS classes remain ambiguous")
+def qualifying_eunis_classes_remain_ambiguous(state) -> None:
+    output = state["output"]
+    assert output["eunis_code"].to_pylist() == [None]
+    assert output["eunis_name"].to_pylist() == [None]
+    assert output["eunis_overlap_percentage"].to_pylist() == [100.0]
+    assert output["eunis_source_version"].to_pylist() == ["EEA-test"]
 
 
 @given("a Wikidata source file list with polygon and document tables")

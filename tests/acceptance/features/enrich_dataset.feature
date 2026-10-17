@@ -18,10 +18,10 @@ Feature: EUNIS enrichment
     When I enrich the shard through the public API
     Then its EUNIS labels are null
 
-  Scenario: Equal overlap ties use a stable EUNIS code
+  Scenario: Distinct qualifying EUNIS codes remain ambiguous
     Given a polygon shard with equal overlap from two EUNIS references
     When I enrich the shard through the public API
-    Then the lower EUNIS code wins the tie
+    Then the qualifying EUNIS classes remain ambiguous
 
   Scenario: Invalid geometry is rejected during shard enrichment
     Given a source shard with a point geometry

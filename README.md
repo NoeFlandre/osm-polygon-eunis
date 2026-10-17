@@ -2,9 +2,21 @@
 
 ## Purpose and release status
 
-This project adds EUNIS habitat labels to three public Hugging Face datasets. It
-selects the label with the largest actual spatial intersection between each OSM
-polygon and the official EEA EUNIS habitat probability-map reference.
+This project adds EUNIS habitat labels to three public Hugging Face datasets.
+The matcher unions reference support for each EUNIS classification node and
+measures it against the full OSM polygon area. Parent support is the geometric
+union of support for that node and its descendants, so overlapping sibling
+support is counted once. It assigns a code only when one most-specific
+qualifying node remains after hierarchy roll-up and its coverage is at least
+80%; the boundary is inclusive. Multiple qualifying sibling classes are
+ambiguous. The percentage is measured over the full OSM polygon area.
+
+The 80% coverage rule uses the full original OSM polygon area, including
+uncovered and NoData areas. It is separate from the EEA source-value cutoff.
+
+At `threshold: 0`, valid raster cells contribute binary modeled support only
+when their values are greater than zero. The scientific status of this cutoff
+remains provisional pending source evaluation.
 
 The three output repositories are the intended release targets. Treat a dataset
 as published only after you verify these items independently:
@@ -34,11 +46,27 @@ The tables that contain polygons receive four nullable columns:
 - `eunis_overlap_percentage`
 - `eunis_source_version`
 
-The percentage is `100 * area(polygon ∩ EUNIS reference geometry) /
-area(polygon)`. The pipeline first transforms both geometries to EPSG:3035.
-Bounding boxes can remove candidates. They never decide a label. Empty, invalid,
-or out-of-reference polygons receive null EUNIS fields. For equal-area ties, the
-pipeline uses the ascending EUNIS code.
+For each hierarchy node, coverage is `100 * area(OSM polygon ∩ union(reference
+supports for the node and its descendants)) / area(OSM polygon)`. The pipeline
+first transforms both geometries to EPSG:3035. Bounding boxes select
+candidates; they never decide a label. Parent rasters are aggregated by
+pixel-wise OR of their descendant masks. The 2021 EEA workbook supplies the
+Level/Code/Name records; each code's parent is the longest proper code prefix
+in that workbook with a strictly lower Level. A node is assigned when it
+reaches the inclusive 80% gate and no qualifying proper descendant exists.
+Qualifying sibling nodes remain ambiguous; their code and name are null, and
+the reported percentage is the maximum coverage among those sibling nodes.
+Below the gate, the code and name are null and the highest measured
+hierarchy-node coverage remains available. Polygons without a valid
+positive-area overlap have null overlap fields.
+
+For raster references, valid cells with values strictly greater than the
+configured `threshold` contribute binary modeled support; their probability
+values are not used as area weights. The EEA 2021 configuration sets this
+source-value cutoff to `0`, so each valid nonzero cell contributes equally. This
+cutoff is separate from the inclusive 80% polygon-area coverage gate. These
+results describe overlap with modeled support, not observed habitat or
+ground-truth occurrence.
 
 The pipeline reads bounded Parquet micro-batches. It uses bounded Arrow batches.
 It streams temporary files. It deletes the source shards after their final
@@ -52,9 +80,12 @@ The EEA resolver pins these items in the `eunis/manifest.json` of each target:
 - the official 2021 classification workbook
 - the SHA-256 checksums of the downloads
 
-The pipeline reads the EEA GeoPackages as tiled rasters of the highest
-resolution. It decodes only the tiles that intersect the polygon bbox. The final
-label still uses the actual intersection area of the cell and the polygon.
+Vector GeoPackages remain eligible reference sources. Raster-tile GeoPackages
+are rejected as reference sources until their native raster values, validity
+masks, and source lineage are verified. Raster TIFFs without a native validity
+signal are rejected; NoData and native mask values are excluded before
+thresholding. The bounded Q11 source evidence and recovery record is tracked
+separately in [PR #157](https://github.com/NoeFlandre/osm-polygon-eunis/pull/157).
 
 Each output dataset card also contains two items:
 
