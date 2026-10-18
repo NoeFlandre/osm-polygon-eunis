@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
@@ -18,6 +19,7 @@ from .eunis_geometry_census_core import (
     iter_geometry_first_candidates,
 )
 from .eunis_geometry_census_persistence import (
+    AssignmentCache,
     _index_region_if_needed,
     _load_completed_region,
     _open_index,
@@ -394,24 +396,12 @@ def _prepare_run(
                 or refreshed_identity != existing_identity
             ):
                 raise ValueError("resume directory does not match the current pinned inputs")
-            refresh_path = output_dir / "resume-compatible-code-refresh.json"
-            refresh_payload = {
-                "event": "resume_compatible_code_refresh",
-                "old_code_sha256": old_code_sha,
-                "new_code_sha256": current_code_sha,
-                "run_signature": saved_signature,
-                "recorded_at_utc": datetime.now(UTC).isoformat(),
-            }
-            if refresh_path.exists():
-                saved_refresh = json.loads(refresh_path.read_text(encoding="utf-8"))
-                if any(
-                    saved_refresh.get(key) != value
-                    for key, value in refresh_payload.items()
-                    if key != "recorded_at_utc"
-                ):
-                    raise ValueError("resume code-refresh record does not match the run")
-            else:
-                _write_new_json(refresh_path, refresh_payload)
+            _record_resume_code_refresh(
+                output_dir,
+                old_code_sha=old_code_sha,
+                new_code_sha=current_code_sha,
+                run_signature=str(saved_signature),
+            )
             return str(saved_signature)
     else:
         output_dir.mkdir(parents=True, exist_ok=False)
@@ -420,6 +410,144 @@ def _prepare_run(
     if (output_dir / "complete.json").exists():
         raise FileExistsError("this census run is already complete")
     return signature
+
+
+def _record_resume_code_refresh(
+    output_dir: Path,
+    *,
+    old_code_sha: str,
+    new_code_sha: str,
+    run_signature: str,
+) -> None:
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", old_code_sha) or not re.fullmatch(
+        r"[A-Za-z0-9._-]+", new_code_sha
+    ):
+        raise ValueError("resume code-refresh hash is malformed")
+    records = _read_resume_code_refreshes(output_dir, run_signature)
+    if not records:
+        _write_resume_code_refresh(
+            output_dir / "resume-compatible-code-refresh.json",
+            old_code_sha,
+            new_code_sha,
+            run_signature,
+        )
+        return
+    current = _resume_code_refresh_tail(old_code_sha, records)
+    if current == new_code_sha:
+        return
+    _write_resume_code_refresh(
+        output_dir / f"resume-compatible-code-refresh-{current}-{new_code_sha}.json",
+        current,
+        new_code_sha,
+        run_signature,
+    )
+
+
+def _read_resume_code_refreshes(output_dir: Path, run_signature: str) -> list[dict[str, object]]:
+    base_path = output_dir / "resume-compatible-code-refresh.json"
+    refresh_paths = sorted(output_dir.glob("resume-compatible-code-refresh-*.json"))
+    records: list[dict[str, object]] = []
+    for path in ([base_path] if base_path.exists() else []) + refresh_paths:
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("resume code-refresh record is not a regular file")
+        record = json.loads(path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(record, dict)
+            or record.get("event") != "resume_compatible_code_refresh"
+            or record.get("run_signature") != run_signature
+            or not isinstance(record.get("old_code_sha256"), str)
+            or not isinstance(record.get("new_code_sha256"), str)
+        ):
+            raise ValueError("resume code-refresh record does not match the run")
+        records.append(record)
+    return records
+
+
+def _resume_code_refresh_tail(old_code_sha: str, records: Sequence[Mapping[str, object]]) -> str:
+    successors: dict[str, str] = {}
+    for record in records:
+        old = str(record["old_code_sha256"])
+        new = str(record["new_code_sha256"])
+        if (
+            not re.fullmatch(r"[A-Za-z0-9._-]+", old)
+            or not re.fullmatch(r"[A-Za-z0-9._-]+", new)
+            or old in successors
+        ):
+            raise ValueError("resume code-refresh chain is malformed")
+        successors[old] = new
+
+    current = old_code_sha
+    visited: set[str] = set()
+    while current in successors:
+        if current in visited:
+            raise ValueError("resume code-refresh chain contains a cycle")
+        visited.add(current)
+        current = successors[current]
+    if len(visited) != len(successors):
+        raise ValueError("resume code-refresh chain contains a disconnected record")
+    return current
+
+
+def _write_resume_code_refresh(
+    path: Path, old_code_sha: str, new_code_sha: str, run_signature: str
+) -> None:
+    expected = {
+        "event": "resume_compatible_code_refresh",
+        "old_code_sha256": old_code_sha,
+        "new_code_sha256": new_code_sha,
+        "run_signature": run_signature,
+    }
+    temporary = path.with_name(path.name + ".partial")
+
+    def validate(candidate: Path) -> dict[str, object]:
+        if candidate.is_symlink() or not candidate.is_file():
+            raise ValueError("resume code-refresh record is not a regular file")
+        record = json.loads(candidate.read_text(encoding="utf-8"))
+        if not isinstance(record, dict) or any(
+            record.get(name) != value for name, value in expected.items()
+        ):
+            raise ValueError("resume code-refresh record conflicts with the requested transition")
+        recorded_at = record.get("recorded_at_utc")
+        if not isinstance(recorded_at, str) or not recorded_at:
+            raise ValueError("resume code-refresh record timestamp is malformed")
+        try:
+            datetime.fromisoformat(recorded_at)
+        except ValueError as error:
+            raise ValueError("resume code-refresh record timestamp is malformed") from error
+        return record
+
+    if not path.exists() and not temporary.exists():
+        payload = {**expected, "recorded_at_utc": datetime.now(UTC).isoformat()}
+        encoded = (json.dumps(payload, sort_keys=True, indent=2) + "\n").encode("utf-8")
+        with temporary.open("xb") as output:
+            output.write(encoded)
+            output.flush()
+            os.fsync(output.fileno())
+
+    if path.exists():
+        validate(path)
+        if temporary.exists():
+            validate(temporary)
+            temporary.unlink()
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        return
+
+    validate(temporary)
+    try:
+        os.link(temporary, path)
+    except FileExistsError:
+        # Another publisher may have completed the same transition. Never replace it.
+        validate(path)
+    temporary.unlink()
+    directory_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 
 
 def _positive_int(value: str) -> int:
@@ -462,6 +590,22 @@ def _run_region_checkpoints(
     return newly_completed, visited, unvisited
 
 
+def _assignment_cache_location(
+    output_dir: Path,
+    *,
+    code_sha256: str,
+    region_signature: str,
+    stream: str,
+    shard: str,
+) -> tuple[Path, str]:
+    """Bind reusable assignments to one region and exact census code revision."""
+    if re.fullmatch(r"[0-9a-f]{64}", code_sha256) is None:
+        raise ValueError("assignment cache code fingerprint is malformed")
+    cache_signature = hashlib.sha256(f"{region_signature}\0{code_sha256}".encode()).hexdigest()
+    cache_path = output_dir / "assignment-cache" / code_sha256 / stream / f"{shard}.sqlite"
+    return cache_path, cache_signature
+
+
 def _process_region(  # noqa: C901, PLR0913
     db: Any,
     output_dir: Path,
@@ -473,6 +617,7 @@ def _process_region(  # noqa: C901, PLR0913
     raw_paths: Sequence[str],
     raw_urls: Sequence[str],
     run_signature: str,
+    code_sha256: str,
     reference: Any,
     native_extent: Any,
 ) -> dict[str, object]:
@@ -489,7 +634,7 @@ def _process_region(  # noqa: C901, PLR0913
         return completed
     counts = CensusCounts()
 
-    def classify(value: object) -> Any:
+    def classify_geometry(value: object) -> Any:
         from osm_polygon_eunis.geometry import to_equal_area  # noqa: PLC0415
 
         geometry = _parse_production_geometry(value)
@@ -537,21 +682,39 @@ def _process_region(  # noqa: C901, PLR0913
         raw_urls=raw_urls,
     )
 
-    def encoded_records() -> Any:
-        for candidate in iter_geometry_first_candidates(
-            geometry_rows,
-            source=source,
-            stream=stream,
-            classify=classify,
-            fetch_texts=fetch_texts,
-            batch_size=BATCH_SIZE,
-            counts=counts,
-        ):
-            yield (
-                json.dumps(_json_row(candidate), sort_keys=True, separators=(",", ":")) + "\n"
-            ).encode("utf-8")
+    cache_path, cache_signature = _assignment_cache_location(
+        output_dir,
+        code_sha256=code_sha256,
+        region_signature=signature,
+        stream=stream,
+        shard=shard,
+    )
+    with AssignmentCache(cache_path, cache_signature) as assignment_cache:
 
-    output_digest, row_count = _write_replayed_region_output(output, encoded_records())
+        def classify(row: Mapping[str, object]) -> Any:
+            value = row["geometry"]
+            return assignment_cache.classify(
+                row,
+                geometry=value,
+                classify_geometry=classify_geometry,
+                counts=counts,
+            )
+
+        def encoded_records() -> Any:
+            for candidate in iter_geometry_first_candidates(
+                geometry_rows,
+                source=source,
+                stream=stream,
+                classify=classify,
+                fetch_texts=fetch_texts,
+                batch_size=BATCH_SIZE,
+                counts=counts,
+            ):
+                yield (
+                    json.dumps(_json_row(candidate), sort_keys=True, separators=(",", ":")) + "\n"
+                ).encode("utf-8")
+
+        output_digest, row_count = _write_replayed_region_output(output, encoded_records())
     checkpoint_payload: dict[str, object] = {
         "signature": signature,
         "source": source,
@@ -566,6 +729,10 @@ def _process_region(  # noqa: C901, PLR0913
         "candidate_rows": row_count,
         "output_path": str(output),
         "output_sha256": output_digest,
+        "assignment_cache": {
+            "hits": assignment_cache.hits,
+            "misses": assignment_cache.misses,
+        },
         "counts": {name: getattr(counts, name) for name in counts.__dataclass_fields__},
     }
     _write_new_json(checkpoint, checkpoint_payload)
@@ -673,6 +840,7 @@ def main() -> int:  # noqa: C901, PLR0912, PLR0915
     native_manifest_sha = _sha256_file(args.native_manifest)
     native_inventory_sha = _sha256_file(native_inventory_path)
     taxonomy_sha = _sha256_file(args.taxonomy)
+    code_sha256 = _census_code_fingerprint(args.source_root)
     run_payload: dict[str, object] = {
         "schema_version": 1,
         "created_at_utc": datetime.now(UTC).isoformat(),
@@ -695,7 +863,7 @@ def main() -> int:  # noqa: C901, PLR0912, PLR0915
         "algorithm_fingerprint": {
             "algorithm_version": _CENSUS_ALGORITHM_VERSION,
             "assignment_gate": _ASSIGNMENT_GATE,
-            "code_sha256": _census_code_fingerprint(args.source_root),
+            "code_sha256": code_sha256,
             "minimum_native_overlap_percentage": MINIMUM_NATIVE_OVERLAP_PERCENTAGE,
         },
         "census_limits": {
@@ -773,6 +941,7 @@ def main() -> int:  # noqa: C901, PLR0912, PLR0915
                 raw_paths=raw_paths,
                 raw_urls=raw_urls,
                 run_signature=run_signature,
+                code_sha256=code_sha256,
                 reference=reference,
                 native_extent=native_extent,
             )

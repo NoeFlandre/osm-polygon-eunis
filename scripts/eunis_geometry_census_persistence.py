@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import sqlite3
-from collections.abc import Iterable, Mapping, Sequence
+import tempfile
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from importlib import import_module
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, cast
 
+from .eunis_geometry_census_core import Assignment, CachedAssignment, CensusCounts
 from .eunis_geometry_census_sources import (
     H3_RESOLUTION,
     MAX_PER_CELL,
@@ -54,6 +57,322 @@ def _region_signature(
         separators=(",", ":"),
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+_ASSIGNMENT_CACHE_SCHEMA = 1
+_CLASSIFICATION_COUNT_FIELDS = (
+    "invalid_geometry_rows",
+    "outside_native_extent_rows",
+    "projection_invalid_rows",
+    "native_overlap_errors",
+    "ambiguous_native_rows",
+    "unassigned_native_rows",
+)
+
+
+def _canonical_json(payload: object) -> str:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _assignment_identity(row: Mapping[str, object]) -> tuple[str, str]:
+    fields = tuple(
+        None if row.get(name) is None else str(row.get(name))
+        for name in ("source_pbf", "osm_type", "osm_id", "polygon_id")
+    )
+    fallback = None
+    if not any(value for value in fields):
+        fallback_value = row.get("_order") or row.get("sentence_key")
+        if fallback_value is None or not str(fallback_value):
+            raise ValueError("geometry row lacks a stable polygon identity")
+        fallback = str(fallback_value)
+    encoded = _canonical_json({"fields": fields, "fallback": fallback})
+    return encoded, hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _assignment_geometry_digest(geometry: object) -> str:
+    if geometry is None:
+        tag, payload = b"none", b""
+    elif isinstance(geometry, memoryview):
+        tag, payload = b"bytes", geometry.tobytes()
+    elif isinstance(geometry, (bytes, bytearray)):
+        tag, payload = b"bytes", bytes(geometry)
+    elif isinstance(geometry, str):
+        tag, payload = b"text", geometry.encode("utf-8")
+    elif isinstance(geometry, Mapping):
+        tag = b"mapping"
+        payload = json.dumps(dict(geometry), sort_keys=True, separators=(",", ":")).encode("utf-8")
+    elif hasattr(geometry, "wkb"):
+        wkb_attribute = "wkb"
+        wkb = getattr(geometry, wkb_attribute)
+        if not isinstance(wkb, (bytes, bytearray, memoryview)):
+            raise TypeError("geometry WKB attribute is not bytes-like")
+        tag, payload = b"wkb", bytes(wkb)
+    else:
+        raise TypeError(f"unsupported geometry cache input: {type(geometry).__name__}")
+    return hashlib.sha256(tag + b"\0" + payload).hexdigest()
+
+
+def _create_assignment_cache_file(path: Path, region_signature: str) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.init-", dir=path.parent)
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    db = sqlite3.connect(temporary)
+    try:
+        db.execute("PRAGMA synchronous=FULL")
+        with db:
+            db.execute(
+                "CREATE TABLE cache_metadata ("
+                "id INTEGER PRIMARY KEY CHECK (id = 1), "
+                "schema_version INTEGER NOT NULL, region_signature TEXT NOT NULL)"
+            )
+            db.execute(
+                "INSERT INTO cache_metadata VALUES (1, ?, ?)",
+                (_ASSIGNMENT_CACHE_SCHEMA, region_signature),
+            )
+            db.execute(
+                "CREATE TABLE assignments ("
+                "identity_sha256 TEXT PRIMARY KEY, identity_json TEXT NOT NULL, "
+                "geometry_sha256 TEXT NOT NULL, payload_json TEXT NOT NULL, "
+                "record_sha256 TEXT NOT NULL)"
+            )
+            db.execute(f"PRAGMA user_version={_ASSIGNMENT_CACHE_SCHEMA}")
+        db.close()
+        try:
+            os.link(temporary, path)
+        except FileExistsError as error:
+            raise ValueError("assignment cache appeared during initialization") from error
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        temporary.unlink()
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except BaseException:
+        db.close()
+        raise
+
+
+class AssignmentCache:
+    """Persist verified per-polygon native assignments across region retries."""
+
+    def __init__(self, path: Path, region_signature: str, *, commit_interval: int = 256) -> None:
+        """Open a region-bound cache and reject existing files with unknown state."""
+        if commit_interval < 1:
+            raise ValueError("assignment cache commit interval must be positive")
+        self.path = path
+        self.region_signature = region_signature
+        self.commit_interval = commit_interval
+        self.hits = 0
+        self.misses = 0
+        self._pending = 0
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.is_symlink():
+            raise ValueError(f"assignment cache is not a regular file: {path}")
+        if path.exists() and not path.is_file():
+            raise ValueError(f"assignment cache is not a regular file: {path}")
+        if not path.exists():
+            _create_assignment_cache_file(path, region_signature)
+        self.db = sqlite3.connect(path)
+        try:
+            self.db.execute("PRAGMA synchronous=FULL")
+            self.db.execute("PRAGMA busy_timeout=5000")
+            self._validate_database()
+        except sqlite3.Error as error:
+            self.db.close()
+            raise ValueError(f"assignment cache is corrupt or unsupported: {path}") from error
+        except BaseException:
+            self.db.close()
+            raise
+
+    def _validate_database(self) -> None:
+        version = self.db.execute("PRAGMA user_version").fetchone()
+        metadata = self.db.execute(
+            "SELECT schema_version, region_signature FROM cache_metadata WHERE id=1"
+        ).fetchone()
+        if version != (_ASSIGNMENT_CACHE_SCHEMA,) or metadata != (
+            _ASSIGNMENT_CACHE_SCHEMA,
+            self.region_signature,
+        ):
+            raise ValueError("assignment cache schema or region signature mismatch")
+        self.db.execute("SELECT 1 FROM assignments LIMIT 1").fetchone()
+
+    def classify(
+        self,
+        row: Mapping[str, object],
+        *,
+        geometry: object,
+        classify_geometry: Callable[[object], Assignment | None],
+        counts: CensusCounts,
+    ) -> Assignment | None:
+        """Reuse a checked assignment or classify and durably record this polygon."""
+        identity_json, identity_sha256 = _assignment_identity(row)
+        geometry_sha256 = _assignment_geometry_digest(geometry)
+        try:
+            saved = self.db.execute(
+                "SELECT identity_json, geometry_sha256, payload_json, record_sha256 "
+                "FROM assignments WHERE identity_sha256=?",
+                (identity_sha256,),
+            ).fetchone()
+        except sqlite3.Error as error:
+            raise ValueError(f"assignment cache read failed: {self.path}") from error
+        if saved is not None:
+            saved_identity, saved_geometry, payload_json, record_sha256 = saved
+            if saved_identity != identity_json or saved_geometry != geometry_sha256:
+                raise ValueError("assignment cache polygon identity or geometry changed")
+            payload = self._decode_record(
+                identity_sha256,
+                identity_json,
+                geometry_sha256,
+                payload_json,
+                record_sha256,
+            )
+            count_deltas = cast(dict[str, int], payload["count_deltas"])
+            for name, value in count_deltas.items():
+                setattr(counts, name, getattr(counts, name) + value)
+            self.hits += 1
+            return self._decode_assignment(payload["assignment"])
+
+        before = {name: getattr(counts, name) for name in _CLASSIFICATION_COUNT_FIELDS}
+        assignment = classify_geometry(geometry)
+        deltas = {
+            name: getattr(counts, name) - before[name] for name in _CLASSIFICATION_COUNT_FIELDS
+        }
+        if any(
+            not isinstance(value, int) or isinstance(value, bool) or value < 0
+            for value in deltas.values()
+        ):
+            raise ValueError("classification counter deltas must be non-negative integers")
+        encoded_assignment = self._encode_assignment(assignment)
+        self._decode_assignment(encoded_assignment)
+        payload = {
+            "schema_version": _ASSIGNMENT_CACHE_SCHEMA,
+            "region_signature": self.region_signature,
+            "identity_sha256": identity_sha256,
+            "identity_json": identity_json,
+            "geometry_sha256": geometry_sha256,
+            "assignment": encoded_assignment,
+            "count_deltas": deltas,
+        }
+        payload_json = _canonical_json(payload)
+        record_sha256 = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+        try:
+            self.db.execute(
+                "INSERT INTO assignments VALUES (?, ?, ?, ?, ?)",
+                (
+                    identity_sha256,
+                    identity_json,
+                    geometry_sha256,
+                    payload_json,
+                    record_sha256,
+                ),
+            )
+        except sqlite3.Error as error:
+            raise ValueError(f"assignment cache write failed: {self.path}") from error
+        self._pending += 1
+        self.misses += 1
+        if self._pending >= self.commit_interval:
+            self.db.commit()
+            self._pending = 0
+        return assignment
+
+    def _decode_record(
+        self,
+        identity_sha256: str,
+        identity_json: str,
+        geometry_sha256: str,
+        payload_json: str,
+        record_sha256: str,
+    ) -> dict[str, object]:
+        if hashlib.sha256(payload_json.encode("utf-8")).hexdigest() != record_sha256:
+            raise ValueError("assignment cache record checksum mismatch")
+        try:
+            payload = json.loads(payload_json)
+        except json.JSONDecodeError as error:
+            raise ValueError("assignment cache record is malformed") from error
+        if not isinstance(payload, dict) or _canonical_json(payload) != payload_json:
+            raise ValueError("assignment cache record is not canonical JSON")
+        if any(
+            payload.get(name) != value
+            for name, value in (
+                ("schema_version", _ASSIGNMENT_CACHE_SCHEMA),
+                ("region_signature", self.region_signature),
+                ("identity_sha256", identity_sha256),
+                ("identity_json", identity_json),
+                ("geometry_sha256", geometry_sha256),
+            )
+        ):
+            raise ValueError("assignment cache record metadata mismatch")
+        deltas = payload.get("count_deltas")
+        if (
+            not isinstance(deltas, dict)
+            or set(deltas) != set(_CLASSIFICATION_COUNT_FIELDS)
+            or any(
+                not isinstance(value, int) or isinstance(value, bool) or value < 0
+                for value in deltas.values()
+            )
+        ):
+            raise ValueError("assignment cache count deltas are malformed")
+        self._decode_assignment(payload.get("assignment"))
+        return payload
+
+    @staticmethod
+    def _encode_assignment(assignment: Assignment | None) -> dict[str, object] | None:
+        if assignment is None:
+            return None
+        return {
+            "code": assignment.code,
+            "name": assignment.name,
+            "overlap_percentage": assignment.overlap_percentage,
+            "source_version": assignment.source_version,
+        }
+
+    @staticmethod
+    def _decode_assignment(payload: object) -> CachedAssignment | None:
+        if payload is None:
+            return None
+        if not isinstance(payload, dict) or set(payload) != {
+            "code",
+            "name",
+            "overlap_percentage",
+            "source_version",
+        }:
+            raise ValueError("assignment cache result is malformed")
+        for name in ("code", "name", "source_version"):
+            if payload[name] is not None and not isinstance(payload[name], str):
+                raise ValueError("assignment cache result fields must be strings or null")
+        overlap = payload["overlap_percentage"]
+        if overlap is not None and (
+            isinstance(overlap, bool)
+            or not isinstance(overlap, (float, int))
+            or not math.isfinite(overlap)
+        ):
+            raise ValueError("assignment cache overlap percentage is malformed")
+        return CachedAssignment(
+            code=cast(str | None, payload["code"]),
+            name=cast(str | None, payload["name"]),
+            overlap_percentage=cast(float | None, overlap),
+            source_version=cast(str | None, payload["source_version"]),
+        )
+
+    def __enter__(self) -> AssignmentCache:
+        """Return this cache for a bounded context-managed region pass."""
+        return self
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
+        """Commit a successful pass and roll back its uncommitted tail on error."""
+        try:
+            if exc_type is None:
+                self.db.commit()
+                self._pending = 0
+            else:
+                self.db.rollback()
+        finally:
+            self.db.close()
 
 
 def _load_completed_region(

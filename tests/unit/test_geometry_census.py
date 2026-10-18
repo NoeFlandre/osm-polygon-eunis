@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+import sqlite3
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
 from scripts.eunis_geometry_census_core import (
+    Assignment,
     CensusCounts,
     candidate_order_digest,
     iter_geometry_first_candidates,
 )
 from scripts.eunis_geometry_census_persistence import (
+    AssignmentCache,
     _index_region,
     _index_region_if_needed,
     _load_completed_region,
@@ -26,11 +29,13 @@ from scripts.eunis_geometry_census_persistence import (
 from scripts.eunis_geometry_census_sources import (
     SOURCE_VERSION,
     _geometry_parameters,
+    _json_row,
     _text_query,
     geometry_sql,
 )
 from scripts.eunis_geometry_first_census import (
     _annotate_geometry_rows,
+    _assignment_cache_location,
     _parse_production_geometry,
     _run_region_checkpoints,
     _validate_native_inventory,
@@ -165,7 +170,8 @@ def test_geometry_first_candidates_match_legacy_selected_rows_and_hashes() -> No
     rows.sort(key=lambda item: candidate_order_digest("website", item))
     fetched_keys: list[str] = []
 
-    def classify(geometry: object) -> EunisResult:
+    def classify(row: Mapping[str, object]) -> EunisResult:
+        geometry = row["geometry"]
         if geometry == "covered":
             return EunisResult("R11", "steppe", 80.0, "EEA 2021")
         return EunisResult(None, None, 79.0, "EEA 2021")
@@ -222,7 +228,8 @@ def test_unassigned_and_ambiguous_geometry_never_reaches_text_fetch() -> None:
     ]
     calls: list[Sequence[Mapping[str, object]]] = []
 
-    def classify(geometry: object) -> EunisResult:
+    def classify(row: Mapping[str, object]) -> EunisResult:
+        geometry = row["geometry"]
         if geometry == "ambiguous":
             return EunisResult(None, None, 82.0, "EEA 2021")
         return EunisResult(None, None, 40.0, "EEA 2021")
@@ -270,6 +277,264 @@ def test_missing_text_and_hash_mismatch_have_separate_counts() -> None:
     assert output == []
     assert counts.missing_text_rows == 1
     assert counts.text_hash_mismatches == 1
+
+
+def _assignment_cache_fixture() -> tuple[list[dict[str, object]], dict[str, str]]:
+    texts = {"s1": "first", "s2": "second", "s3": "third"}
+    rows: list[dict[str, object]] = [
+        {
+            "decision": "yes",
+            "stream": "website",
+            "sentence_key": key,
+            "text_sha256": _sha(text),
+            "source_pbf": None,
+            "osm_type": "way",
+            "osm_id": osm_id,
+            "polygon_id": osm_id,
+            "geometry": geometry,
+        }
+        for key, text, osm_id, geometry in (
+            ("s1", texts["s1"], "1", "eligible-one"),
+            ("s2", texts["s2"], "1", "eligible-one"),
+            ("s3", texts["s3"], "2", "excluded"),
+        )
+    ]
+    rows.sort(key=lambda row: candidate_order_digest("website", row))
+    return rows, texts
+
+
+class _AssignmentFixtureClassifier:
+    def __init__(self, counts: CensusCounts) -> None:
+        self.counts = counts
+        self.calls = 0
+
+    def __call__(self, geometry: object) -> EunisResult:
+        self.calls += 1
+        if geometry == "excluded":
+            self.counts.unassigned_native_rows += 1
+            return EunisResult(None, None, 35.0, "EEA 2021")
+        return EunisResult("R11", "steppe", 80, "EEA 2021")
+
+
+def _assignment_fixture_records(
+    rows: Sequence[dict[str, object]],
+    texts: Mapping[str, str],
+    classify: Callable[[Mapping[str, object]], Assignment | None],
+    counts: CensusCounts,
+):
+    candidates = iter_geometry_first_candidates(
+        rows,
+        source="website",
+        stream="website",
+        classify=classify,
+        fetch_texts=lambda batch: {
+            str(row["sentence_key"]): texts[str(row["sentence_key"])] for row in batch
+        },
+        batch_size=1,
+        counts=counts,
+    )
+    for candidate in candidates:
+        yield (
+            json.dumps(_json_row(candidate), sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
+
+
+def _cached_classifier(
+    cache: AssignmentCache,
+    geometry_classifier: Callable[[object], EunisResult | None],
+    counts: CensusCounts,
+) -> Callable[[Mapping[str, object]], Assignment | None]:
+    def classify(row: Mapping[str, object]) -> Assignment | None:
+        return cache.classify(
+            row,
+            geometry=row["geometry"],
+            classify_geometry=geometry_classifier,
+            counts=counts,
+        )
+
+    return classify
+
+
+def _raise_simulated_interruption() -> None:
+    raise RuntimeError("simulated process interruption")
+
+
+def _interrupted_after_first(records):
+    for index, record in enumerate(records):
+        yield record
+        if index == 0:
+            _raise_simulated_interruption()
+
+
+def _fail_if_recomputed(_: object) -> EunisResult:
+    raise AssertionError("cached geometry must not be recomputed")
+
+
+def test_assignment_cache_resume_matches_fresh_replay_after_interruption(
+    tmp_path: Path,
+) -> None:
+    rows, texts = _assignment_cache_fixture()
+    fresh_counts = CensusCounts()
+    fresh_classifier = _AssignmentFixtureClassifier(fresh_counts)
+    fresh_output = tmp_path / "fresh.jsonl"
+    fresh_digest, fresh_rows = _write_replayed_region_output(
+        fresh_output,
+        _assignment_fixture_records(
+            rows, texts, lambda row: fresh_classifier(row["geometry"]), fresh_counts
+        ),
+    )
+    fresh_bytes = fresh_output.read_bytes()
+
+    interrupted_output = tmp_path / "resumed.jsonl"
+    cache_path = tmp_path / "cache" / "website" / "region.sqlite"
+    interrupted_counts = CensusCounts()
+    interrupted_classifier = _AssignmentFixtureClassifier(interrupted_counts)
+
+    try:
+        with AssignmentCache(cache_path, "region-signature", commit_interval=1) as cache:
+            records = _assignment_fixture_records(
+                rows,
+                texts,
+                _cached_classifier(cache, interrupted_classifier, interrupted_counts),
+                interrupted_counts,
+            )
+            _write_replayed_region_output(interrupted_output, _interrupted_after_first(records))
+    except RuntimeError as error:
+        assert str(error) == "simulated process interruption"
+    else:
+        raise AssertionError("the interrupted replay should stop after one durable row")
+
+    preserved_partial = interrupted_output.with_name(interrupted_output.name + ".partial")
+    saved_prefix = preserved_partial.read_bytes()
+    assert saved_prefix
+    assert fresh_bytes.startswith(saved_prefix)
+
+    resumed_counts = CensusCounts()
+    resumed_classifier = _AssignmentFixtureClassifier(resumed_counts)
+
+    with AssignmentCache(cache_path, "region-signature", commit_interval=1) as cache:
+        resumed_digest, resumed_rows = _write_replayed_region_output(
+            interrupted_output,
+            _assignment_fixture_records(
+                rows,
+                texts,
+                _cached_classifier(cache, resumed_classifier, resumed_counts),
+                resumed_counts,
+            ),
+        )
+        assert cache.hits >= 1
+        assert cache.misses == resumed_classifier.calls
+
+    assert interrupted_output.read_bytes() == fresh_bytes
+    assert preserved_partial.read_bytes() == saved_prefix
+    assert resumed_digest == fresh_digest
+    assert resumed_rows == fresh_rows
+    assert fresh_rows == 2
+    assert resumed_counts.unassigned_native_rows == fresh_counts.unassigned_native_rows == 1
+    assert resumed_counts.geometry_rows == fresh_counts.geometry_rows == 3
+    assert fresh_classifier.calls == 3
+    assert resumed_classifier.calls < fresh_classifier.calls
+
+
+def test_corrupt_assignment_cache_preserves_saved_partial(tmp_path: Path) -> None:
+    row: dict[str, object] = {
+        "decision": "yes",
+        "stream": "website",
+        "sentence_key": "saved",
+        "source_pbf": None,
+        "osm_type": "way",
+        "osm_id": "7",
+        "polygon_id": "7",
+        "geometry": "stable-geometry",
+    }
+    cache_path = tmp_path / "cache.sqlite"
+    with AssignmentCache(cache_path, "region-signature", commit_interval=1) as cache:
+        cache.classify(
+            row,
+            geometry=row["geometry"],
+            classify_geometry=lambda _: EunisResult("R11", "steppe", 80.0, "EEA 2021"),
+            counts=CensusCounts(),
+        )
+    with sqlite3.connect(cache_path) as db:
+        db.execute("UPDATE assignments SET payload_json='{}'")
+
+    output = tmp_path / "region.jsonl"
+    partial = output.with_name(output.name + ".partial")
+    partial.write_bytes(b"preserved saved prefix\n")
+    saved = partial.read_bytes()
+    counts = CensusCounts()
+
+    def records():
+        with AssignmentCache(cache_path, "region-signature") as cache:
+            assignment = cache.classify(
+                row,
+                geometry=row["geometry"],
+                classify_geometry=_fail_if_recomputed,
+                counts=counts,
+            )
+            assert assignment is not None
+            yield json.dumps({"assignment": assignment.code}).encode() + b"\n"
+
+    try:
+        _write_replayed_region_output(output, records())
+    except ValueError as error:
+        assert "checksum mismatch" in str(error)
+    else:
+        raise AssertionError("corrupt assignment cache records must fail closed")
+    assert partial.read_bytes() == saved
+    assert not output.exists()
+
+
+def test_assignment_cache_rejects_changed_geometry_for_same_polygon(tmp_path: Path) -> None:
+    row: dict[str, object] = {
+        "source_pbf": None,
+        "osm_type": "way",
+        "osm_id": "8",
+        "polygon_id": "8",
+        "geometry": "old-geometry",
+    }
+    cache_path = tmp_path / "cache.sqlite"
+    with AssignmentCache(cache_path, "region-signature", commit_interval=1) as cache:
+        cache.classify(
+            row,
+            geometry=row["geometry"],
+            classify_geometry=lambda _: EunisResult("R11", "steppe", 80.0, "EEA 2021"),
+            counts=CensusCounts(),
+        )
+    changed = {**row, "geometry": "new-geometry"}
+    try:
+        with AssignmentCache(cache_path, "region-signature") as cache:
+            cache.classify(
+                changed,
+                geometry=changed["geometry"],
+                classify_geometry=_fail_if_recomputed,
+                counts=CensusCounts(),
+            )
+    except ValueError as error:
+        assert "geometry changed" in str(error)
+    else:
+        raise AssertionError("changed source geometry must invalidate its saved assignment")
+
+
+def test_assignment_cache_location_is_bound_to_current_code_fingerprint(
+    tmp_path: Path,
+) -> None:
+    first_path, first_signature = _assignment_cache_location(
+        tmp_path,
+        code_sha256="a" * 64,
+        region_signature="region-signature",
+        stream="website",
+        shard="czechia",
+    )
+    next_path, next_signature = _assignment_cache_location(
+        tmp_path,
+        code_sha256="b" * 64,
+        region_signature="region-signature",
+        stream="website",
+        shard="czechia",
+    )
+    assert first_path != next_path
+    assert first_signature != next_signature
 
 
 def test_text_result_mapping_rejects_duplicate_sentence_keys() -> None:
@@ -555,6 +820,7 @@ def test_region_runner_keeps_geometry_cursor_live_during_text_fetch(  # noqa: C9
         raw_paths=("polygons/a.parquet",),
         raw_urls=("polygon-url",),
         run_signature="run",
+        code_sha256="a" * 64,
         reference=type(
             "Reference",
             (),
@@ -746,6 +1012,21 @@ def test_legacy_run_signature_allows_only_pinned_code_refresh(tmp_path: Path) ->
     assert refresh_record["new_code_sha256"] == current_code
     assert refresh_record["run_signature"] == saved_signature
 
+    next_code = "next-code"
+    next_revision = {
+        **legacy_identity,
+        "created_at_utc": "later-time",
+        "algorithm_fingerprint": {**legacy_algorithm, "code_sha256": next_code},
+    }
+    assert _prepare_run(output_dir, next_revision, resume=True) == saved_signature
+    chain_record = json.loads(
+        next(output_dir.glob("resume-compatible-code-refresh-*.json")).read_text(encoding="utf-8")
+    )
+    assert chain_record["old_code_sha256"] == current_code
+    assert chain_record["new_code_sha256"] == next_code
+    assert chain_record["run_signature"] == saved_signature
+    assert _prepare_run(output_dir, next_revision, resume=True) == saved_signature
+
     changed_gate = {
         **refreshed,
         "algorithm_fingerprint": {
@@ -780,6 +1061,88 @@ def test_legacy_run_signature_rejects_unknown_old_code_hash(tmp_path: Path) -> N
         assert "does not match" in str(error)
     else:
         raise AssertionError("unknown old code hash must not be accepted")
+
+
+def test_legacy_resume_recovers_matching_code_refresh_partial(tmp_path: Path) -> None:
+    from scripts.eunis_geometry_first_census import (
+        _LEGACY_RESUME_CODE_HASHES,
+        _prepare_run,
+    )
+
+    old_code = next(iter(_LEGACY_RESUME_CODE_HASHES))
+    output_dir = tmp_path / "legacy-run"
+    legacy_algorithm: dict[str, str] = {
+        "algorithm_version": "geometry-first-v3",
+        "assignment_gate": "unique >=80%",
+        "code_sha256": old_code,
+    }
+    legacy: dict[str, object] = {
+        "native_manifest_sha256": "native-pin",
+        "algorithm_fingerprint": legacy_algorithm,
+    }
+    saved_signature = _prepare_run(output_dir, legacy, resume=False)
+    staged_record = {
+        "event": "resume_compatible_code_refresh",
+        "old_code_sha256": old_code,
+        "new_code_sha256": "current-code",
+        "run_signature": saved_signature,
+        "recorded_at_utc": "2026-10-16T00:00:00+00:00",
+    }
+    partial = output_dir / "resume-compatible-code-refresh.json.partial"
+    partial.write_text(json.dumps(staged_record), encoding="utf-8")
+    legacy_identity = {key: value for key, value in legacy.items() if key != "run_signature"}
+    refreshed = {
+        **legacy_identity,
+        "algorithm_fingerprint": {**legacy_algorithm, "code_sha256": "current-code"},
+    }
+
+    assert _prepare_run(output_dir, refreshed, resume=True) == saved_signature
+    record_path = output_dir / "resume-compatible-code-refresh.json"
+    assert json.loads(record_path.read_text(encoding="utf-8")) == staged_record
+    assert not partial.exists()
+
+
+def test_legacy_resume_preserves_conflicting_code_refresh_partial(tmp_path: Path) -> None:
+    from scripts.eunis_geometry_first_census import (
+        _LEGACY_RESUME_CODE_HASHES,
+        _prepare_run,
+    )
+
+    old_code = next(iter(_LEGACY_RESUME_CODE_HASHES))
+    output_dir = tmp_path / "legacy-run"
+    legacy_algorithm: dict[str, str] = {
+        "algorithm_version": "geometry-first-v3",
+        "assignment_gate": "unique >=80%",
+        "code_sha256": old_code,
+    }
+    legacy: dict[str, object] = {
+        "native_manifest_sha256": "native-pin",
+        "algorithm_fingerprint": legacy_algorithm,
+    }
+    saved_signature = _prepare_run(output_dir, legacy, resume=False)
+    staged_record = {
+        "event": "resume_compatible_code_refresh",
+        "old_code_sha256": old_code,
+        "new_code_sha256": "some-other-code",
+        "run_signature": saved_signature,
+        "recorded_at_utc": "2026-10-16T00:00:00+00:00",
+    }
+    partial = output_dir / "resume-compatible-code-refresh.json.partial"
+    partial.write_text(json.dumps(staged_record), encoding="utf-8")
+    legacy_identity = {key: value for key, value in legacy.items() if key != "run_signature"}
+    refreshed = {
+        **legacy_identity,
+        "algorithm_fingerprint": {**legacy_algorithm, "code_sha256": "current-code"},
+    }
+
+    try:
+        _prepare_run(output_dir, refreshed, resume=True)
+    except ValueError as error:
+        assert "conflicts" in str(error)
+    else:
+        raise AssertionError("a conflicting staged transition must fail closed")
+    assert json.loads(partial.read_text(encoding="utf-8")) == staged_record
+    assert not (output_dir / "resume-compatible-code-refresh.json").exists()
 
 
 def test_summary_reports_zero_eligible_source_decisions(tmp_path: Path) -> None:

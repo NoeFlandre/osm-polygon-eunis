@@ -11,15 +11,30 @@ from typing import Protocol, TypeGuard
 class Assignment(Protocol):
     """The assignment fields needed to gate sentence retrieval."""
 
-    code: str | None
-    name: str | None
-    overlap_percentage: float | None
-    source_version: str | None
+    @property
+    def code(self) -> str | None:
+        """Return the assigned EUNIS code, if the polygon has a unique class."""
+        ...
+
+    @property
+    def name(self) -> str | None:
+        """Return the assigned EUNIS class name when available."""
+        ...
+
+    @property
+    def overlap_percentage(self) -> float | None:
+        """Return the native polygon coverage percentage, when calculated."""
+        ...
+
+    @property
+    def source_version(self) -> str | None:
+        """Return the authoritative native reference version."""
+        ...
 
 
 GeometryRow = Mapping[str, object]
 TextFetcher = Callable[[Sequence[GeometryRow]], Mapping[str, str | None]]
-Classifier = Callable[[object], Assignment | None]
+Classifier = Callable[[GeometryRow], Assignment | None]
 MINIMUM_NATIVE_OVERLAP_PERCENTAGE = 80.0
 
 
@@ -39,6 +54,16 @@ class CensusCounts:
     missing_text_rows: int = 0
     text_hash_mismatches: int = 0
     verified_text_rows: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class CachedAssignment:
+    """The serializable subset of an authoritative native assignment."""
+
+    code: str | None
+    name: str | None
+    overlap_percentage: float | None
+    source_version: str | None
 
 
 def candidate_order_digest(source: str, row: GeometryRow) -> str:
@@ -77,10 +102,11 @@ def iter_geometry_first_candidates(  # noqa: PLR0913
 ) -> Iterator[dict[str, object]]:
     """Yield hash-verified candidate rows, fetching text only after native assignment.
 
-    ``geometry_rows`` must be ordered by ``candidate_order_digest``. ``fetch_texts``
-    receives only rows whose geometry has one native EUNIS assignment at 80% or
-    greater. It must return text keyed by ``sentence_key``; text is checked again
-    against each pinned relevance label before a row is yielded.
+    ``geometry_rows`` must be ordered by ``candidate_order_digest``. ``classify``
+    receives each complete row so persistent classifiers can verify polygon identity
+    and geometry together. ``fetch_texts`` receives only rows whose geometry has one
+    native EUNIS assignment at 80% or greater. It returns text keyed by
+    ``sentence_key``; text is checked against each pinned relevance label before yield.
     """
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
@@ -88,7 +114,7 @@ def iter_geometry_first_candidates(  # noqa: PLR0913
     eligible_batch: list[tuple[GeometryRow, Assignment]] = []
     for row in geometry_rows:
         metrics.geometry_rows += 1
-        assignment = classify(row["geometry"])
+        assignment = classify(row)
         if has_unique_native_coverage(assignment):
             metrics.native_eligible_rows += 1
             eligible_batch.append((row, assignment))
