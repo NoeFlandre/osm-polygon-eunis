@@ -15,9 +15,13 @@ from scripts.eunis_geometry_census_core import (
     iter_geometry_first_candidates,
 )
 from scripts.eunis_geometry_census_persistence import (
+    _index_region,
+    _index_region_if_needed,
     _load_completed_region,
     _open_index,
     _summary,
+    _verify_and_backfill_indexed_regions,
+    _write_replayed_region_output,
 )
 from scripts.eunis_geometry_census_sources import (
     SOURCE_VERSION,
@@ -696,10 +700,86 @@ def test_code_fingerprint_covers_production_assignment_modules(tmp_path: Path) -
     )
     for module in modules:
         (package / module).write_text("stable content\n", encoding="utf-8")
+    apple_double = package / "._metadata.py"
+    apple_double.write_text("sidecar bytes\n", encoding="utf-8")
     before = _census_code_fingerprint(source_root)
+    apple_double.write_text("changed sidecar bytes\n", encoding="utf-8")
+    assert _census_code_fingerprint(source_root) == before
     (package / "matching.py").write_text("changed assignment\n", encoding="utf-8")
     after = _census_code_fingerprint(source_root)
     assert before != after
+
+
+def test_legacy_run_signature_allows_only_pinned_code_refresh(tmp_path: Path) -> None:
+    from scripts.eunis_geometry_first_census import (
+        _LEGACY_RESUME_CODE_HASHES,
+        _prepare_run,
+    )
+
+    old_code = next(iter(_LEGACY_RESUME_CODE_HASHES))
+    current_code = "current-code"
+    output_dir = tmp_path / "legacy-run"
+    legacy_algorithm: dict[str, str] = {
+        "algorithm_version": "geometry-first-v3",
+        "assignment_gate": "unique >=80%",
+        "code_sha256": old_code,
+    }
+    legacy: dict[str, object] = {
+        "created_at_utc": "first-time",
+        "native_manifest_sha256": "native-pin",
+        "algorithm_fingerprint": legacy_algorithm,
+    }
+    saved_signature = _prepare_run(output_dir, legacy, resume=False)
+    legacy_identity = {key: value for key, value in legacy.items() if key != "run_signature"}
+    refreshed_algorithm = {**legacy_algorithm, "code_sha256": current_code}
+    refreshed: dict[str, object] = {
+        **legacy_identity,
+        "created_at_utc": "later-time",
+        "algorithm_fingerprint": refreshed_algorithm,
+    }
+    assert _prepare_run(output_dir, refreshed, resume=True) == saved_signature
+    refresh_record = json.loads(
+        (output_dir / "resume-compatible-code-refresh.json").read_text(encoding="utf-8")
+    )
+    assert refresh_record["event"] == "resume_compatible_code_refresh"
+    assert refresh_record["old_code_sha256"] == old_code
+    assert refresh_record["new_code_sha256"] == current_code
+    assert refresh_record["run_signature"] == saved_signature
+
+    changed_gate = {
+        **refreshed,
+        "algorithm_fingerprint": {
+            **refreshed_algorithm,
+            "assignment_gate": "different gate",
+        },
+    }
+    try:
+        _prepare_run(output_dir, changed_gate, resume=True)
+    except ValueError as error:
+        assert "does not match" in str(error)
+    else:
+        raise AssertionError("code refresh must reject changed semantic inputs")
+
+
+def test_legacy_run_signature_rejects_unknown_old_code_hash(tmp_path: Path) -> None:
+    from scripts.eunis_geometry_first_census import _prepare_run
+
+    output_dir = tmp_path / "unknown-legacy-run"
+    first: dict[str, object] = {
+        "created_at_utc": "first-time",
+        "algorithm_fingerprint": {"code_sha256": "unknown-old-code"},
+    }
+    _prepare_run(output_dir, first, resume=False)
+    changed: dict[str, object] = {
+        "created_at_utc": "later-time",
+        "algorithm_fingerprint": {"code_sha256": "current-code"},
+    }
+    try:
+        _prepare_run(output_dir, changed, resume=True)
+    except ValueError as error:
+        assert "does not match" in str(error)
+    else:
+        raise AssertionError("unknown old code hash must not be accepted")
 
 
 def test_summary_reports_zero_eligible_source_decisions(tmp_path: Path) -> None:
@@ -721,6 +801,81 @@ def test_summary_reports_zero_eligible_source_decisions(tmp_path: Path) -> None:
     assert wiki["no"]["unique_eligible_polygons"] == 0
     assert wiki["yes"]["can_reach_500_and_25_cells"] is False
     assert wiki["no"]["can_reach_500_and_25_cells"] is False
+    db.close()
+
+
+def test_existing_eligible_index_is_verified_and_checkpointed_without_reindex(
+    tmp_path: Path,
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from shapely.geometry import box
+
+    output = tmp_path / "sample.jsonl"
+    geometry = box(-1, -1, 1, 1).wkb
+    row = {
+        "decision": "yes",
+        "source_pbf": None,
+        "osm_type": "relation",
+        "osm_id": "42",
+        "polygon_id": "polygon-42",
+        "geometry": {"encoding": "wkb-hex", "value": geometry.hex()},
+    }
+    content = (json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    output.write_bytes(content)
+    output_digest = hashlib.sha256(content).hexdigest()
+    db = _open_index(tmp_path / "eligible.sqlite")
+    h3 = SimpleNamespace(latlng_to_cell=lambda _lat, _lon, _resolution: "cell")
+    with patch.dict("sys.modules", {"h3": h3}):
+        _index_region(db, "website", output)
+        artifacts = [("website", "website", "sample", output, output_digest)]
+        _verify_and_backfill_indexed_regions(db, artifacts, "run-signature")
+        rows_before = db.execute("SELECT * FROM eligible").fetchall()
+        markers = db.execute("SELECT * FROM indexed_regions").fetchall()
+        assert len(rows_before) == 1
+        assert markers == [("website", "website", "sample", "run-signature", output_digest)]
+
+        _index_region_if_needed(db, "website", "website", "sample", output, "run-signature")
+        assert db.execute("SELECT * FROM eligible").fetchall() == rows_before
+        try:
+            _index_region_if_needed(db, "website", "website", "sample", output, "changed-run")
+        except ValueError as error:
+            assert "marker input mismatch" in str(error)
+        else:
+            raise AssertionError("index marker must reject a different run identity")
+    db.close()
+
+
+def test_index_backfill_recovers_missing_checkpoint_rows(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from shapely.geometry import box
+
+    output = tmp_path / "sample.jsonl"
+    geometry = box(-2, -2, 2, 2).wkb
+    row = {
+        "decision": "no",
+        "source_pbf": "region.osm.pbf",
+        "osm_type": "way",
+        "osm_id": "99",
+        "polygon_id": "polygon-99",
+        "geometry": {"encoding": "wkb-hex", "value": geometry.hex()},
+    }
+    content = (json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    output.write_bytes(content)
+    db = _open_index(tmp_path / "eligible.sqlite")
+    h3 = SimpleNamespace(latlng_to_cell=lambda _lat, _lon, _resolution: "cell")
+    with patch.dict("sys.modules", {"h3": h3}):
+        _verify_and_backfill_indexed_regions(
+            db,
+            [("website", "website", "sample", output, hashlib.sha256(content).hexdigest())],
+            "run-signature",
+        )
+
+        assert db.execute("SELECT count(*) FROM eligible").fetchone() == (1,)
+        assert db.execute("SELECT count(*) FROM indexed_regions").fetchone() == (1,)
     db.close()
 
 
@@ -853,18 +1008,87 @@ def test_native_asset_inventory_rejects_unique_but_unapproved_code(tmp_path: Pat
         raise AssertionError("codes outside the authoritative inventory must be rejected")
 
 
-def test_partial_region_artifact_is_preserved_and_resume_fails_closed(
+def test_orphan_partial_is_preserved_for_verified_replay(tmp_path: Path) -> None:
+    partial = tmp_path / "region.jsonl.partial"
+    partial.write_text("unfinished\n", encoding="utf-8")
+    assert (
+        _load_completed_region(tmp_path / "region.json", tmp_path / "region.jsonl", "signature")
+        is None
+    )
+    assert partial.read_text(encoding="utf-8") == "unfinished\n"
+
+
+def test_partial_region_replay_requires_exact_byte_prefix_and_preserves_partial(
     tmp_path: Path,
 ) -> None:
     partial = tmp_path / "region.jsonl.partial"
-    partial.write_text("unfinished\n", encoding="utf-8")
+    first = b'{"id":"first"}\n'
+    second = b'{"id":"second"}\n'
+    partial.write_bytes(first + second[:9])
+    before = partial.read_bytes()
+    output = tmp_path / "region.jsonl"
+    digest, row_count = _write_replayed_region_output(output, (first, second))
+    assert output.read_bytes() == first + second
+    assert partial.read_bytes() == before
+    assert digest == hashlib.sha256(first + second).hexdigest()
+    assert row_count == 2
+
+
+def test_partial_region_replay_mismatch_does_not_modify_saved_artifact(
+    tmp_path: Path,
+) -> None:
+    partial = tmp_path / "region.jsonl.partial"
+    partial.write_bytes(b'{"id":"wrong"}\n')
+    before = partial.read_bytes()
     try:
-        _load_completed_region(tmp_path / "region.json", tmp_path / "region.jsonl", "signature")
-    except FileExistsError as error:
-        assert "without a checkpoint" in str(error)
+        _write_replayed_region_output(tmp_path / "region.jsonl", (b'{"id":"right"}\n',))
+    except ValueError as error:
+        assert "differs from saved prefix" in str(error)
     else:
-        raise AssertionError("orphan partial region should prevent unsafe resume")
-    assert partial.read_text(encoding="utf-8") == "unfinished\n"
+        raise AssertionError("replay must reject mismatched saved bytes")
+    assert partial.read_bytes() == before
+    assert not (tmp_path / "region.jsonl").exists()
+
+
+def test_interrupted_replay_stage_continues_after_verified_saved_bytes(
+    tmp_path: Path,
+) -> None:
+    first = b'{"id":"first"}\n'
+    second = b'{"id":"second"}\n'
+    third = b'{"id":"third"}\n'
+    output = tmp_path / "region.jsonl"
+    partial = tmp_path / "region.jsonl.partial"
+    replay_stage = tmp_path / "region.jsonl.partial.replay"
+    partial.write_bytes(first + second[:7])
+    replay_stage.write_bytes(first + second + third[:5])
+    saved_partial = partial.read_bytes()
+    saved_stage = replay_stage.read_bytes()
+
+    digest, row_count = _write_replayed_region_output(output, (first, second, third))
+
+    assert output.read_bytes() == first + second + third
+    assert partial.read_bytes() == saved_partial
+    assert not replay_stage.exists()
+    assert digest == hashlib.sha256(first + second + third).hexdigest()
+    assert row_count == 3
+    assert len(saved_stage) < output.stat().st_size
+
+
+def test_uncheckpointed_final_output_is_verified_before_checkpoint_recovery(
+    tmp_path: Path,
+) -> None:
+    content = b'{"id":"first"}\n{"id":"second"}\n'
+    output = tmp_path / "region.jsonl"
+    output.write_bytes(content)
+    partial = tmp_path / "region.jsonl.partial"
+    partial.write_bytes(content[:13])
+    digest, row_count = _write_replayed_region_output(
+        output, (b'{"id":"first"}\n', b'{"id":"second"}\n')
+    )
+    assert output.read_bytes() == content
+    assert partial.read_bytes() == content[:13]
+    assert digest == hashlib.sha256(content).hexdigest()
+    assert row_count == 2
 
 
 def test_region_budget_resumes_same_output_and_counts_only_new_checkpoints(

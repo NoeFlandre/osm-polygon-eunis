@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
@@ -19,13 +18,15 @@ from .eunis_geometry_census_core import (
     iter_geometry_first_candidates,
 )
 from .eunis_geometry_census_persistence import (
-    _index_region,
+    _index_region_if_needed,
     _load_completed_region,
     _open_index,
     _region_signature,
     _sha256_file,
     _summary,
+    _verify_and_backfill_indexed_regions,
     _write_new_json,
+    _write_replayed_region_output,
 )
 from .eunis_geometry_census_sources import (
     BATCH_SIZE,
@@ -58,13 +59,18 @@ _ASSIGNMENT_GATE = (
     f">={MINIMUM_NATIVE_OVERLAP_PERCENTAGE:g}% polygon coverage"
 )
 EXPECTED_NATIVE_TOTAL_BYTES = 5_007_209_626
+_LEGACY_RESUME_CODE_HASHES = frozenset(
+    {"262d8b2fdc9b9903d091db622882245f0d7a2b318884e9f3f336e1d782770342"}
+)
 
 
 def _census_code_fingerprint(source_root: Path) -> str:
     """Hash the implementation modules whose behavior defines the census."""
     digest = hashlib.sha256()
     package_root = source_root / "src" / "osm_polygon_eunis"
-    production_paths = sorted(package_root.rglob("*.py"))
+    production_paths = sorted(
+        path for path in package_root.rglob("*.py") if not path.name.startswith("._")
+    )
     if not production_paths:
         raise FileNotFoundError(f"census production source tree is missing: {package_root}")
     census_paths = (
@@ -360,7 +366,53 @@ def _prepare_run(
             )
         existing = json.loads(run_path.read_text(encoding="utf-8"))
         if existing.get("run_signature") != signature:
-            raise ValueError("resume directory does not match the current pinned inputs")
+            existing_identity = dict(existing)
+            saved_signature = existing_identity.pop("run_signature", None)
+            existing_identity.pop("created_at_utc", None)
+            existing_algorithm = existing_identity.get("algorithm_fingerprint")
+            current_algorithm = identity.get("algorithm_fingerprint")
+            if not isinstance(existing_algorithm, dict) or not isinstance(current_algorithm, dict):
+                raise ValueError("resume directory does not match the current pinned inputs")
+            old_code_sha = existing_algorithm.get("code_sha256")
+            current_code_sha = current_algorithm.get("code_sha256")
+            if (
+                not isinstance(old_code_sha, str)
+                or old_code_sha not in _LEGACY_RESUME_CODE_HASHES
+                or not isinstance(current_code_sha, str)
+            ):
+                raise ValueError("resume directory does not match the current pinned inputs")
+            existing_signature_payload = json.dumps(
+                existing_identity, sort_keys=True, separators=(",", ":")
+            )
+            recomputed_saved_signature = hashlib.sha256(
+                existing_signature_payload.encode("utf-8")
+            ).hexdigest()
+            refreshed_identity = json.loads(json.dumps(identity))
+            refreshed_identity["algorithm_fingerprint"]["code_sha256"] = old_code_sha
+            if (
+                saved_signature != recomputed_saved_signature
+                or refreshed_identity != existing_identity
+            ):
+                raise ValueError("resume directory does not match the current pinned inputs")
+            refresh_path = output_dir / "resume-compatible-code-refresh.json"
+            refresh_payload = {
+                "event": "resume_compatible_code_refresh",
+                "old_code_sha256": old_code_sha,
+                "new_code_sha256": current_code_sha,
+                "run_signature": saved_signature,
+                "recorded_at_utc": datetime.now(UTC).isoformat(),
+            }
+            if refresh_path.exists():
+                saved_refresh = json.loads(refresh_path.read_text(encoding="utf-8"))
+                if any(
+                    saved_refresh.get(key) != value
+                    for key, value in refresh_payload.items()
+                    if key != "recorded_at_utc"
+                ):
+                    raise ValueError("resume code-refresh record does not match the run")
+            else:
+                _write_new_json(refresh_path, refresh_payload)
+            return str(saved_signature)
     else:
         output_dir.mkdir(parents=True, exist_ok=False)
         run_payload["run_signature"] = signature
@@ -410,7 +462,7 @@ def _run_region_checkpoints(
     return newly_completed, visited, unvisited
 
 
-def _process_region(  # noqa: C901, PLR0913, PLR0915
+def _process_region(  # noqa: C901, PLR0913
     db: Any,
     output_dir: Path,
     *,
@@ -484,12 +536,8 @@ def _process_region(  # noqa: C901, PLR0913, PLR0915
         stream=stream,
         raw_urls=raw_urls,
     )
-    temporary = output.with_name(output.name + ".partial")
-    if output.exists() or temporary.exists():
-        raise FileExistsError(f"refusing to overwrite incomplete region output: {output}")
-    digest = hashlib.sha256()
-    row_count = 0
-    with temporary.open("xb") as target:
+
+    def encoded_records() -> Any:
         for candidate in iter_geometry_first_candidates(
             geometry_rows,
             source=source,
@@ -499,15 +547,11 @@ def _process_region(  # noqa: C901, PLR0913, PLR0915
             batch_size=BATCH_SIZE,
             counts=counts,
         ):
-            encoded = (
+            yield (
                 json.dumps(_json_row(candidate), sort_keys=True, separators=(",", ":")) + "\n"
             ).encode("utf-8")
-            target.write(encoded)
-            digest.update(encoded)
-            row_count += 1
-        target.flush()
-        os.fsync(target.fileno())
-    temporary.replace(output)
+
+    output_digest, row_count = _write_replayed_region_output(output, encoded_records())
     checkpoint_payload: dict[str, object] = {
         "signature": signature,
         "source": source,
@@ -521,14 +565,14 @@ def _process_region(  # noqa: C901, PLR0913, PLR0915
         "raw_revision": RAW_PINS[stream][1],
         "candidate_rows": row_count,
         "output_path": str(output),
-        "output_sha256": digest.hexdigest(),
+        "output_sha256": output_digest,
         "counts": {name: getattr(counts, name) for name in counts.__dataclass_fields__},
     }
     _write_new_json(checkpoint, checkpoint_payload)
     return checkpoint_payload
 
 
-def main() -> int:  # noqa: C901, PLR0915
+def main() -> int:  # noqa: C901, PLR0912, PLR0915
     """Run the bounded census over the selected pinned sources."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -686,6 +730,23 @@ def main() -> int:  # noqa: C901, PLR0915
         for stream in _source_streams(source)
         for label_path in path_inventory[stream]
     )
+    index_artifacts = []
+    for source, stream, label_path in regions:
+        shard = label_path.rsplit("/", 1)[-1].removesuffix("-latest.parquet")
+        checkpoint = args.output_dir / "checkpoints" / stream / f"{shard}.json"
+        if not checkpoint.is_file():
+            continue
+        output = args.output_dir / "regions" / stream / f"{shard}.jsonl"
+        filename = label_path.rsplit("/", 1)[-1]
+        signature = _region_signature(
+            run_signature, stream, label_path, _raw_paths(stream, filename)
+        )
+        completed = _load_completed_region(checkpoint, output, signature)
+        if completed is None:
+            raise ValueError(f"completed checkpoint disappeared during index verification: {shard}")
+        index_artifacts.append((source, stream, shard, output, str(completed["output_sha256"])))
+    _verify_and_backfill_indexed_regions(index, index_artifacts, run_signature)
+
     with RasterReference(
         tuple(layers),
         threshold=0,
@@ -733,12 +794,22 @@ def main() -> int:  # noqa: C901, PLR0915
             )
             return payload
 
+        def index_region(source: str, output: Path) -> None:
+            _index_region_if_needed(
+                index,
+                source,
+                output.parent.name,
+                output.stem,
+                output,
+                run_signature,
+            )
+
         newly_completed, visited, unvisited = _run_region_checkpoints(
             regions,
             output_dir=args.output_dir,
             max_new_regions=args.max_new_regions,
             process_region=process_region,
-            index_region=lambda source, output: _index_region(index, source, output),
+            index_region=index_region,
         )
     summary = _summary(index, args.sources)
     if unvisited:
