@@ -65,6 +65,26 @@ def _url(repository: str, revision: str, path: str) -> str:
     return f"https://huggingface.co/datasets/{repository}/resolve/{revision}/{encoded_path}"
 
 
+def remap_pinned_parquet_urls(
+    label_url: str,
+    raw_urls: Sequence[str],
+    staged_inputs: Mapping[str, str],
+    *,
+    require_staged: bool = False,
+) -> tuple[str, tuple[str, ...]]:
+    """Substitute verified local paths for exact pinned Parquet URLs."""
+
+    def resolve(url: str) -> str:
+        local_path = staged_inputs.get(url)
+        if local_path is None:
+            if require_staged:
+                raise ValueError(f"required pinned Parquet input is not staged: {url}")
+            return url
+        return local_path
+
+    return resolve(label_url), tuple(resolve(url) for url in raw_urls)
+
+
 def _label_paths(stream: str) -> list[str]:
     repository, revision = LABEL_PINS[stream]
     prefix = urllib.parse.quote(LABEL_PREFIX[stream], safe="/")
@@ -81,7 +101,7 @@ def _label_paths(stream: str) -> list[str]:
         parsed_url = urllib.parse.urlsplit(url)
         if parsed_url.scheme != "https" or parsed_url.hostname != "huggingface.co":
             raise ValueError(f"unexpected pinned label URL: {url}")
-        with urllib.request.urlopen(url, timeout=45) as response:
+        with urllib.request.urlopen(url, timeout=45) as response:  # noqa: S310
             payload = json.load(response)
             next_url = _next_page(response.headers.get("Link", ""), payload)
         entries = payload if isinstance(payload, list) else payload.get("items")

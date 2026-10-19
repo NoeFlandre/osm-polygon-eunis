@@ -50,6 +50,7 @@ from .eunis_geometry_census_sources import (
     _text_query,
     _url,
     geometry_sql,
+    remap_pinned_parquet_urls,
 )
 from .eunis_geometry_census_spool import (
     OrderedGeometrySpoolIdentity,
@@ -67,6 +68,16 @@ _ASSIGNMENT_GATE = (
     f">={MINIMUM_NATIVE_OVERLAP_PERCENTAGE:g}% polygon coverage"
 )
 EXPECTED_NATIVE_TOTAL_BYTES = 5_007_209_626
+_EXPECTED_STAGED_PARQUET_INPUTS = {
+    _url(*LABEL_PINS["website"], "labels/polygons/england-latest.parquet"): (
+        272_975_393,
+        "6c37770e7fddc2f168615465dfd569126b847a96233460304549ab166f3f2b9b",
+    ),
+    _url(*RAW_PINS["website"], "polygons/england-latest.parquet"): (
+        302_222_719,
+        "37087da778b246e9a7ff232c04bfb0c3ebc8c28f762daccaa4992a4e70b797d0",
+    ),
+}
 _RESUME_CODE_COMPATIBILITY_PATH = (
     Path(__file__).resolve().parents[1] / "config" / "eunis-resume-code-compatibility.json"
 )
@@ -676,6 +687,64 @@ def _assignment_cache_location(
     return cache_path, cache_signature
 
 
+def _load_staged_input_map(manifest_path: Path, temp_dir: Path) -> dict[str, str]:
+    """Load and reverify the exact approved England files under job-local scratch."""
+    if (
+        manifest_path.is_symlink()
+        or not manifest_path.is_file()
+        or not manifest_path.resolve().is_relative_to(temp_dir.resolve())
+    ):
+        raise ValueError("staged-input manifest is not a regular file")
+    document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    records = document.get("files") if isinstance(document, dict) else None
+    if (
+        not isinstance(document, dict)
+        or document.get("schema_version") != 1
+        or not isinstance(records, list)
+    ):
+        raise ValueError("staged-input manifest has an unsupported schema")
+    staged: dict[str, str] = {}
+    for record in records:
+        if not isinstance(record, dict):
+            raise TypeError("staged-input manifest contains a malformed record")
+        source_url = record.get("source_url")
+        relative_path = record.get("local_path")
+        expected = (
+            _EXPECTED_STAGED_PARQUET_INPUTS.get(source_url) if isinstance(source_url, str) else None
+        )
+        if (
+            not isinstance(source_url, str)
+            or expected is None
+            or not isinstance(relative_path, str)
+            or not relative_path
+            or relative_path.startswith("/")
+            or ".." in Path(relative_path).parts
+            or record.get("size_bytes") != expected[0]
+            or record.get("sha256") != expected[1]
+            or source_url in staged
+        ):
+            raise ValueError("staged-input manifest does not match approved pinned metadata")
+        path = temp_dir / relative_path
+        current = temp_dir
+        for component in Path(relative_path).parts:
+            current = current / component
+            if current.is_symlink():
+                raise ValueError("staged Parquet input path contains a symlink")
+        resolved = path.resolve()
+        if (
+            path.is_symlink()
+            or not resolved.is_relative_to(temp_dir.resolve())
+            or not resolved.is_file()
+            or resolved.stat().st_size != expected[0]
+            or _sha256_file(resolved) != expected[1]
+        ):
+            raise ValueError(
+                f"staged pinned Parquet input failed size/hash verification: {source_url}"
+            )
+        staged[source_url] = str(resolved)
+    return staged
+
+
 def _process_region(  # noqa: C901, PLR0913, PLR0915
     db: Any,
     output_dir: Path,
@@ -686,6 +755,8 @@ def _process_region(  # noqa: C901, PLR0913, PLR0915
     label_url: str,
     raw_paths: Sequence[str],
     raw_urls: Sequence[str],
+    staged_inputs: Mapping[str, str],
+    require_staged_inputs: bool,
     run_signature: str,
     code_sha256: str,
     reference: Any,
@@ -702,6 +773,12 @@ def _process_region(  # noqa: C901, PLR0913, PLR0915
     completed = _load_completed_region(checkpoint, output, signature)
     if completed is not None:
         return completed
+    label_url, raw_urls = remap_pinned_parquet_urls(
+        label_url,
+        raw_urls,
+        staged_inputs,
+        require_staged=require_staged_inputs,
+    )
     counts = CensusCounts()
 
     def classify_geometry(value: object) -> Any:
@@ -910,6 +987,16 @@ def main() -> int:  # noqa: C901, PLR0912, PLR0915
         help="job-local scratch directory for DuckDB spill",
     )
     parser.add_argument(
+        "--staged-input-manifest",
+        type=Path,
+        help="verified pinned Parquet paths relative to --temp-dir",
+    )
+    parser.add_argument(
+        "--require-staged-inputs",
+        action="store_true",
+        help="fail instead of falling back to remote Parquet for any uncompleted region",
+    )
+    parser.add_argument(
         "--sources",
         nargs="+",
         choices=("website", "description", "wiki"),
@@ -924,6 +1011,13 @@ def main() -> int:  # noqa: C901, PLR0912, PLR0915
     args = parser.parse_args()
     if not args.temp_dir.is_dir():
         raise SystemExit("--temp-dir must already exist as job-local scratch")
+    if args.require_staged_inputs and args.staged_input_manifest is None:
+        raise SystemExit("--require-staged-inputs requires --staged-input-manifest")
+    staged_inputs = (
+        _load_staged_input_map(args.staged_input_manifest, args.temp_dir)
+        if args.staged_input_manifest is not None
+        else {}
+    )
     if args.output_dir.resolve().is_relative_to(args.temp_dir.resolve()):
         raise SystemExit("--output-dir must be durable project storage, outside --temp-dir")
     import sys  # noqa: PLC0415
@@ -1081,6 +1175,8 @@ def main() -> int:  # noqa: C901, PLR0912, PLR0915
                 label_url=_url(label_repo, label_revision, label_path),
                 raw_paths=raw_paths,
                 raw_urls=raw_urls,
+                staged_inputs=staged_inputs,
+                require_staged_inputs=args.require_staged_inputs,
                 run_signature=run_signature,
                 code_sha256=code_sha256,
                 reference=reference,

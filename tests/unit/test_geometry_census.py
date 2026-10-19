@@ -1046,6 +1046,8 @@ def test_region_runner_keeps_geometry_cursor_live_during_text_fetch(  # noqa: C9
         }
         for index in (1, 2)
     ]
+    geometry_parameters_seen: list[object] = []
+    text_source_paths: list[object] = []
 
     class Cursor:
         def __init__(self, kind: str):
@@ -1056,10 +1058,12 @@ def test_region_runner_keeps_geometry_cursor_live_during_text_fetch(  # noqa: C9
 
         def execute(self, sql, params):
             if self.kind == "geometry":
+                geometry_parameters_seen.extend(params)
                 self.description = [(key,) for key in geometry_rows[0]]
                 self.rows = [tuple(row.values()) for row in geometry_rows]
             else:
                 assert "read_parquet(?)" in sql
+                text_source_paths.append(params[-1])
                 geometry_cursor = next(cursor for cursor in db.created if cursor.kind == "geometry")
                 events.append("text")
                 if events.count("text") == 1:
@@ -1102,6 +1106,11 @@ def test_region_runner_keeps_geometry_cursor_live_during_text_fetch(  # noqa: C9
         label_url="label-url",
         raw_paths=("polygons/a.parquet",),
         raw_urls=("polygon-url",),
+        staged_inputs={
+            "label-url": "file:///tmp/staged-label.parquet",
+            "polygon-url": "file:///tmp/staged-geometry.parquet",
+        },
+        require_staged_inputs=True,
         run_signature="a" * 64,
         code_sha256="a" * 64,
         reference=type(
@@ -1120,6 +1129,9 @@ def test_region_runner_keeps_geometry_cursor_live_during_text_fetch(  # noqa: C9
     geometry_cursor = next(cursor for cursor in db.created if cursor.kind == "geometry")
     assert geometry_cursor.fetchmany_calls == 3
     assert events == ["geometry", "text", "geometry", "text", "geometry"]
+    assert "file:///tmp/staged-label.parquet" in geometry_parameters_seen
+    assert "file:///tmp/staged-geometry.parquet" in geometry_parameters_seen
+    assert text_source_paths == ["file:///tmp/staged-geometry.parquet"] * 2
 
 
 def test_completed_region_recovery_checks_signature_and_output_digest(
@@ -1534,6 +1546,18 @@ def test_checked_in_resume_policy_targets_current_census_fingerprint() -> None:
     current_code = _census_code_fingerprint(Path(__file__).resolve().parents[2])
     pairs = _resume_code_compatibility_pairs()
     assert pairs == {
+        (
+            "262d8b2fdc9b9903d091db622882245f0d7a2b318884e9f3f336e1d782770342",
+            "92270e23ba5134f3add5440d0b46a1b8cc80babf095be64e536ae487d4bb92b3",
+        ),
+        (
+            "5c60bc8d8022299b72a3c03ad878b2f58105174808b580b4faa9669daeb23326",
+            "92270e23ba5134f3add5440d0b46a1b8cc80babf095be64e536ae487d4bb92b3",
+        ),
+        (
+            "92270e23ba5134f3add5440d0b46a1b8cc80babf095be64e536ae487d4bb92b3",
+            current_code,
+        ),
         (
             "262d8b2fdc9b9903d091db622882245f0d7a2b318884e9f3f336e1d782770342",
             current_code,
