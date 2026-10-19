@@ -8,7 +8,7 @@ import sqlite3
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from scripts.eunis_geometry_census_core import (
     Assignment,
@@ -54,6 +54,38 @@ class EunisResult:
 
 def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _write_resume_code_policy(
+    tmp_path: Path,
+    monkeypatch: Any,
+    transitions: Sequence[tuple[str, str]],
+) -> None:
+    import scripts.eunis_geometry_first_census as census_runner
+
+    policy_path = tmp_path / "resume-code-policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "compatible_transitions": [
+                    {
+                        "from_code_sha256": old_code,
+                        "to_code_sha256": new_code,
+                        "reason": "test-only verified byte-preserving transition",
+                    }
+                    for old_code, new_code in transitions
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        census_runner,
+        "_RESUME_CODE_COMPATIBILITY_PATH",
+        policy_path,
+        raising=False,
+    )
 
 
 def _polygon_key(row: Mapping[str, object]) -> tuple[str, str, str, str]:
@@ -969,11 +1001,16 @@ def test_region_runner_keeps_geometry_cursor_live_during_text_fetch(  # noqa: C9
         },
     )
     monkeypatch.setattr(runner, "BATCH_SIZE", 1)
-    monkeypatch.setattr(runner, "_region_signature", lambda *args: "signature")
+    monkeypatch.setattr(runner, "_region_signature", lambda *args: "b" * 64)
     monkeypatch.setattr(runner, "_load_completed_region", lambda *args: None)
     monkeypatch.setattr(runner, "_write_new_json", lambda *args: None)
     geometry_module = ModuleType("osm_polygon_eunis.geometry")
-    monkeypatch.setattr(geometry_module, "parse_geometry", lambda geometry: geometry, raising=False)
+    monkeypatch.setattr(
+        geometry_module,
+        "parse_geometry",
+        lambda geometry: Geometry() if isinstance(geometry, bytes) else geometry,
+        raising=False,
+    )
     monkeypatch.setattr(geometry_module, "to_equal_area", lambda geometry: geometry, raising=False)
     package_module = ModuleType("osm_polygon_eunis")
     package_module.__path__ = []
@@ -1065,7 +1102,7 @@ def test_region_runner_keeps_geometry_cursor_live_during_text_fetch(  # noqa: C9
         label_url="label-url",
         raw_paths=("polygons/a.parquet",),
         raw_urls=("polygon-url",),
-        run_signature="run",
+        run_signature="a" * 64,
         code_sha256="a" * 64,
         reference=type(
             "Reference",
@@ -1222,14 +1259,21 @@ def test_code_fingerprint_covers_production_assignment_modules(tmp_path: Path) -
     assert before != after
 
 
-def test_legacy_run_signature_allows_only_pinned_code_refresh(tmp_path: Path) -> None:
+def test_legacy_run_signature_allows_only_reviewed_code_refresh(
+    tmp_path: Path, monkeypatch
+) -> None:
+    old_code = "262d8b2fdc9b9903d091db622882245f0d7a2b318884e9f3f336e1d782770342"
+    current_code = "a" * 64
+    next_code = "b" * 64
+    _write_resume_code_policy(
+        tmp_path,
+        monkeypatch,
+        ((old_code, current_code), (old_code, next_code)),
+    )
     from scripts.eunis_geometry_first_census import (
-        _LEGACY_RESUME_CODE_HASHES,
         _prepare_run,
     )
 
-    old_code = next(iter(_LEGACY_RESUME_CODE_HASHES))
-    current_code = "current-code"
     output_dir = tmp_path / "legacy-run"
     legacy_algorithm: dict[str, str] = {
         "algorithm_version": "geometry-first-v3",
@@ -1258,7 +1302,6 @@ def test_legacy_run_signature_allows_only_pinned_code_refresh(tmp_path: Path) ->
     assert refresh_record["new_code_sha256"] == current_code
     assert refresh_record["run_signature"] == saved_signature
 
-    next_code = "next-code"
     next_revision = {
         **legacy_identity,
         "created_at_utc": "later-time",
@@ -1272,6 +1315,19 @@ def test_legacy_run_signature_allows_only_pinned_code_refresh(tmp_path: Path) ->
     assert chain_record["new_code_sha256"] == next_code
     assert chain_record["run_signature"] == saved_signature
     assert _prepare_run(output_dir, next_revision, resume=True) == saved_signature
+
+    unreviewed_revision = {
+        **legacy_identity,
+        "created_at_utc": "later-time",
+        "algorithm_fingerprint": {**legacy_algorithm, "code_sha256": "c" * 64},
+    }
+    try:
+        _prepare_run(output_dir, unreviewed_revision, resume=True)
+    except ValueError as error:
+        assert "does not match" in str(error)
+    else:
+        raise AssertionError("unreviewed code refresh must fail closed")
+    assert len(list(output_dir.glob("resume-compatible-code-refresh-*.json"))) == 1
 
     changed_gate = {
         **refreshed,
@@ -1309,13 +1365,14 @@ def test_legacy_run_signature_rejects_unknown_old_code_hash(tmp_path: Path) -> N
         raise AssertionError("unknown old code hash must not be accepted")
 
 
-def test_legacy_resume_recovers_matching_code_refresh_partial(tmp_path: Path) -> None:
+def test_legacy_resume_recovers_matching_code_refresh_partial(tmp_path: Path, monkeypatch) -> None:
+    old_code = "262d8b2fdc9b9903d091db622882245f0d7a2b318884e9f3f336e1d782770342"
+    current_code = "a" * 64
+    _write_resume_code_policy(tmp_path, monkeypatch, ((old_code, current_code),))
     from scripts.eunis_geometry_first_census import (
-        _LEGACY_RESUME_CODE_HASHES,
         _prepare_run,
     )
 
-    old_code = next(iter(_LEGACY_RESUME_CODE_HASHES))
     output_dir = tmp_path / "legacy-run"
     legacy_algorithm: dict[str, str] = {
         "algorithm_version": "geometry-first-v3",
@@ -1330,7 +1387,7 @@ def test_legacy_resume_recovers_matching_code_refresh_partial(tmp_path: Path) ->
     staged_record = {
         "event": "resume_compatible_code_refresh",
         "old_code_sha256": old_code,
-        "new_code_sha256": "current-code",
+        "new_code_sha256": current_code,
         "run_signature": saved_signature,
         "recorded_at_utc": "2026-10-16T00:00:00+00:00",
     }
@@ -1339,7 +1396,7 @@ def test_legacy_resume_recovers_matching_code_refresh_partial(tmp_path: Path) ->
     legacy_identity = {key: value for key, value in legacy.items() if key != "run_signature"}
     refreshed = {
         **legacy_identity,
-        "algorithm_fingerprint": {**legacy_algorithm, "code_sha256": "current-code"},
+        "algorithm_fingerprint": {**legacy_algorithm, "code_sha256": current_code},
     }
 
     assert _prepare_run(output_dir, refreshed, resume=True) == saved_signature
@@ -1348,13 +1405,16 @@ def test_legacy_resume_recovers_matching_code_refresh_partial(tmp_path: Path) ->
     assert not partial.exists()
 
 
-def test_legacy_resume_preserves_conflicting_code_refresh_partial(tmp_path: Path) -> None:
+def test_legacy_resume_preserves_conflicting_code_refresh_partial(
+    tmp_path: Path, monkeypatch
+) -> None:
+    old_code = "262d8b2fdc9b9903d091db622882245f0d7a2b318884e9f3f336e1d782770342"
+    current_code = "a" * 64
+    _write_resume_code_policy(tmp_path, monkeypatch, ((old_code, current_code),))
     from scripts.eunis_geometry_first_census import (
-        _LEGACY_RESUME_CODE_HASHES,
         _prepare_run,
     )
 
-    old_code = next(iter(_LEGACY_RESUME_CODE_HASHES))
     output_dir = tmp_path / "legacy-run"
     legacy_algorithm: dict[str, str] = {
         "algorithm_version": "geometry-first-v3",
@@ -1369,7 +1429,7 @@ def test_legacy_resume_preserves_conflicting_code_refresh_partial(tmp_path: Path
     staged_record = {
         "event": "resume_compatible_code_refresh",
         "old_code_sha256": old_code,
-        "new_code_sha256": "some-other-code",
+        "new_code_sha256": "d" * 64,
         "run_signature": saved_signature,
         "recorded_at_utc": "2026-10-16T00:00:00+00:00",
     }
@@ -1378,7 +1438,7 @@ def test_legacy_resume_preserves_conflicting_code_refresh_partial(tmp_path: Path
     legacy_identity = {key: value for key, value in legacy.items() if key != "run_signature"}
     refreshed = {
         **legacy_identity,
-        "algorithm_fingerprint": {**legacy_algorithm, "code_sha256": "current-code"},
+        "algorithm_fingerprint": {**legacy_algorithm, "code_sha256": current_code},
     }
 
     try:
@@ -1389,6 +1449,101 @@ def test_legacy_resume_preserves_conflicting_code_refresh_partial(tmp_path: Path
         raise AssertionError("a conflicting staged transition must fail closed")
     assert json.loads(partial.read_text(encoding="utf-8")) == staged_record
     assert not (output_dir / "resume-compatible-code-refresh.json").exists()
+
+
+def test_legacy_resume_rejects_completed_run_before_code_refresh(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from scripts.eunis_geometry_first_census import _prepare_run
+
+    old_code = "262d8b2fdc9b9903d091db622882245f0d7a2b318884e9f3f336e1d782770342"
+    current_code = "a" * 64
+    _write_resume_code_policy(tmp_path, monkeypatch, ((old_code, current_code),))
+    legacy: dict[str, object] = {
+        "algorithm_fingerprint": {"code_sha256": old_code},
+    }
+    refreshed = {
+        "algorithm_fingerprint": {"code_sha256": current_code},
+    }
+
+    for marker_kind in ("regular", "dangling-symlink"):
+        output_dir = tmp_path / marker_kind
+        _prepare_run(output_dir, dict(legacy), resume=False)
+        marker = output_dir / "complete.json"
+        if marker_kind == "regular":
+            marker.write_text("{}\n", encoding="utf-8")
+        else:
+            marker.symlink_to(tmp_path / "missing-complete-target")
+
+        try:
+            _prepare_run(output_dir, dict(refreshed), resume=True)
+        except FileExistsError as error:
+            assert "already complete" in str(error)
+        else:
+            raise AssertionError("completed runs must not receive code-refresh records")
+        assert not list(output_dir.glob("resume-compatible-code-refresh*.json"))
+
+
+def test_legacy_resume_rejects_corrupt_refresh_history(tmp_path: Path, monkeypatch) -> None:
+    from scripts.eunis_geometry_first_census import _prepare_run
+
+    old_code = "262d8b2fdc9b9903d091db622882245f0d7a2b318884e9f3f336e1d782770342"
+    current_code = "a" * 64
+    _write_resume_code_policy(tmp_path, monkeypatch, ((old_code, current_code),))
+    legacy: dict[str, object] = {"algorithm_fingerprint": {"code_sha256": old_code}}
+    refreshed = {
+        "algorithm_fingerprint": {"code_sha256": current_code},
+    }
+
+    for corruption in ("missing-timestamp", "malformed-timestamp", "bad-new-hash"):
+        output_dir = tmp_path / corruption
+        signature = _prepare_run(output_dir, dict(legacy), resume=False)
+        record: dict[str, object] = {
+            "event": "resume_compatible_code_refresh",
+            "old_code_sha256": old_code,
+            "new_code_sha256": current_code,
+            "run_signature": signature,
+            "recorded_at_utc": "2026-10-16T00:00:00+00:00",
+        }
+        if corruption == "missing-timestamp":
+            record.pop("recorded_at_utc")
+        elif corruption == "malformed-timestamp":
+            record["recorded_at_utc"] = "not-a-timestamp"
+        else:
+            record["new_code_sha256"] = "not-a-sha256"
+        record_path = output_dir / "resume-compatible-code-refresh.json"
+        encoded_record = json.dumps(record)
+        record_path.write_text(encoded_record, encoding="utf-8")
+
+        try:
+            _prepare_run(output_dir, dict(refreshed), resume=True)
+        except ValueError as error:
+            assert "resume code-refresh record" in str(error)
+        else:
+            raise AssertionError(f"corrupt refresh history was accepted: {corruption}")
+        assert record_path.read_text(encoding="utf-8") == encoded_record
+
+
+def test_checked_in_resume_policy_targets_current_census_fingerprint() -> None:
+    from scripts.eunis_geometry_first_census import (
+        _RESUME_CODE_COMPATIBILITY_PATH,
+        _census_code_fingerprint,
+        _resume_code_compatibility_pairs,
+    )
+
+    current_code = _census_code_fingerprint(Path(__file__).resolve().parents[2])
+    pairs = _resume_code_compatibility_pairs()
+    assert pairs == {
+        (
+            "262d8b2fdc9b9903d091db622882245f0d7a2b318884e9f3f336e1d782770342",
+            current_code,
+        ),
+        (
+            "5c60bc8d8022299b72a3c03ad878b2f58105174808b580b4faa9669daeb23326",
+            current_code,
+        ),
+    }
+    assert _RESUME_CODE_COMPATIBILITY_PATH.is_file()
 
 
 def test_summary_reports_zero_eligible_source_decisions(tmp_path: Path) -> None:

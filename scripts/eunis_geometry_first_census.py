@@ -51,6 +51,10 @@ from .eunis_geometry_census_sources import (
     _url,
     geometry_sql,
 )
+from .eunis_geometry_census_spool import (
+    OrderedGeometrySpoolIdentity,
+    prepare_ordered_geometry_spool,
+)
 
 
 def _source_streams(source: str) -> tuple[str, ...]:
@@ -63,8 +67,8 @@ _ASSIGNMENT_GATE = (
     f">={MINIMUM_NATIVE_OVERLAP_PERCENTAGE:g}% polygon coverage"
 )
 EXPECTED_NATIVE_TOTAL_BYTES = 5_007_209_626
-_LEGACY_RESUME_CODE_HASHES = frozenset(
-    {"262d8b2fdc9b9903d091db622882245f0d7a2b318884e9f3f336e1d782770342"}
+_RESUME_CODE_COMPATIBILITY_PATH = (
+    Path(__file__).resolve().parents[1] / "config" / "eunis-resume-code-compatibility.json"
 )
 
 
@@ -82,6 +86,7 @@ def _census_code_fingerprint(source_root: Path) -> str:
         Path(__file__).with_name("eunis_geometry_census_core.py"),
         Path(__file__).with_name("eunis_geometry_census_sources.py"),
         Path(__file__).with_name("eunis_geometry_census_persistence.py"),
+        Path(__file__).with_name("eunis_geometry_census_spool.py"),
     )
     for path in (*census_paths, *production_paths):
         if not path.is_file():
@@ -352,6 +357,45 @@ def _parse_production_geometry(value: object) -> Any:
     return parse_geometry(value)
 
 
+def _resume_code_compatibility_pairs() -> frozenset[tuple[str, str]]:
+    """Load the exact reviewed code-fingerprint transitions allowed for resume."""
+    path = _RESUME_CODE_COMPATIBILITY_PATH
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("resume code compatibility policy is unavailable")
+    try:
+        policy = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("resume code compatibility policy is unreadable") from error
+    if (
+        not isinstance(policy, dict)
+        or set(policy) != {"schema_version", "compatible_transitions"}
+        or type(policy.get("schema_version")) is not int
+        or policy["schema_version"] != 1
+        or not isinstance(policy.get("compatible_transitions"), list)
+    ):
+        raise ValueError("resume code compatibility policy is malformed")
+
+    pairs: set[tuple[str, str]] = set()
+    expected_fields = {"from_code_sha256", "to_code_sha256", "reason"}
+    for transition in policy["compatible_transitions"]:
+        if (
+            not isinstance(transition, dict)
+            or set(transition) != expected_fields
+            or not isinstance(transition.get("from_code_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", transition["from_code_sha256"])
+            or not isinstance(transition.get("to_code_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", transition["to_code_sha256"])
+            or not isinstance(transition.get("reason"), str)
+            or not transition["reason"].strip()
+        ):
+            raise ValueError("resume code compatibility policy contains a malformed transition")
+        pair = (transition["from_code_sha256"], transition["to_code_sha256"])
+        if pair in pairs:
+            raise ValueError("resume code compatibility policy contains a duplicate transition")
+        pairs.add(pair)
+    return frozenset(pairs)
+
+
 def _prepare_run(
     output_dir: Path,
     run_payload: dict[str, object],
@@ -363,7 +407,9 @@ def _prepare_run(
     encoded = json.dumps(identity, sort_keys=True, separators=(",", ":"))
     signature = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
     run_path = output_dir / "run.json"
-    if output_dir.exists():
+    if os.path.lexists(output_dir):
+        if os.path.lexists(output_dir / "complete.json"):
+            raise FileExistsError("this census run is already complete")
         if not resume or not run_path.is_file():
             raise FileExistsError(
                 "output directory exists; pass --resume for an identical pinned run"
@@ -381,8 +427,8 @@ def _prepare_run(
             current_code_sha = current_algorithm.get("code_sha256")
             if (
                 not isinstance(old_code_sha, str)
-                or old_code_sha not in _LEGACY_RESUME_CODE_HASHES
                 or not isinstance(current_code_sha, str)
+                or (old_code_sha, current_code_sha) not in _resume_code_compatibility_pairs()
             ):
                 raise ValueError("resume directory does not match the current pinned inputs")
             existing_signature_payload = json.dumps(
@@ -409,8 +455,6 @@ def _prepare_run(
         output_dir.mkdir(parents=True, exist_ok=False)
         run_payload["run_signature"] = signature
         _write_new_json(run_path, run_payload)
-    if (output_dir / "complete.json").exists():
-        raise FileExistsError("this census run is already complete")
     return signature
 
 
@@ -421,8 +465,8 @@ def _record_resume_code_refresh(
     new_code_sha: str,
     run_signature: str,
 ) -> None:
-    if not re.fullmatch(r"[A-Za-z0-9._-]+", old_code_sha) or not re.fullmatch(
-        r"[A-Za-z0-9._-]+", new_code_sha
+    if not re.fullmatch(r"[0-9a-f]{64}", old_code_sha) or not re.fullmatch(
+        r"[0-9a-f]{64}", new_code_sha
     ):
         raise ValueError("resume code-refresh hash is malformed")
     records = _read_resume_code_refreshes(output_dir, run_signature)
@@ -449,20 +493,54 @@ def _read_resume_code_refreshes(output_dir: Path, run_signature: str) -> list[di
     base_path = output_dir / "resume-compatible-code-refresh.json"
     refresh_paths = sorted(output_dir.glob("resume-compatible-code-refresh-*.json"))
     records: list[dict[str, object]] = []
-    for path in ([base_path] if base_path.exists() else []) + refresh_paths:
-        if path.is_symlink() or not path.is_file():
-            raise ValueError("resume code-refresh record is not a regular file")
-        record = json.loads(path.read_text(encoding="utf-8"))
-        if (
-            not isinstance(record, dict)
-            or record.get("event") != "resume_compatible_code_refresh"
-            or record.get("run_signature") != run_signature
-            or not isinstance(record.get("old_code_sha256"), str)
-            or not isinstance(record.get("new_code_sha256"), str)
-        ):
+    for path in ([base_path] if os.path.lexists(base_path) else []) + refresh_paths:
+        record = _read_resume_code_refresh_record(path)
+        if record["run_signature"] != run_signature:
             raise ValueError("resume code-refresh record does not match the run")
         records.append(record)
     return records
+
+
+def _read_resume_code_refresh_record(path: Path) -> dict[str, object]:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("resume code-refresh record is not a regular file")
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("resume code-refresh record is malformed") from error
+    expected_fields = {
+        "event",
+        "old_code_sha256",
+        "new_code_sha256",
+        "run_signature",
+        "recorded_at_utc",
+    }
+    if not isinstance(record, dict) or set(record) != expected_fields:
+        raise ValueError("resume code-refresh record is malformed")
+    old_code_sha = record["old_code_sha256"]
+    new_code_sha = record["new_code_sha256"]
+    run_signature = record["run_signature"]
+    recorded_at = record["recorded_at_utc"]
+    if (
+        record["event"] != "resume_compatible_code_refresh"
+        or not isinstance(old_code_sha, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", old_code_sha)
+        or not isinstance(new_code_sha, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", new_code_sha)
+        or old_code_sha == new_code_sha
+        or not isinstance(run_signature, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", run_signature)
+        or not isinstance(recorded_at, str)
+        or not recorded_at
+    ):
+        raise ValueError("resume code-refresh record is malformed")
+    try:
+        parsed_timestamp = datetime.fromisoformat(recorded_at)
+    except ValueError as error:
+        raise ValueError("resume code-refresh record timestamp is malformed") from error
+    if parsed_timestamp.tzinfo is None or parsed_timestamp.utcoffset() is None:
+        raise ValueError("resume code-refresh record timestamp must include a UTC offset")
+    return record
 
 
 def _resume_code_refresh_tail(old_code_sha: str, records: Sequence[Mapping[str, object]]) -> str:
@@ -471,8 +549,9 @@ def _resume_code_refresh_tail(old_code_sha: str, records: Sequence[Mapping[str, 
         old = str(record["old_code_sha256"])
         new = str(record["new_code_sha256"])
         if (
-            not re.fullmatch(r"[A-Za-z0-9._-]+", old)
-            or not re.fullmatch(r"[A-Za-z0-9._-]+", new)
+            not re.fullmatch(r"[0-9a-f]{64}", old)
+            or not re.fullmatch(r"[0-9a-f]{64}", new)
+            or old == new
             or old in successors
         ):
             raise ValueError("resume code-refresh chain is malformed")
@@ -502,20 +581,9 @@ def _write_resume_code_refresh(
     temporary = path.with_name(path.name + ".partial")
 
     def validate(candidate: Path) -> dict[str, object]:
-        if candidate.is_symlink() or not candidate.is_file():
-            raise ValueError("resume code-refresh record is not a regular file")
-        record = json.loads(candidate.read_text(encoding="utf-8"))
-        if not isinstance(record, dict) or any(
-            record.get(name) != value for name, value in expected.items()
-        ):
+        record = _read_resume_code_refresh_record(candidate)
+        if any(record.get(name) != value for name, value in expected.items()):
             raise ValueError("resume code-refresh record conflicts with the requested transition")
-        recorded_at = record.get("recorded_at_utc")
-        if not isinstance(recorded_at, str) or not recorded_at:
-            raise ValueError("resume code-refresh record timestamp is malformed")
-        try:
-            datetime.fromisoformat(recorded_at)
-        except ValueError as error:
-            raise ValueError("resume code-refresh record timestamp is malformed") from error
         return record
 
     if not path.exists() and not temporary.exists():
@@ -685,6 +753,28 @@ def _process_region(  # noqa: C901, PLR0913, PLR0915
         stream=stream,
         raw_urls=raw_urls,
     )
+    label_repo, label_revision = LABEL_PINS[stream]
+    raw_repo, raw_revision = RAW_PINS[stream]
+    spool_identity = OrderedGeometrySpoolIdentity(
+        run_signature=run_signature,
+        region_signature=signature,
+        code_sha256=code_sha256,
+        source=source,
+        stream=stream,
+        shard=shard,
+        label_repository=label_repo,
+        label_revision=label_revision,
+        label_path=label_path,
+        raw_repository=raw_repo,
+        raw_revision=raw_revision,
+        raw_paths=tuple(raw_paths),
+        query_sha256=hashlib.sha256(geometry_query.encode("utf-8")).hexdigest(),
+    )
+    geometry_spool = prepare_ordered_geometry_spool(
+        geometry_rows,
+        output_dir / "ordered-geometry-spool",
+        spool_identity,
+    )
 
     cache_path, cache_signature = _assignment_cache_location(
         output_dir,
@@ -731,7 +821,7 @@ def _process_region(  # noqa: C901, PLR0913, PLR0915
 
         def encoded_records() -> Any:
             for candidate in iter_geometry_first_candidates(
-                geometry_rows,
+                geometry_spool.rows(),
                 source=source,
                 stream=stream,
                 classify=classify,
@@ -744,6 +834,8 @@ def _process_region(  # noqa: C901, PLR0913, PLR0915
                 ).encode("utf-8")
 
         output_digest, row_count = _write_replayed_region_output(output, encoded_records())
+    if counts.geometry_rows != geometry_spool.row_count:
+        raise ValueError("ordered geometry spool row count differs from census consumption")
     checkpoint_payload: dict[str, object] = {
         "signature": signature,
         "source": source,
@@ -766,6 +858,21 @@ def _process_region(  # noqa: C901, PLR0913, PLR0915
             "seeded_rows": text_cache.seeded_rows,
             "hits": text_cache.hits,
             "remote_rows": text_cache.remote_rows,
+        },
+        "geometry_spool": {
+            "mode": geometry_spool.mode,
+            "identity_sha256": spool_identity.sha256,
+            "query_sha256": spool_identity.payload()["query_sha256"],
+            "row_count": geometry_spool.row_count,
+            "byte_count": geometry_spool.byte_count,
+            "content_sha256": geometry_spool.content_sha256,
+            "recovered_rows": geometry_spool.recovered_rows,
+            "creation_seconds": geometry_spool.creation_seconds,
+            "source_query_seconds": geometry_spool.source_query_seconds,
+            "chunk_write_seconds": geometry_spool.chunk_write_seconds,
+            "validation_seconds": geometry_spool.validation_seconds,
+            "read_seconds": geometry_spool.read_seconds,
+            "reuse_seconds": geometry_spool.reuse_seconds,
         },
         "counts": {name: getattr(counts, name) for name in counts.__dataclass_fields__},
     }

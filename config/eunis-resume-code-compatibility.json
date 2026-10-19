@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "compatible_transitions": [
+    {
+      "from_code_sha256": "262d8b2fdc9b9903d091db622882245f0d7a2b318884e9f3f336e1d782770342",
+      "to_code_sha256": "92270e23ba5134f3add5440d0b46a1b8cc80babf095be64e536ae487d4bb92b3",
+      "reason": "PR 159 spool and cache transition preserves the geometry-first assignment and exact replay contract verified by focused tests."
+    },
+    {
+      "from_code_sha256": "5c60bc8d8022299b72a3c03ad878b2f58105174808b580b4faa9669daeb23326",
+      "to_code_sha256": "92270e23ba5134f3add5440d0b46a1b8cc80babf095be64e536ae487d4bb92b3",
+      "reason": "PR 159 spool and cache transition preserves the geometry-first assignment and exact replay contract verified by focused tests."
+    }
+  ]
+}
