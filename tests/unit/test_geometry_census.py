@@ -18,11 +18,13 @@ from scripts.eunis_geometry_census_core import (
 )
 from scripts.eunis_geometry_census_persistence import (
     AssignmentCache,
+    VerifiedTextCache,
     _index_region,
     _index_region_if_needed,
     _load_completed_region,
     _open_index,
     _summary,
+    _verified_text_cache_location,
     _verify_and_backfill_indexed_regions,
     _write_replayed_region_output,
 )
@@ -514,6 +516,250 @@ def test_assignment_cache_rejects_changed_geometry_for_same_polygon(tmp_path: Pa
         assert "geometry changed" in str(error)
     else:
         raise AssertionError("changed source geometry must invalidate its saved assignment")
+
+
+def test_verified_text_cache_seeds_replay_rows_without_changing_output_hash(
+    tmp_path: Path,
+) -> None:
+    label_path = "labels/england.parquet"
+    texts = {f"sentence-{index}": f"pinned sentence text {index}" for index in range(4)}
+    rows = [
+        {
+            "label_path": label_path,
+            "shard": "england",
+            "stream": "website",
+            "decision": "yes" if index % 2 == 0 else "no",
+            "sentence_key": key,
+            "polygon_id": str(index),
+            "osm_type": "way",
+            "osm_id": str(index),
+            "source_pbf": None,
+            "text_sha256": _sha(texts[key]),
+            "geometry": "covered",
+        }
+        for index, key in enumerate(texts)
+    ]
+    rows.sort(key=lambda row: candidate_order_digest("website", row))
+    fetch_calls: list[list[str]] = []
+
+    def fetch_from_source(batch: Sequence[Mapping[str, object]]) -> Mapping[str, str]:
+        keys = [str(row["sentence_key"]) for row in batch]
+        fetch_calls.append(keys)
+        return {key: texts[key] for key in keys}
+
+    assignment = EunisResult("R11", "steppe", 80.0, "EEA 2021")
+    baseline = list(
+        iter_geometry_first_candidates(
+            rows,
+            source="website",
+            stream="website",
+            classify=lambda _row: assignment,
+            fetch_texts=fetch_from_source,
+            batch_size=2,
+        )
+    )
+    baseline_bytes = b"".join(
+        (json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        for row in baseline
+    )
+    assert len(fetch_calls) == 2
+    assert sum(map(len, fetch_calls)) == 4
+
+    saved_output = tmp_path / "england.jsonl.partial.replay"
+    saved_output.write_bytes(baseline_bytes)
+    cache_path, cache_signature = _verified_text_cache_location(
+        tmp_path,
+        code_sha256="a" * 64,
+        region_signature="pinned-england-source-signature",
+        stream="website",
+        shard="england",
+    )
+
+    def unexpected_fetch(_missing: Sequence[Mapping[str, object]]) -> Mapping[str, str]:
+        raise AssertionError("saved replay text should bypass remote lookup")
+
+    with VerifiedTextCache(cache_path, cache_signature) as cache:
+        assert (
+            cache.seed_from_outputs(
+                (saved_output,),
+                source="website",
+                stream="website",
+                shard="england",
+                label_path=label_path,
+            )
+            == 4
+        )
+        replayed = list(
+            iter_geometry_first_candidates(
+                rows,
+                source="website",
+                stream="website",
+                classify=lambda _row: assignment,
+                fetch_texts=lambda batch: cache.fetch(batch, unexpected_fetch),
+                batch_size=2,
+            )
+        )
+        assert cache.hits == 4
+        assert cache.remote_rows == 0
+
+    replayed_bytes = b"".join(
+        (json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        for row in replayed
+    )
+    assert replayed_bytes == baseline_bytes
+    assert hashlib.sha256(replayed_bytes).hexdigest() == hashlib.sha256(baseline_bytes).hexdigest()
+
+
+def test_verified_text_cache_resume_fetches_only_uncached_rows(tmp_path: Path) -> None:
+    texts = {f"sentence-{index}": f"pinned sentence text {index}" for index in range(4)}
+    rows = [{"sentence_key": key, "text_sha256": _sha(text)} for key, text in texts.items()]
+    cache_path, signature = _verified_text_cache_location(
+        tmp_path,
+        code_sha256="b" * 64,
+        region_signature="region-source-signature",
+        stream="website",
+        shard="england",
+    )
+    with VerifiedTextCache(cache_path, signature) as cache:
+        prefix = cache.fetch(
+            rows[:2],
+            lambda batch: {
+                str(row["sentence_key"]): texts[str(row["sentence_key"])] for row in batch
+            },
+        )
+        assert prefix == {key: texts[key] for key in list(texts)[:2]}
+        assert cache.remote_rows == 2
+
+    remote_calls: list[str] = []
+
+    def fetch_tail(batch: Sequence[Mapping[str, object]]) -> Mapping[str, str]:
+        remote_calls.extend(str(row["sentence_key"]) for row in batch)
+        return {str(row["sentence_key"]): texts[str(row["sentence_key"])] for row in batch}
+
+    with VerifiedTextCache(cache_path, signature) as cache:
+        result = cache.fetch(rows, fetch_tail)
+        assert result == texts
+        assert cache.hits == 2
+        assert cache.remote_rows == 2
+    assert remote_calls == list(texts.keys())[2:]
+
+
+def test_verified_text_cache_ignores_unterminated_saved_jsonl_tail(tmp_path: Path) -> None:
+    label_path = "labels/england.parquet"
+    saved_sentence = "complete saved sentence"
+    missing_sentence = "sentence absent from saved prefix"
+    saved_record = {
+        "source": "website",
+        "stream": "website",
+        "shard": "england",
+        "label_path": label_path,
+        "sentence_key": "saved-key",
+        "text_sha256": _sha(saved_sentence),
+        "raw_sentence": saved_sentence,
+    }
+    saved_output = tmp_path / "england.jsonl.partial.replay"
+    saved_output.write_bytes(
+        (json.dumps(saved_record, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        + b'{"source":"website","sentence_key":"torn-tail"'
+    )
+    rows = (
+        {"sentence_key": "saved-key", "text_sha256": _sha(saved_sentence)},
+        {"sentence_key": "torn-tail", "text_sha256": _sha(missing_sentence)},
+    )
+    cache_path, signature = _verified_text_cache_location(
+        tmp_path,
+        code_sha256="f" * 64,
+        region_signature="region-source-signature",
+        stream="website",
+        shard="england",
+    )
+    fetched: list[str] = []
+
+    def fetch_missing(batch: Sequence[Mapping[str, object]]) -> Mapping[str, str]:
+        fetched.extend(str(row["sentence_key"]) for row in batch)
+        return {"torn-tail": missing_sentence}
+
+    with VerifiedTextCache(cache_path, signature) as cache:
+        assert (
+            cache.seed_from_outputs(
+                (saved_output,),
+                source="website",
+                stream="website",
+                shard="england",
+                label_path=label_path,
+            )
+            == 1
+        )
+        assert cache.fetch(rows, fetch_missing) == {
+            "saved-key": saved_sentence,
+            "torn-tail": missing_sentence,
+        }
+        assert cache.hits == 1
+        assert cache.remote_rows == 1
+
+    assert fetched == ["torn-tail"]
+
+
+def test_verified_text_cache_does_not_store_a_hash_mismatch(tmp_path: Path) -> None:
+    row = {"sentence_key": "key-1", "text_sha256": _sha("expected sentence")}
+    cache_path, signature = _verified_text_cache_location(
+        tmp_path,
+        code_sha256="d" * 64,
+        region_signature="region-source-signature",
+        stream="website",
+        shard="england",
+    )
+    with VerifiedTextCache(cache_path, signature) as cache:
+        result = cache.fetch((row,), lambda _batch: {"key-1": "wrong sentence"})
+        assert result == {"key-1": "wrong sentence"}
+        assert cache.remote_rows == 1
+    with sqlite3.connect(cache_path) as db:
+        assert db.execute("SELECT count(*) FROM texts").fetchone() == (0,)
+
+
+def test_verified_text_cache_rejects_source_signature_change(tmp_path: Path) -> None:
+    cache_path, signature = _verified_text_cache_location(
+        tmp_path,
+        code_sha256="e" * 64,
+        region_signature="region-source-signature",
+        stream="website",
+        shard="england",
+    )
+    with VerifiedTextCache(cache_path, signature):
+        pass
+    try:
+        VerifiedTextCache(cache_path, "changed-source-signature")
+    except ValueError as error:
+        assert "signature mismatch" in str(error)
+    else:
+        raise AssertionError("text cache must reject a changed pinned source signature")
+
+
+def test_verified_text_cache_fails_closed_on_corrupt_record(tmp_path: Path) -> None:
+    sentence = "pinned sentence"
+    row = {"sentence_key": "key-1", "text_sha256": _sha(sentence)}
+    cache_path, signature = _verified_text_cache_location(
+        tmp_path,
+        code_sha256="c" * 64,
+        region_signature="region-source-signature",
+        stream="website",
+        shard="england",
+    )
+    with VerifiedTextCache(cache_path, signature) as cache:
+        cache.fetch((row,), lambda _batch: {"key-1": sentence})
+    with sqlite3.connect(cache_path) as db:
+        db.execute("UPDATE texts SET record_sha256=?", ("0" * 64,))
+
+    try:
+        with VerifiedTextCache(cache_path, signature) as cache:
+            cache.fetch(
+                (row,),
+                lambda _batch: (_ for _ in ()).throw(AssertionError("must fail closed")),
+            )
+    except ValueError as error:
+        assert "checksum mismatch" in str(error)
+    else:
+        raise AssertionError("corrupt cached text must fail closed")
 
 
 def test_assignment_cache_location_is_bound_to_current_code_fingerprint(

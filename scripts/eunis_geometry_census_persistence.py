@@ -60,6 +60,8 @@ def _region_signature(
 
 
 _ASSIGNMENT_CACHE_SCHEMA = 1
+_VERIFIED_TEXT_CACHE_SCHEMA = 1
+_SHA256_HEX_LENGTH = hashlib.sha256().digest_size * 2
 _CLASSIFICATION_COUNT_FIELDS = (
     "invalid_geometry_rows",
     "outside_native_extent_rows",
@@ -72,6 +74,289 @@ _CLASSIFICATION_COUNT_FIELDS = (
 
 def _canonical_json(payload: object) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _text_digest(sentence: str) -> str:
+    return hashlib.sha256(sentence.encode("utf-8")).hexdigest()
+
+
+def _valid_text_digest(value: str) -> bool:
+    return len(value) == _SHA256_HEX_LENGTH and all(
+        character in "0123456789abcdef" for character in value
+    )
+
+
+def _verified_text_cache_location(
+    output_dir: Path,
+    *,
+    code_sha256: str,
+    region_signature: str,
+    stream: str,
+    shard: str,
+) -> tuple[Path, str]:
+    """Bind cached sentences to one exact source region and census code revision."""
+    if len(code_sha256) != _SHA256_HEX_LENGTH or any(
+        value not in "0123456789abcdef" for value in code_sha256
+    ):
+        raise ValueError("verified text cache code fingerprint is malformed")
+    cache_signature = hashlib.sha256(
+        f"verified-text-v{_VERIFIED_TEXT_CACHE_SCHEMA}\0{region_signature}\0{code_sha256}".encode()
+    ).hexdigest()
+    cache_path = output_dir / "verified-text-cache" / code_sha256 / stream / f"{shard}.sqlite"
+    return cache_path, cache_signature
+
+
+def _create_verified_text_cache_file(path: Path, region_signature: str) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.init-", dir=path.parent)
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    db = sqlite3.connect(temporary)
+    try:
+        db.execute("PRAGMA synchronous=FULL")
+        with db:
+            db.execute(
+                "CREATE TABLE cache_metadata ("
+                "id INTEGER PRIMARY KEY CHECK (id = 1), "
+                "schema_version INTEGER NOT NULL, region_signature TEXT NOT NULL)"
+            )
+            db.execute(
+                "INSERT INTO cache_metadata VALUES (1, ?, ?)",
+                (_VERIFIED_TEXT_CACHE_SCHEMA, region_signature),
+            )
+            db.execute(
+                "CREATE TABLE texts ("
+                "sentence_key TEXT PRIMARY KEY, expected_sha256 TEXT NOT NULL, "
+                "sentence TEXT NOT NULL, record_sha256 TEXT NOT NULL)"
+            )
+            db.execute(f"PRAGMA user_version={_VERIFIED_TEXT_CACHE_SCHEMA}")
+        db.close()
+        try:
+            os.link(temporary, path)
+        except FileExistsError as error:
+            raise ValueError("verified text cache appeared during initialization") from error
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        temporary.unlink()
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except BaseException:
+        db.close()
+        raise
+
+
+def _saved_text_record(
+    line: bytes,
+    path: Path,
+    expected_identity: Mapping[str, str],
+) -> tuple[str, str, str]:
+    try:
+        row = json.loads(line)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"saved region record is malformed: {path}") from error
+    if not isinstance(row, dict):
+        raise TypeError(f"saved region record is not an object: {path}")
+    if any(row.get(key) != value for key, value in expected_identity.items()):
+        raise ValueError(f"saved region record source identity changed: {path}")
+    key = row.get("sentence_key")
+    digest = row.get("text_sha256")
+    sentence = row.get("raw_sentence")
+    if not isinstance(key, str) or not key:
+        raise ValueError(f"saved region record lacks a sentence key: {path}")
+    if not isinstance(digest, str) or not isinstance(sentence, str):
+        raise TypeError(f"saved region record lacks verified text: {path}")
+    expected = digest.lower()
+    if not _valid_text_digest(expected) or _text_digest(sentence) != expected:
+        raise ValueError(f"saved region text does not match its label hash: {path}")
+    return key, expected, sentence
+
+
+class VerifiedTextCache:
+    """Durably reuse label-hash-verified sentence text across region retries."""
+
+    def __init__(self, path: Path, region_signature: str) -> None:
+        """Open a source-bound cache, rejecting unknown schemas and corrupt files."""
+        self.path = path
+        self.region_signature = region_signature
+        self.hits = 0
+        self.remote_rows = 0
+        self.seeded_rows = 0
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise ValueError(f"verified text cache is not a regular file: {path}")
+        if not path.exists():
+            _create_verified_text_cache_file(path, region_signature)
+        self.db = sqlite3.connect(path)
+        try:
+            self.db.execute("PRAGMA synchronous=FULL")
+            self.db.execute("PRAGMA busy_timeout=5000")
+            self._validate_database()
+        except sqlite3.Error as error:
+            self.db.close()
+            raise ValueError(f"verified text cache is corrupt or unsupported: {path}") from error
+        except BaseException:
+            self.db.close()
+            raise
+
+    def _validate_database(self) -> None:
+        version = self.db.execute("PRAGMA user_version").fetchone()
+        metadata = self.db.execute(
+            "SELECT schema_version, region_signature FROM cache_metadata WHERE id=1"
+        ).fetchone()
+        if version != (_VERIFIED_TEXT_CACHE_SCHEMA,) or metadata != (
+            _VERIFIED_TEXT_CACHE_SCHEMA,
+            self.region_signature,
+        ):
+            raise ValueError("verified text cache schema or source signature mismatch")
+        self.db.execute("SELECT 1 FROM texts LIMIT 1").fetchone()
+
+    def seed_from_outputs(
+        self,
+        paths: Sequence[Path],
+        *,
+        source: str,
+        stream: str,
+        shard: str,
+        label_path: str,
+    ) -> int:
+        """Seed only complete saved JSONL records whose text matches its saved hash."""
+        seeded = 0
+        expected_identity = {
+            "source": source,
+            "stream": stream,
+            "shard": shard,
+            "label_path": label_path,
+        }
+        for path in paths:
+            if not path.exists():
+                continue
+            if path.is_symlink() or not path.is_file():
+                raise ValueError(f"region replay artifact is not a regular file: {path}")
+            with path.open("rb") as saved:
+                for line in saved:
+                    if not line.endswith(b"\n"):
+                        break
+                    key, expected, sentence = _saved_text_record(line, path, expected_identity)
+                    if self._store(key, expected, sentence):
+                        seeded += 1
+        self.db.commit()
+        self.seeded_rows += seeded
+        return seeded
+
+    def fetch(
+        self,
+        rows: Sequence[Mapping[str, object]],
+        fetch_missing: Callable[[Sequence[Mapping[str, object]]], Mapping[str, str | None]],
+    ) -> Mapping[str, str | None]:
+        """Use cached verified text and call the source fetcher only for cache misses."""
+        specifications: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for row in rows:
+            key = str(row["sentence_key"])
+            if key in seen:
+                raise ValueError(f"text lookup returned duplicate sentence key: {key}")
+            seen.add(key)
+            specifications.append((key, str(row["text_sha256"]).lower()))
+
+        result: dict[str, str | None] = {}
+        missing_rows: list[Mapping[str, object]] = []
+        for row, (key, expected) in zip(rows, specifications, strict=True):
+            cached = self._load(key, expected) if _valid_text_digest(expected) else None
+            if cached is None:
+                missing_rows.append(row)
+            else:
+                result[key] = cached
+                self.hits += 1
+
+        if missing_rows:
+            fetched = fetch_missing(missing_rows)
+            self.remote_rows += len(missing_rows)
+            for row in missing_rows:
+                key = str(row["sentence_key"])
+                sentence = fetched.get(key)
+                result[key] = sentence
+                expected = str(row["text_sha256"]).lower()
+                if (
+                    isinstance(sentence, str)
+                    and _valid_text_digest(expected)
+                    and _text_digest(sentence) == expected
+                ):
+                    self._store(key, expected, sentence)
+            self.db.commit()
+        return result
+
+    def _payload(self, key: str, expected: str, sentence: str) -> str:
+        return _canonical_json(
+            {
+                "schema_version": _VERIFIED_TEXT_CACHE_SCHEMA,
+                "region_signature": self.region_signature,
+                "sentence_key": key,
+                "expected_sha256": expected,
+                "sentence": sentence,
+            }
+        )
+
+    def _load(self, key: str, expected: str) -> str | None:
+        try:
+            saved = self.db.execute(
+                "SELECT expected_sha256, sentence, record_sha256 FROM texts WHERE sentence_key=?",
+                (key,),
+            ).fetchone()
+        except sqlite3.Error as error:
+            raise ValueError(f"verified text cache read failed: {self.path}") from error
+        if saved is None:
+            return None
+        saved_expected, sentence, record_sha256 = saved
+        if not isinstance(saved_expected, str) or not isinstance(sentence, str):
+            raise TypeError("verified text cache record fields are malformed")
+        if not isinstance(record_sha256, str):
+            raise TypeError("verified text cache record checksum is malformed")
+        if saved_expected != expected:
+            raise ValueError("verified text cache label hash changed")
+        payload = self._payload(key, saved_expected, sentence)
+        if hashlib.sha256(payload.encode("utf-8")).hexdigest() != record_sha256:
+            raise ValueError("verified text cache record checksum mismatch")
+        if _text_digest(sentence) != expected:
+            raise ValueError("verified text cache sentence hash mismatch")
+        return sentence
+
+    def _store(self, key: str, expected: str, sentence: str) -> bool:
+        if not _valid_text_digest(expected) or _text_digest(sentence) != expected:
+            return False
+        saved = self._load(key, expected)
+        if saved is not None:
+            if saved != sentence:
+                raise ValueError("verified text cache sentence changed for a pinned label")
+            return False
+        payload = self._payload(key, expected, sentence)
+        record_sha256 = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        try:
+            self.db.execute(
+                "INSERT INTO texts VALUES (?, ?, ?, ?)",
+                (key, expected, sentence, record_sha256),
+            )
+        except sqlite3.Error as error:
+            raise ValueError(f"verified text cache write failed: {self.path}") from error
+        return True
+
+    def __enter__(self) -> VerifiedTextCache:
+        """Return this cache for one region pass."""
+        return self
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
+        """Commit successful tail writes and roll back a failed batch."""
+        try:
+            if exc_type is None:
+                self.db.commit()
+            else:
+                self.db.rollback()
+        finally:
+            self.db.close()
 
 
 def _assignment_identity(row: Mapping[str, object]) -> tuple[str, str]:

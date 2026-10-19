@@ -20,12 +20,14 @@ from .eunis_geometry_census_core import (
 )
 from .eunis_geometry_census_persistence import (
     AssignmentCache,
+    VerifiedTextCache,
     _index_region_if_needed,
     _load_completed_region,
     _open_index,
     _region_signature,
     _sha256_file,
     _summary,
+    _verified_text_cache_location,
     _verify_and_backfill_indexed_regions,
     _write_new_json,
     _write_replayed_region_output,
@@ -606,7 +608,7 @@ def _assignment_cache_location(
     return cache_path, cache_signature
 
 
-def _process_region(  # noqa: C901, PLR0913
+def _process_region(  # noqa: C901, PLR0913, PLR0915
     db: Any,
     output_dir: Path,
     *,
@@ -668,7 +670,9 @@ def _process_region(  # noqa: C901, PLR0913
 
     text_db = db.cursor()
 
-    def fetch_texts(rows: Sequence[Mapping[str, object]]) -> Mapping[str, str | None]:
+    def fetch_missing_texts(
+        rows: Sequence[Mapping[str, object]],
+    ) -> Mapping[str, str | None]:
         sql_text, text_params = _text_query(stream, rows)
         cursor = text_db.execute(sql_text, text_params)
         return _unique_text_mapping(cursor.fetchall())
@@ -689,7 +693,32 @@ def _process_region(  # noqa: C901, PLR0913
         stream=stream,
         shard=shard,
     )
-    with AssignmentCache(cache_path, cache_signature) as assignment_cache:
+    text_cache_path, text_cache_signature = _verified_text_cache_location(
+        output_dir,
+        code_sha256=code_sha256,
+        region_signature=signature,
+        stream=stream,
+        shard=shard,
+    )
+    saved_text_paths = (
+        output,
+        output.with_name(output.name + ".partial"),
+        output.with_name(output.name + ".partial.replay"),
+    )
+    with (
+        AssignmentCache(cache_path, cache_signature) as assignment_cache,
+        VerifiedTextCache(text_cache_path, text_cache_signature) as text_cache,
+    ):
+        text_cache.seed_from_outputs(
+            saved_text_paths,
+            source=source,
+            stream=stream,
+            shard=shard,
+            label_path=label_path,
+        )
+
+        def fetch_texts(rows: Sequence[Mapping[str, object]]) -> Mapping[str, str | None]:
+            return text_cache.fetch(rows, fetch_missing_texts)
 
         def classify(row: Mapping[str, object]) -> Any:
             value = row["geometry"]
@@ -732,6 +761,11 @@ def _process_region(  # noqa: C901, PLR0913
         "assignment_cache": {
             "hits": assignment_cache.hits,
             "misses": assignment_cache.misses,
+        },
+        "verified_text_cache": {
+            "seeded_rows": text_cache.seeded_rows,
+            "hits": text_cache.hits,
+            "remote_rows": text_cache.remote_rows,
         },
         "counts": {name: getattr(counts, name) for name in counts.__dataclass_fields__},
     }
