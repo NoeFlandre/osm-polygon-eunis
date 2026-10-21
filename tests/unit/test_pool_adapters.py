@@ -1389,8 +1389,10 @@ def test_lucas_support_statuses_units_and_bounded_union() -> None:
     with pytest.raises(ValueError, match="full original polygon area"):
         measure_lucas_supports(wrong_area, LucasFeatureQuery((), ()), taxonomy, pin)
 
-    supports = lucas_module._bounded_union(tuple(box(i, 0, i + 1, 1) for i in range(129)))
-    assert shapely.area(supports) == 129.0
+    forest = lucas_module._SupportUnionForest()
+    for index in range(129):
+        forest.add(box(index, 0, index + 1, 1))
+    assert shapely.area(forest.finish()) == 129.0
 
 
 def test_lucas_streaming_union_retains_logarithmic_geometry_state() -> None:

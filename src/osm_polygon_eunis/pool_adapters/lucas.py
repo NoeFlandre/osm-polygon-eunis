@@ -883,17 +883,6 @@ class _LucasSupportAccumulator:
         return tuple(supports)
 
 
-def _bounded_union(geometries: Sequence[BaseGeometry]) -> BaseGeometry:
-    """Union geometry without retaining a second full copy of the input list."""
-
-    if not geometries:
-        raise ValueError("cannot union an empty geometry sequence")
-    forest = _SupportUnionForest()
-    for geometry in geometries:
-        forest.add(geometry)
-    return forest.finish()
-
-
 def _decode_gpkg_geometry(blob: object, expected_srs_id: int) -> BaseGeometry:
     if not isinstance(blob, (bytes, memoryview)):
         raise TypeError("LUCAS geometry field is not a GeoPackage binary blob")
