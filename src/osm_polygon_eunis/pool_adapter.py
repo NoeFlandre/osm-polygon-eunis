@@ -136,6 +136,7 @@ class EunisPoolSourceLayout:
     additional_tree_pins: tuple[SourceTreeGroupPin, ...] = ()
     document_link_glob: str | None = None
     document_glob: str | None = None
+    wikivoyage_document_glob: str | None = None
     sentence_glob: str | None = None
 
 
@@ -369,6 +370,7 @@ EUNIS_POOL_SOURCE_LAYOUTS: Mapping[TextSource, EunisPoolSourceLayout] = {
         ),
         document_link_glob="polygon_document_links/*.parquet",
         document_glob="wikipedia/documents/*.parquet",
+        wikivoyage_document_glob="wikivoyage/documents/*.parquet",
         sentence_glob="wikivoyage/sentences/*.parquet",
     ),
 }

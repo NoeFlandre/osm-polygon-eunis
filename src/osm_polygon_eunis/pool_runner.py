@@ -14,7 +14,7 @@ import json
 import os
 import tempfile
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass, replace
 from dataclasses import field as dataclass_field
 from fnmatch import fnmatchcase
@@ -73,6 +73,12 @@ from .pool_contract import (
 )
 from .pool_contract.models import NativeKey
 from .raster_reference import RasterReference
+from .text_join import (
+    EunisPinnedTable,
+    JoinedTextRecord,
+    iter_eunis_join_batches,
+    iter_pinned_eunis_join_records,
+)
 
 _KEY_FIELDS = ("source_pbf", "osm_type", "osm_id")
 _GEOMETRY_FIELD = "geometry"
@@ -188,6 +194,7 @@ class EunisPoolExport:
     raw_inventory_report_uri: str
     label_attempt_report_uri: str
     attempt_checkpoint_uris: tuple[tuple[str, str], ...]
+    downstream_join_included: bool
 
 
 @dataclass(slots=True)
@@ -467,7 +474,7 @@ def run_eunis_label_attempts(
     )
 
 
-def export_eunis_pool(
+def export_eunis_pool(  # noqa: PLR0913
     attempts: EunisAttemptRun,
     sink: FileArtifactSink,
     *,
@@ -475,13 +482,17 @@ def export_eunis_pool(
     staging_directory: Path | None = None,
     contract_version: str = "1.1.0",
     pool_version: str = "1.0.0",
+    downstream_records: Iterable[JoinedTextRecord] | None = None,
 ) -> EunisPoolExport:
     """Finalize one EUNIS source pool from bounded per-shard attempt records.
 
     The adapter copies the small raw-census receipt and each attempt checkpoint
     through the streaming sink, then emits bounded ``PoolBatch`` instances.
-    It never collects the full pool or Parquet payloads in memory. This does
-    not perform text/relevance joins or evaluation sampling.
+    It never collects the full pool or Parquet payloads in memory. It can append
+    downstream document/link/relevance records when supplied. This low-level
+    path remains useful for fixtures and recovery; use
+    :func:`export_eunis_full_pool` for a full pool with pinned joins. It never
+    performs evaluation sampling.
     """
 
     selected_limits = limits or StreamingLimits()
@@ -564,7 +575,12 @@ def export_eunis_pool(
     )
     receipt = export_pool_batches(
         spec,
-        _iter_eunis_pool_batches(attempts, checkpoint_uri_by_path, selected_limits),
+        _iter_eunis_pool_batches(
+            attempts,
+            checkpoint_uri_by_path,
+            selected_limits,
+            downstream_records=downstream_records,
+        ),
         sink,
         limits=selected_limits,
         staging_directory=staging_directory,
@@ -574,6 +590,119 @@ def export_eunis_pool(
         raw_inventory_report_uri=raw_report_uri,
         label_attempt_report_uri=portable_attempt_uri,
         attempt_checkpoint_uris=tuple(checkpoint_uris),
+        downstream_join_included=downstream_records is not None,
+    )
+
+
+def iter_eunis_downstream_records(  # noqa: PLR0913
+    attempts: EunisAttemptRun,
+    text_table: EunisPinnedTable,
+    relevance_table: EunisPinnedTable,
+    *,
+    wiki_link_table: EunisPinnedTable | None = None,
+    wiki_document_tables: tuple[EunisPinnedTable, ...] = (),
+    wiki_corpus: str | None = None,
+    website_field_to_column: dict[str, str] | None = None,
+    batch_size: int = 4096,
+    staging_directory: Path | None = None,
+) -> Iterator[JoinedTextRecord]:
+    """Join pinned downstream text and YES/NO rows against the full inventory."""
+
+    yield from iter_pinned_eunis_join_records(
+        attempts.raw_scan.source.layout.text_source,
+        text_table,
+        relevance_table,
+        iter_eunis_attempt_inventory_rows(attempts),
+        wiki_link_table=wiki_link_table,
+        wiki_document_tables=wiki_document_tables,
+        wiki_corpus=wiki_corpus,
+        website_field_to_column=website_field_to_column,
+        layout=attempts.raw_scan.source.layout,
+        batch_size=batch_size,
+        staging_directory=staging_directory,
+    )
+
+
+def iter_eunis_wiki_downstream_records(  # noqa: PLR0913
+    attempts: EunisAttemptRun,
+    wikipedia_text_table: EunisPinnedTable,
+    wikipedia_relevance_table: EunisPinnedTable,
+    wikivoyage_text_table: EunisPinnedTable,
+    wikivoyage_relevance_table: EunisPinnedTable,
+    wiki_link_table: EunisPinnedTable,
+    *,
+    wikipedia_document_tables: tuple[EunisPinnedTable, ...] = (),
+    wikivoyage_document_tables: tuple[EunisPinnedTable, ...] = (),
+    batch_size: int = 4096,
+    staging_directory: Path | None = None,
+) -> Iterator[JoinedTextRecord]:
+    """Join both pinned Wiki corpora against the same full raw inventory."""
+
+    yield from iter_eunis_downstream_records(
+        attempts,
+        wikipedia_text_table,
+        wikipedia_relevance_table,
+        wiki_link_table=wiki_link_table,
+        wiki_document_tables=wikipedia_document_tables,
+        wiki_corpus="wikipedia",
+        batch_size=batch_size,
+        staging_directory=staging_directory,
+    )
+    yield from iter_eunis_downstream_records(
+        attempts,
+        wikivoyage_text_table,
+        wikivoyage_relevance_table,
+        wiki_link_table=wiki_link_table,
+        wiki_document_tables=wikivoyage_document_tables,
+        wiki_corpus="wikivoyage",
+        batch_size=batch_size,
+        staging_directory=staging_directory,
+    )
+
+
+def iter_eunis_attempt_inventory_rows(
+    attempts: EunisAttemptRun,
+) -> Iterator[PolygonInventoryRow]:
+    """Read each raw inventory row from verified per-shard attempt receipts."""
+
+    total = 0
+    for shard in attempts.shards:
+        path = _verified_report_path(
+            shard.checkpoint_uri,
+            shard.checkpoint_sha256,
+            f"EUNIS attempt checkpoint for {shard.path_in_repo}",
+        )
+        shard_count = 0
+        for record in _read_jsonl(path):
+            yield _inventory_from_json(record["inventory"])
+            shard_count += 1
+            total += 1
+        if shard_count != shard.row_count:
+            raise ValueError(f"attempt inventory changed for {shard.path_in_repo}")
+    if total != attempts.raw_scan.evidence.expected_key_count:
+        raise ValueError("attempt inventory rows differ from the raw source key count")
+
+
+def export_eunis_full_pool(  # noqa: PLR0913
+    attempts: EunisAttemptRun,
+    downstream_records: Iterable[JoinedTextRecord],
+    sink: FileArtifactSink,
+    *,
+    limits: StreamingLimits | None = None,
+    staging_directory: Path | None = None,
+    contract_version: str = "1.1.0",
+    pool_version: str = "1.0.0",
+) -> EunisPoolExport:
+    """Finalize a source-wide label pool together with its verified text joins."""
+
+    return export_eunis_pool(
+        attempts,
+        sink,
+        limits=limits,
+        staging_directory=staging_directory,
+        contract_version=contract_version,
+        pool_version=pool_version,
+        downstream_records=downstream_records,
     )
 
 
@@ -714,6 +843,8 @@ def _iter_eunis_pool_batches(
     attempts: EunisAttemptRun,
     checkpoint_uris: dict[str, str],
     limits: StreamingLimits,
+    *,
+    downstream_records: Iterable[JoinedTextRecord] | None = None,
 ) -> Iterator[PoolBatch]:
     code_count = len(attempts.taxonomy.paths_by_direct_code)
     max_rows_per_polygon = 6 + 6 * code_count
@@ -756,6 +887,13 @@ def _iter_eunis_pool_batches(
         yield final_batch
     if total_rows != attempts.raw_scan.evidence.expected_key_count:
         raise ValueError("streamed EUNIS attempts do not account for every raw source key")
+    if downstream_records is not None:
+        yield from iter_eunis_join_batches(
+            downstream_records,
+            starting_batch_index=accumulator.batch_index,
+            max_batch_rows=limits.max_batch_rows,
+            max_batch_bytes=limits.max_batch_bytes,
+        )
 
 
 def _pool_batch_row(

@@ -24,9 +24,11 @@ from osm_polygon_eunis.pool_contract import (
     FilesystemArtifactReader,
     FilesystemStreamingSink,
     ReferencePin,
+    RelevanceStatus,
     SourceSnapshot,
     StreamingLimits,
     SupportSemantics,
+    TextLinkStatus,
     TextSource,
     native_keyset_sha256,
 )
@@ -36,14 +38,17 @@ from osm_polygon_eunis.pool_runner import (
     FrozenPolygonSource,
     PinnedPolygonShard,
     PoolAdapterCodePin,
+    export_eunis_full_pool,
     export_eunis_pool,
     iter_attempt_checkpoint,
+    iter_eunis_attempt_inventory_rows,
     read_projected_geometry_wkb,
     read_raw_geometry,
     run_eunis_label_attempts,
     scan_raw_inventory,
 )
 from osm_polygon_eunis.raster_reference import RasterReference
+from osm_polygon_eunis.text_join import PinnedSourceRow, iter_eunis_join_records
 
 _TAXONOMY = EunisTaxonomy(
     taxonomy_id="fixture-taxonomy",
@@ -533,6 +538,90 @@ def test_eunis_attempts_export_through_bounded_shared_streaming_contract(
         count for _level, count in attempts.shards[0].candidate_counts
     )
     assert support_metadata.schema == support_table.schema
+
+
+def test_full_pool_export_streams_downstream_text_and_relevance_rows(tmp_path: Path) -> None:
+    source = _frozen_source(tmp_path, [_source_row(11, _geojson_polygon())])
+    checkpoint_root = tmp_path / "checkpoints"
+    raw_scan = scan_raw_inventory(source, checkpoint_root, _code_pin())
+    attempts = run_eunis_label_attempts(
+        raw_scan,
+        cast(RasterReference, FakeReference()),
+        _reference_pin(),
+        _TAXONOMY,
+        checkpoint_root,
+    )
+    inventory = list(iter_eunis_attempt_inventory_rows(attempts))
+    text = "A useful visitor description."
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    downstream = iter_eunis_join_records(
+        TextSource.WEBSITE,
+        [
+            PinnedSourceRow(
+                "polygons/region-a.parquet",
+                0,
+                {
+                    "polygon_id": "region:way:11",
+                    "source_pbf": "region.osm.pbf",
+                    "osm_type": "way",
+                    "osm_id": 11,
+                    "website_sentences": [text],
+                    "contact_website_sentences": [],
+                    "website_sentence_status": "success",
+                    "contact_website_sentence_status": "absent",
+                    "website_text": text,
+                    "contact_website_text": None,
+                    "website_text_status": "success",
+                    "contact_website_text_status": "absent",
+                },
+            )
+        ],
+        [
+            PinnedSourceRow(
+                "labels/polygons/region-a.parquet",
+                0,
+                {
+                    "label_id": "fixture-website-yes",
+                    "polygon_id": "region:way:11",
+                    "field": "website_sentences",
+                    "sentence_index": 0,
+                    "text_sha256": digest,
+                    "decision": "YES",
+                },
+            )
+        ],
+        inventory,
+        website_field_to_column={
+            "website_sentences": "website_sentences",
+            "contact_website_sentences": "contact_website_sentences",
+        },
+    )
+    sink_root = tmp_path / "full-pool-with-text"
+
+    exported = export_eunis_full_pool(
+        attempts,
+        downstream,
+        FilesystemStreamingSink(sink_root),
+        limits=StreamingLimits(max_batch_rows=16),
+        staging_directory=tmp_path,
+    )
+
+    assert exported.downstream_join_included
+    manifest_path = Path(exported.receipt.shard_manifest_uri.removeprefix("file://"))
+    shards = [json.loads(line) for line in manifest_path.read_text().splitlines()]
+    counts = {row["table"]: row["row_count"] for row in shards}
+    assert counts["source_documents"] == 2
+    assert counts["document_relevance"] == 2
+    assert counts["text_polygon_links"] == 2
+    document_shard = next(row for row in shards if row["table"] == "source_documents")
+    documents = pq.read_table(sink_root / document_shard["path"])
+    assert documents["content_sha256"][0].as_py() == digest
+    relevance_shard = next(row for row in shards if row["table"] == "document_relevance")
+    relevance = pq.read_table(sink_root / relevance_shard["path"])
+    assert relevance["status"][0].as_py() == RelevanceStatus.YES.value
+    link_shard = next(row for row in shards if row["table"] == "text_polygon_links")
+    links = pq.read_table(sink_root / link_shard["path"])
+    assert links["status"][0].as_py() == TextLinkStatus.LINKED.value
 
 
 def test_invalid_attempt_signature_is_recomputed_from_cached_raw_inventory(

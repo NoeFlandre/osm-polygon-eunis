@@ -81,23 +81,54 @@ workbook digest, and workbook-derived level/parent mapping. After validation,
 `make_eunis_taxonomy_from_classification()` creates explicit paths for direct
 L3 map codes and requires an L1 and L2 ancestor for every code. This uses the
 hierarchy only; no external habitat crosswalk is needed for L3-to-L2-to-L1
-rollups. The metadata handoff records taxonomy cache SHA-256
-`223aa3fb89ac48cb5095e443433412c085e66fc54602e2c29253537455a2424f`, EEA
-classification record `bfe4c237-e378-4a83-ab21-b3807f96c2e2`, and workbook
-SHA-256 `1427d22db8d77d1053ab1683aa60713bdec3d810605dd6b7bc16683b4ca14665`.
-The handoff has neither original cache nor workbook bytes, the direct workbook
-URL, nor crosswalk values. The lineage validator has not run against those
-bytes; production remains gated on that validation.
+rollups. The separately transferred original taxonomy cache
+`classification-taxonomy-original-20261021.json` is 284,146 bytes and matches SHA-256
+`223aa3fb89ac48cb5095e443433412c085e66fc54602e2c29253537455a2424f`. Its
+classification record ID, declared workbook digest, labels, levels, and parent
+structure were checked: 3,950 labels, 3,949 level entries, and 3,942 parent
+links. The cache records EEA classification
+`bfe4c237-e378-4a83-ab21-b3807f96c2e2` and workbook SHA-256
+`1427d22db8d77d1053ab1683aa60713bdec3d810605dd6b7bc16683b4ca14665`.
+Original workbook bytes, its direct URL, and external crosswalk values remain
+unavailable, so the workbook digest has not been freshly rehashed and the
+cache-to-workbook comparison has not run. Production remains gated on that
+lineage check.
 
-Text link resolution is a separate helper. It retains linked, ambiguous,
-unmatched, and geometry-missing links without removing source inventory rows.
-The shared contract v1.1 also has typed `RelevanceAssessment` records for YES,
-NO, UNKNOWN, and MISSING. The EUNIS exporter does not yet emit documents, links,
-or relevance rows: the source-specific text schemas and revision-pinned
-manifests still need verification before implementing those joins. This keeps
-missing-link and relevance states available without guessing at label meaning.
-Neither the helper nor the contract performs YES/NO balancing, H3 sampling, or
-evaluation draws.
+The source-specific text adapter joins downstream text and relevance rows only
+after the complete raw inventory and geometry attempts. It validates pinned
+Parquet trees and projected Arrow field types before reading rows, uses a
+disk-backed SQLite index, and emits bounded batches of body-free
+`SourceDocument`, `TextPolygonLink`, and `RelevanceAssessment` rows. Text bodies
+are read only to verify or calculate UTF-8 SHA-256 values; the staging database
+and pool artifacts contain hashes, IDs, and provenance, never sentence bodies.
+
+Join keys follow the pinned source conventions. Description uses
+`description_identity`, tag key, language, sentence index, and the source
+description's `text_sha256`; its identity formula matches the source's
+`[osm_type, osm_id, tag_key, text_sha256]` SHA-256. Website uses
+`polygon_id`, an explicit label-field-to-sentence-column map, sentence index,
+and sentence `text_sha256`. The map must cover both pinned sentence columns;
+the adapter does not guess the relevance dataset's `field` vocabulary. Wiki
+uses `sentence_id` and `text_sha256`, verifies the stored sentence
+`content_hash`, and resolves each `(document_id, project)` link through the
+full `(source_pbf, osm_type, osm_id)` key.
+
+Rows without sentences or relevance matches remain represented with typed
+MISSING/UNKNOWN states and source-specific split, sentence, or segmentation
+reasons. Orphan relevance rows, Wiki link rows without sentence rows, and raw
+polygons without any downstream text record are also retained explicitly.
+Website text and sentence status columns remain attached to empty-output
+records. Direct, linked, unmatched, and geometry-missing link states do not
+remove raw inventory rows. The adapter and contract do not perform YES/NO
+balancing, H3 sampling, or evaluation draws.
+
+Wiki source sentence and relevance groups are pinned, but the metadata handoff
+does not contain tree entries for the following exact groups, so a full pinned
+Wiki join fails closed until their metadata is supplied:
+`NoeFlandre/osm-polygon-wikidata-and-wikipedia@d6fc058ccf4643bc5fe5bfd5c1c0bc403d3da801`
+at `polygon_document_links/*.parquet`, `wikipedia/documents/*.parquet`, and
+`wikivoyage/documents/*.parquet`. No sentence-body sample or guessed tree pin
+is used to fill this gap.
 
 ## Staging artifacts and integration boundary
 
@@ -110,20 +141,28 @@ scan report and attempt shards through the core file-artifact sink, constructs a
 global validation and writes the completion manifest last. Polygon geometry
 URIs point to the durable attempt-shard copy in the sink.
 
+`iter_eunis_downstream_records()` validates each pinned text, relevance, and
+link table before joining it to the attempt inventory. For Wiki, use
+`iter_eunis_wiki_downstream_records()` to include both Wikipedia and Wikivoyage
+sentence/label groups in the same streamed export. Pass those records to
+`export_eunis_full_pool()`; it appends them after the raw polygon attempts and
+still performs no evaluation sampling.
+
 This uses PR #165's streaming API at contract 1.1.0, including one attempt
 receipt per raw key, support evidence for every label candidate, disk-backed
 validation, and a bounded nine-pool gate. The filesystem sink and deterministic
-source fixtures exercise this path locally. No source-wide production export
-or Hub publication was run. Text documents and YES/NO relevance remain
-downstream until their pinned manifests and schemas are verified; the existing
-raw-first census and EUNIS label attempts do not use relevance to select keys.
+source fixtures exercise the downstream join and export path locally. No
+source-wide production export or Hub publication was run; raw snapshot key
+counts and key-set hashes are still unknown. The raw-first census and EUNIS
+label attempts do not use relevance to select keys.
 
 ## Verification limits
 
 The implementation tests use deterministic local fixtures and do not download
-the 5 GB EEA raster set or source shards. The complete Hub tree metadata is
-pinned, but unique raw row counts and key-set hashes are still unknown. The raw
-data blobs have not been staged or enumerated, so content and row-level
-integrity remain unverified. Production attempts and exports remain gated until
-the raw snapshot manifests are verified, the taxonomy lineage is checked
-against workbook bytes, and text and relevance schemas and joins are confirmed.
+the 5 GB EEA raster set or source shards. The Description, Website, and Wiki
+raw, text, and relevance groups have verified metadata pins, but unique raw
+row counts and key-set hashes are still unknown. The raw data blobs have not
+been staged or enumerated, so content and row-level integrity remain
+unverified. Production attempts and exports remain gated until the source PBF
+manifests are verified, the taxonomy lineage is checked against original
+workbook bytes, and the missing Wiki document/link trees are pinned.
