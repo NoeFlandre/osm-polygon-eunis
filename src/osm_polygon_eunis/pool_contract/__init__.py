@@ -5,6 +5,7 @@ from .builder import (
     canonical_native_key,
     inventory_row_identifier,
     native_key_json,
+    native_keyset_sha256,
     polygon_snapshot_identifier,
 )
 from .export import (
@@ -42,6 +43,7 @@ from .models import (
     PoolKey,
     PoolManifest,
     PoolValidationReport,
+    RawInventoryEvidence,
     ReferencePin,
     ReferenceSystem,
     SourceDocument,
@@ -91,6 +93,7 @@ __all__ = [
     "PoolKey",
     "PoolManifest",
     "PoolValidationReport",
+    "RawInventoryEvidence",
     "ReferencePin",
     "ReferenceSystem",
     "SourceDocument",
@@ -105,6 +108,7 @@ __all__ = [
     "export_full_pool",
     "inventory_row_identifier",
     "native_key_json",
+    "native_keyset_sha256",
     "polygon_snapshot_identifier",
     "table_schemas",
     "validate_evaluation_case",

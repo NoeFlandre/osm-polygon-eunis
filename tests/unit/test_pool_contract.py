@@ -35,6 +35,7 @@ from osm_polygon_eunis.pool_contract import (
     PoolBuildInput,
     PoolEligibility,
     PoolKey,
+    RawInventoryEvidence,
     ReferencePin,
     ReferenceSystem,
     SourceDocument,
@@ -48,6 +49,7 @@ from osm_polygon_eunis.pool_contract import (
     canonical_native_key,
     export_full_pool,
     inventory_row_identifier,
+    native_keyset_sha256,
     polygon_snapshot_identifier,
     validate_evaluation_case,
     validate_evaluation_trace,
@@ -100,6 +102,13 @@ def _pool_input(
         ),
     )
     inventory_ids = tuple(inventory_row_identifier(source.snapshot_id, key) for key in raw_keys)
+    inventory_evidence = RawInventoryEvidence(
+        enumeration_rule="all raw polygon rows before joining text or relevance labels",
+        scan_report_uri="https://artifacts.example/raw-inventory-scan.json",
+        scan_report_sha256=_SHA_A,
+        expected_key_count=len(raw_keys),
+        expected_keyset_sha256=native_keyset_sha256(raw_keys),
+    )
     polygon_ids = (
         polygon_snapshot_identifier(source.snapshot_id, raw_keys[0], _SHA_B),
         None,
@@ -292,6 +301,7 @@ def _pool_input(
     return PoolBuildInput(
         pool_key=PoolKey(text_source, reference_system),
         source_snapshot=source,
+        raw_inventory_evidence=inventory_evidence,
         reference_pin=pin,
         adapter_id=f"{reference_system.value}-adapter",
         adapter_revision="adapter-revision-1",
@@ -421,6 +431,30 @@ def test_manifest_accounting_must_cover_every_supported_level():
     assert any("per-level accounting" in issue for issue in report.issues)
 
 
+def test_raw_inventory_evidence_must_match_count_and_full_composite_key_set():
+    input_data = _pool_input()
+    wrong_count = replace(
+        input_data,
+        raw_inventory_evidence=replace(
+            input_data.raw_inventory_evidence,
+            expected_key_count=len(input_data.inventory) - 1,
+        ),
+    )
+    wrong_keyset = replace(
+        input_data,
+        raw_inventory_evidence=replace(
+            input_data.raw_inventory_evidence,
+            expected_keyset_sha256="d" * 64,
+        ),
+    )
+
+    count_report = validate_full_pool(build_full_pool(wrong_count))
+    keyset_report = validate_full_pool(build_full_pool(wrong_keyset))
+
+    assert any("key count differs" in issue for issue in count_report.issues)
+    assert any("key set differs" in issue for issue in keyset_report.issues)
+
+
 def test_export_is_deterministic_and_manifest_is_the_complete_marker(tmp_path):
     bundle = _build(_pool_input())
     first = export_full_pool(bundle, FilesystemSink(tmp_path / "first"))
@@ -431,12 +465,22 @@ def test_export_is_deterministic_and_manifest_is_the_complete_marker(tmp_path):
     manifest = json.loads(_file_uri_path(first.manifest_uri).read_text())
     assert manifest["pool_complete"] is True
     assert manifest["total_source_keys"] == 3
+    assert manifest["raw_inventory_evidence"]["expected_key_count"] == 3
     assert len(manifest["files"]) == 8
     table_uri = dict(first.table_uris)["label_candidates"]
     table = pq.read_table(_file_uri_path(table_uri))
     assert table.num_rows == 2
     assert table.schema.metadata[b"contract_version"] == b"1.0.0"
     assert table.column("denominator").to_pylist() == [100.0, 100.0]
+
+
+def test_export_schema_metadata_uses_the_manifest_contract_version(tmp_path):
+    bundle = build_full_pool(_pool_input(), contract_version="1.1.0")
+    receipt = export_full_pool(bundle, FilesystemSink(tmp_path))
+
+    table_path = _file_uri_path(dict(receipt.table_uris)["label_candidates"])
+
+    assert pq.read_schema(table_path).metadata[b"contract_version"] == b"1.1.0"
 
 
 def test_export_refuses_incomplete_pool(tmp_path):
@@ -466,6 +510,9 @@ def test_source_native_keys_preserve_component_names_and_value_types():
 
     assert integer_key != string_key
     assert json.loads(json.dumps(integer_key)) != json.loads(json.dumps(string_key))
+    assert native_keyset_sha256((integer_key, string_key)) == native_keyset_sha256(
+        (string_key, integer_key)
+    )
 
 
 def test_evaluation_cases_and_traces_are_separate_and_inspectable():

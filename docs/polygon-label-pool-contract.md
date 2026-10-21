@@ -79,15 +79,25 @@ unsupported until finer map evidence exists.
 Source-specific adapters stay separate from this package. There is no
 core-owned loader protocol: an adapter constructs one complete `PoolBuildInput`
 and calls `build_full_pool`. The required input fields are `pool_key`,
-`source_snapshot`, `reference_pin`, `adapter_id`, `adapter_revision`,
-`builder_revision`, `inventory`, `polygons`, `levels`, `label_candidates`, and
-`label_outcomes`. The optional tables are `documents`, `text_polygon_links`,
-`entity_links`, and `eligibility`. The input inventory must come from the full
-raw polygon snapshot before any text or evaluation filtering.
+`source_snapshot`, `raw_inventory_evidence`, `reference_pin`, `adapter_id`,
+`adapter_revision`, `builder_revision`, `inventory`, `polygons`, `levels`,
+`label_candidates`, and `label_outcomes`. The optional tables are `documents`,
+`text_polygon_links`, `entity_links`, and `eligibility`. The input inventory
+must come from the full raw polygon snapshot before any text or evaluation
+filtering.
 
-The public record types include `PoolKey`, `SourceSnapshot`, `ReferencePin`,
-`PolygonInventoryRow`, `PolygonSnapshot`, `LabelLevel`, `LabelCandidate`,
-`LabelOutcome`, `SourceDocument`, `TextPolygonLink`, `EntityLink`,
+`raw_inventory_evidence` is also required. It pins the unfiltered enumeration
+rule and scan-report URI/hash, expected raw key count, and SHA-256 of the
+canonical sorted composite-key set. The validator compares both values to the
+inventory table. The adapter must create this receipt directly from its raw
+source scan, before joining text or relevance labels. The digest input is each
+key serialized by `native_key_json`, sorted by that serialized form, joined by
+literal LF with no trailing LF, then encoded as UTF-8 before SHA-256.
+
+The public record types include `PoolKey`, `SourceSnapshot`,
+`RawInventoryEvidence`, `ReferencePin`, `PolygonInventoryRow`,
+`PolygonSnapshot`, `LabelLevel`, `LabelCandidate`, `LabelOutcome`,
+`SourceDocument`, `TextPolygonLink`, `EntityLink`,
 `PoolEligibility`, `PoolManifest`, and `PoolBundle`. `EvaluationCase`,
 `EvaluationTrace`, and `SplitAssignment` are separate downstream types. The
 complete API is re-exported from `osm_polygon_eunis.pool_contract`.
@@ -117,6 +127,9 @@ ambiguous outcomes, and exclusions at every supported level. Export validates
 again and writes explicit Arrow schemas as Parquet tables plus a canonical JSON
 manifest containing table hashes. `PoolArtifactSink` is the adapter point for a
 future cloud sink. Export does not publish to Hugging Face or choose credentials.
+The v1 builder and exporter currently materialize the supplied pool and encoded
+table payloads in memory. Add a batch or streaming path before running them on
+full-source snapshots that exceed worker memory.
 
 The output layout is:
 

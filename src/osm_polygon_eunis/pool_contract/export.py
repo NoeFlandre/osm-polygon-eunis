@@ -173,20 +173,20 @@ def export_full_pool(bundle: PoolBundle, sink: PoolArtifactSink) -> ExportReceip
     )
 
 
-def table_schemas() -> dict[str, pa.Schema]:
+def table_schemas(contract_version: str = _CONTRACT_VERSION) -> dict[str, pa.Schema]:
     """Return fresh explicit Arrow schemas for all pool tables."""
 
     return {
         name: pa.schema(
             fields,
-            metadata={b"contract_version": _CONTRACT_VERSION.encode(), b"table": name.encode()},
+            metadata={b"contract_version": contract_version.encode(), b"table": name.encode()},
         )
         for name, fields in _TABLE_FIELDS.items()
     }
 
 
 def _tables(bundle: PoolBundle) -> dict[str, pa.Table]:
-    schemas = table_schemas()
+    schemas = table_schemas(bundle.manifest.contract_version)
     rows = _table_rows(bundle)
     return {name: pa.Table.from_pylist(rows[name], schema=schemas[name]) for name in schemas}
 
@@ -328,6 +328,13 @@ def _manifest_dict(
             "revision": manifest.source_snapshot.revision,
             "pbf_uri": manifest.source_snapshot.pbf_uri,
             "pbf_sha256": manifest.source_snapshot.pbf_sha256,
+        },
+        "raw_inventory_evidence": {
+            "enumeration_rule": manifest.raw_inventory_evidence.enumeration_rule,
+            "scan_report_uri": manifest.raw_inventory_evidence.scan_report_uri,
+            "scan_report_sha256": manifest.raw_inventory_evidence.scan_report_sha256,
+            "expected_key_count": manifest.raw_inventory_evidence.expected_key_count,
+            "expected_keyset_sha256": manifest.raw_inventory_evidence.expected_keyset_sha256,
         },
         "reference_pin": {
             "release_id": manifest.reference_pin.release_id,

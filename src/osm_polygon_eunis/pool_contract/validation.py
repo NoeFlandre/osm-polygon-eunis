@@ -14,6 +14,7 @@ from .builder import (
     build_full_pool,
     inventory_row_identifier,
     native_key_json,
+    native_keyset_sha256,
     polygon_snapshot_identifier,
 )
 from .models import (
@@ -36,6 +37,7 @@ from .models import (
     PoolEligibility,
     PoolKey,
     PoolValidationReport,
+    RawInventoryEvidence,
     ReferencePin,
     ReferenceSystem,
     SourceDocument,
@@ -191,6 +193,27 @@ def _validate_source_pin(source: SourceSnapshot, issues: list[str]) -> None:
         issues.append("source PBF SHA-256 is invalid")
 
 
+def _validate_raw_inventory_evidence(
+    evidence: RawInventoryEvidence,
+    inventory: tuple[PolygonInventoryRow, ...],
+    issues: list[str],
+) -> None:
+    if not _present(evidence.enumeration_rule):
+        issues.append("raw inventory evidence needs its unfiltered enumeration rule")
+    if not _valid_uri(evidence.scan_report_uri) or not _valid_sha256(evidence.scan_report_sha256):
+        issues.append("raw inventory scan report must have a resolvable URI and SHA-256")
+    if evidence.expected_key_count < 0:
+        issues.append("raw inventory expected key count cannot be negative")
+    elif evidence.expected_key_count != len(inventory):
+        issues.append("raw inventory key count differs from its independent scan evidence")
+    if not _valid_sha256(evidence.expected_keyset_sha256):
+        issues.append("raw inventory canonical key-set SHA-256 is invalid")
+    elif evidence.expected_keyset_sha256 != native_keyset_sha256(
+        row.native_key for row in inventory
+    ):
+        issues.append("raw inventory key set differs from its independent scan evidence")
+
+
 def _validate_support_contract(bundle: PoolBundle, issues: list[str]) -> None:
     reference = bundle.manifest.reference_pin
     if reference.threshold != _CONTRACT_THRESHOLD:
@@ -230,6 +253,9 @@ def _validate_inventory(
     inventory_by_id = _validate_inventory_rows(bundle, source_id, issues)
     if len(bundle.inventory) != bundle.manifest.total_source_keys:
         issues.append("manifest total_source_keys does not equal raw inventory row count")
+    _validate_raw_inventory_evidence(
+        bundle.manifest.raw_inventory_evidence, bundle.inventory, issues
+    )
     polygon_by_id = _validate_polygons(bundle.polygons, inventory_by_id, source_id, issues)
     _validate_inventory_geometry_links(bundle.inventory, bundle.polygons, polygon_by_id, issues)
     return inventory_by_id, polygon_by_id
@@ -736,6 +762,7 @@ def _validate_accounting(bundle: PoolBundle, issues: list[str]) -> None:
         PoolBuildInput(
             pool_key=bundle.manifest.pool_key,
             source_snapshot=bundle.manifest.source_snapshot,
+            raw_inventory_evidence=bundle.manifest.raw_inventory_evidence,
             reference_pin=bundle.manifest.reference_pin,
             adapter_id=bundle.manifest.adapter_id,
             adapter_revision=bundle.manifest.adapter_revision,

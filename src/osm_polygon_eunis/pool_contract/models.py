@@ -133,6 +133,17 @@ class SourceSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class RawInventoryEvidence:
+    """Independent receipt from enumerating native polygon keys before joins."""
+
+    enumeration_rule: str
+    scan_report_uri: str
+    scan_report_sha256: str
+    expected_key_count: int
+    expected_keyset_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
 class ReferencePin:
     """Pin label release, taxonomy, semantics, and shared assignment rule."""
 
@@ -278,6 +289,7 @@ class PoolBuildInput:
 
     pool_key: PoolKey
     source_snapshot: SourceSnapshot
+    raw_inventory_evidence: RawInventoryEvidence
     reference_pin: ReferencePin
     adapter_id: str
     adapter_revision: str
@@ -318,6 +330,7 @@ class PoolManifest:
     pool_version: str
     pool_key: PoolKey
     source_snapshot: SourceSnapshot
+    raw_inventory_evidence: RawInventoryEvidence
     reference_pin: ReferencePin
     adapter_id: str
     adapter_revision: str

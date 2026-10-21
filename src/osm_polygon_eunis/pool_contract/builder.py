@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 
 from .models import (
     EntityLink,
@@ -60,6 +60,13 @@ def polygon_snapshot_identifier(
     return hashlib.sha256(payload).hexdigest()
 
 
+def native_keyset_sha256(keys: Iterable[NativeKey]) -> str:
+    """Hash the sorted canonical native keys from a complete source scan."""
+
+    payload = "\n".join(sorted(native_key_json(key) for key in keys)).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 def build_full_pool(
     source: PoolBuildInput,
     *,
@@ -89,6 +96,7 @@ def build_full_pool(
         pool_version=pool_version,
         pool_key=source.pool_key,
         source_snapshot=source.source_snapshot,
+        raw_inventory_evidence=source.raw_inventory_evidence,
         reference_pin=source.reference_pin,
         adapter_id=source.adapter_id,
         adapter_revision=source.adapter_revision,
