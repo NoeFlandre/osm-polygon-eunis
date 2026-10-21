@@ -145,6 +145,27 @@ def test_download_to_temp_accepts_httpx_gzip_stream(tmp_path: Path) -> None:
     assert local_path.read_bytes() == decoded
 
 
+def test_download_to_temp_rejects_httpx_gzip_length_mismatch(tmp_path: Path) -> None:
+    decoded = b"decoded polygon data " * 100
+    encoded = gzip.compress(decoded)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={
+                "content-encoding": "gzip",
+                "content-length": str(len(decoded)),
+            },
+            stream=httpx.ByteStream(encoded),
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ValueError, match="byte count"):
+            _download(tmp_path, client=client)
+
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == []
+
+
 def test_download_to_temp_rejects_wrong_length(tmp_path: Path, monkeypatch) -> None:
     class FakeResponse:
         def __enter__(self):
