@@ -6,8 +6,6 @@ import math
 from dataclasses import dataclass
 from typing import Final
 
-import shapely
-
 from osm_polygon_eunis.pool_contract import AssignmentKind, LabelLevel, ReferencePin
 
 from .common import (
@@ -20,19 +18,25 @@ from .common import (
 
 WORLDCOVER_CODES: Final[frozenset[int]] = frozenset({10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 100})
 WORLDCOVER_LEVELS: Final[tuple[LabelLevel, ...]] = (LabelLevel("class", supported=True),)
+WORLDCOVER_AREA_MEASUREMENT: Final[str] = (
+    "pyproj.Geod(ellps=WGS84); boundary-cell intersections geodesic; v1"
+)
 
 
 @dataclass(frozen=True, slots=True)
 class WorldCoverEvidence:
-    """Per-polygon class fractions from ``osm-worldcover``'s raster extractor.
+    """Per-polygon physical-area evidence from ``osm-worldcover``'s pool adapter.
 
-    Fractions use the polygon's full planar area in the raster CRS. The existing
-    WorldCover extractor omits NoData and unavailable-tile pixels, so their
-    share remains unattributed in the denominator.
+    Numerators and denominator use WGS84 ellipsoidal square metres. NoData and
+    unavailable-tile pixels remain unattributed in the full-polygon denominator.
+    Existing published degree-based fractions are legacy evidence and must not
+    be passed through this pool adapter.
     """
 
     source_polygon_id: str
-    class_fractions: tuple[tuple[int, float], ...]
+    polygon_area_m2: float | None
+    class_areas_m2: tuple[tuple[int, float], ...]
+    area_measurement: str
     attempted_tiles: tuple[str, ...] = ()
     missing_tiles: tuple[str, ...] = ()
     extraction_error: str | None = None
@@ -43,12 +47,14 @@ def worldcover_supports(
     evidence: WorldCoverEvidence,
     reference_pin: ReferencePin,
 ) -> PoolPolygonLabelRecords:
-    """Turn class fractions into full-area support candidates for one polygon."""
+    """Turn geodesic class areas into full-area support candidates for one polygon."""
 
     if polygon.source_polygon_id != evidence.source_polygon_id:
         raise ValueError("WorldCover evidence does not match the raw polygon key")
-    if reference_pin.support_unit != "degree^2":
-        raise ValueError("WorldCover v200 support must use its EPSG:4326 planar area unit")
+    if reference_pin.support_unit != "m^2":
+        raise ValueError("WorldCover pool support must use physical square metres")
+    if evidence.area_measurement != WORLDCOVER_AREA_MEASUREMENT:
+        raise ValueError("WorldCover support area measurement is not the pinned geodesic method")
     if (
         polygon.snapshot is not None
         and polygon.geometry is not None
@@ -57,19 +63,8 @@ def worldcover_supports(
     ):
         if polygon.snapshot.crs != "EPSG:4326":
             raise ValueError("WorldCover source polygon snapshots must use EPSG:4326")
-        geometry_area = float(shapely.area(polygon.geometry))
-        if (
-            polygon.snapshot.original_area is not None
-            and math.isfinite(polygon.snapshot.original_area)
-            and polygon.snapshot.original_area > 0.0
-            and not math.isclose(
-                geometry_area,
-                polygon.snapshot.original_area,
-                rel_tol=1e-9,
-                abs_tol=1e-12,
-            )
-        ):
-            raise ValueError("WorldCover snapshot area must be the full original polygon area")
+        if polygon.snapshot.area_unit != "m^2":
+            raise ValueError("WorldCover snapshot area must use physical square metres")
 
     if evidence.extraction_error is not None:
         attempt = SupportAttempt(
@@ -83,6 +78,9 @@ def worldcover_supports(
         or polygon.snapshot.original_area is None
         or not math.isfinite(polygon.snapshot.original_area)
         or polygon.snapshot.original_area <= 0.0
+        or evidence.polygon_area_m2 is None
+        or not math.isfinite(evidence.polygon_area_m2)
+        or evidence.polygon_area_m2 <= 0.0
     ):
         attempt = SupportAttempt(
             (),
@@ -91,9 +89,16 @@ def worldcover_supports(
             missing_tile_ids=evidence.missing_tiles,
         )
     else:
+        if not math.isclose(
+            polygon.snapshot.original_area,
+            evidence.polygon_area_m2,
+            rel_tol=1e-12,
+            abs_tol=1e-6,
+        ):
+            raise ValueError("WorldCover snapshot area differs from full geodesic polygon area")
         attempt = SupportAttempt(
             _area_supports(
-                evidence.class_fractions,
+                evidence.class_areas_m2,
                 polygon.snapshot.original_area,
                 evidence.attempted_tiles,
             ),
@@ -104,7 +109,7 @@ def worldcover_supports(
 
 
 def _area_supports(
-    class_fractions: tuple[tuple[int, float], ...],
+    class_areas_m2: tuple[tuple[int, float], ...],
     original_area: float,
     evidence_ids: tuple[str, ...],
 ) -> tuple[SupportArea, ...]:
@@ -112,25 +117,20 @@ def _area_supports(
         raise ValueError("WorldCover evidence needs a positive full polygon area")
     seen: set[int] = set()
     supports: list[SupportArea] = []
-    fraction_total = 0.0
-    for code, fraction in class_fractions:
-        if code == 0:
-            if not math.isfinite(fraction) or fraction < 0.0:
-                raise ValueError("WorldCover NoData fraction must be finite and non-negative")
-            continue
+    area_total = 0.0
+    for code, area in class_areas_m2:
         if code not in WORLDCOVER_CODES:
             raise ValueError(f"unknown WorldCover class code {code}")
         if code in seen:
             raise ValueError(f"WorldCover code {code} must be unioned before adaptation")
         seen.add(code)
-        if not math.isfinite(fraction) or fraction < 0.0 or fraction > 1.0:
-            raise ValueError(f"WorldCover class fraction for {code} must be within [0, 1]")
-        fraction_total += fraction
-        numerator = fraction * original_area
-        if numerator > 0.0:
+        if not math.isfinite(area) or area < 0.0 or area > original_area:
+            raise ValueError(f"WorldCover class area for {code} must be within polygon area")
+        area_total += area
+        if area > 0.0:
             supports.append(
-                SupportArea("class", str(code), numerator, AssignmentKind.DIRECT, evidence_ids)
+                SupportArea("class", str(code), area, AssignmentKind.DIRECT, evidence_ids)
             )
-    if fraction_total > 1.0 + 1e-9:
-        raise ValueError("WorldCover class fractions exceed the full-area denominator")
+    if area_total > original_area * (1.0 + 1e-9):
+        raise ValueError("WorldCover class areas exceed the full geodesic denominator")
     return tuple(supports)

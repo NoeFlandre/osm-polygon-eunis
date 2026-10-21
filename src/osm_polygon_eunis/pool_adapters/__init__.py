@@ -25,10 +25,21 @@ from .lucas import (
 from .runner import (
     WorldCoverSourceAttempt,
     iter_lucas_attempts,
+    iter_lucas_rows,
     iter_worldcover_attempts,
+    iter_worldcover_rows,
     iter_worldcover_source_attempts,
+    iter_worldcover_source_rows,
+)
+from .streaming import (
+    AdapterStreamingOptions,
+    export_labeled_polygons,
+    export_polygon_attempts,
+    iter_labeled_polygon_batches,
+    iter_polygon_batches,
 )
 from .worldcover import (
+    WORLDCOVER_AREA_MEASUREMENT,
     WORLDCOVER_CODES,
     WORLDCOVER_LEVELS,
     WorldCoverEvidence,
@@ -37,8 +48,10 @@ from .worldcover import (
 
 __all__ = [
     "LUCAS_LEVELS",
+    "WORLDCOVER_AREA_MEASUREMENT",
     "WORLDCOVER_CODES",
     "WORLDCOVER_LEVELS",
+    "AdapterStreamingOptions",
     "AttemptEvidenceRecord",
     "LucasCode",
     "LucasFeatureQuery",
@@ -54,9 +67,16 @@ __all__ = [
     "WorldCoverEvidence",
     "WorldCoverSourceAttempt",
     "build_raw_inventory_evidence",
+    "export_labeled_polygons",
+    "export_polygon_attempts",
+    "iter_labeled_polygon_batches",
     "iter_lucas_attempts",
+    "iter_lucas_rows",
+    "iter_polygon_batches",
     "iter_worldcover_attempts",
+    "iter_worldcover_rows",
     "iter_worldcover_source_attempts",
+    "iter_worldcover_source_rows",
     "label_polygon",
     "measure_lucas_supports",
     "verify_lucas_file",
