@@ -19,7 +19,10 @@ from .common import (
 WORLDCOVER_CODES: Final[frozenset[int]] = frozenset({10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 100})
 WORLDCOVER_LEVELS: Final[tuple[LabelLevel, ...]] = (LabelLevel("class", supported=True),)
 WORLDCOVER_AREA_MEASUREMENT: Final[str] = (
-    "WGS84 ellipsoidal CEA (lat_ts=30); geographic edges densified <=0.01deg; v2"
+    "WGS84 ellipsoidal CEA (lat_ts=30, lon_0=0, EPSG:4326 input); "
+    "canonical full-polygon boundary reused for clipping; geographic edges densified "
+    "<=0.01deg, refined at <=0.001/0.0001deg when abs(ratio-0.8)<=0.001; "
+    "unresolved threshold brackets fail closed; v3"
 )
 WORLDCOVER_REFERENCE_ID_NAMESPACE: Final[str] = "worldcover-tile-id"
 
@@ -42,6 +45,7 @@ class WorldCoverEvidence:
     missing_tiles: tuple[str, ...] = ()
     extraction_error: str | None = None
     class_evidence_ids: tuple[tuple[int, tuple[str, ...]], ...] = ()
+    measurement_diagnostics: str | None = None
 
 
 def worldcover_supports(
@@ -109,6 +113,7 @@ def worldcover_supports(
                 polygon.snapshot.original_area,
                 evidence.class_evidence_ids,
             ),
+            attempt_reason=evidence.measurement_diagnostics,
             attempted_tile_ids=evidence.attempted_tiles,
             missing_tile_ids=evidence.missing_tiles,
         )

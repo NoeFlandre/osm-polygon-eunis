@@ -7,6 +7,7 @@ import math
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 from shapely.geometry.base import BaseGeometry
 
@@ -37,6 +38,26 @@ class SupportArea:
     numerator: float
     assignment_kind: AssignmentKind
     evidence_ids: tuple[str, ...] = ()
+    evidence_sidecar: MeasurementSidecar | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MeasurementSidecar:
+    """A streamed JSONL reference-ID artifact before or after sink persistence."""
+
+    sha256: str
+    record_count: int
+    path: Path | None = None
+    uri: str | None = None
+
+    def __post_init__(self) -> None:
+        """Require one resolvable location and complete sidecar metadata."""
+        if not re.fullmatch(r"[0-9a-f]{64}", self.sha256):
+            raise ValueError("measurement sidecar needs a lowercase SHA-256 digest")
+        if self.record_count <= 0:
+            raise ValueError("measurement sidecar record count must be positive")
+        if (self.path is None) == (self.uri is None):
+            raise ValueError("measurement sidecar needs exactly one local path or persisted URI")
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +71,7 @@ class SupportAttempt:
     missing_tile_ids: tuple[str, ...] = ()
     partial_reason: str | None = None
     attempt_reason: str | None = None
+    attempted_reference_sidecar: MeasurementSidecar | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +84,8 @@ class AttemptEvidenceRecord:
     attempted_tile_ids: tuple[str, ...]
     missing_tile_ids: tuple[str, ...]
     support_evidence: tuple[tuple[str, str, tuple[str, ...]], ...]
+    support_evidence_sidecars: tuple[tuple[str, str, MeasurementSidecar], ...]
+    attempted_reference_sidecar: MeasurementSidecar | None
     status: str
     reason: str | None
     reference_id_namespace: str
@@ -291,6 +315,15 @@ def _attempt_evidence(
             if (candidate.level, candidate.code) == (support.level, support.code)
         )
     )
+    support_evidence_sidecars = tuple(
+        sorted(
+            (candidate.level, candidate.code, support.evidence_sidecar)
+            for support in attempt.supports
+            for candidate in candidates
+            if (candidate.level, candidate.code) == (support.level, support.code)
+            and support.evidence_sidecar is not None
+        )
+    )
     return AttemptEvidenceRecord(
         inventory_row_id=polygon.inventory.inventory_row_id,
         source_polygon_id=polygon.source_polygon_id,
@@ -298,6 +331,8 @@ def _attempt_evidence(
         attempted_tile_ids=attempt.attempted_tile_ids,
         missing_tile_ids=attempt.missing_tile_ids,
         support_evidence=support_evidence,
+        support_evidence_sidecars=support_evidence_sidecars,
+        attempted_reference_sidecar=attempt.attempted_reference_sidecar,
         status=status,
         reason=reason,
         reference_id_namespace=reference_id_namespace,

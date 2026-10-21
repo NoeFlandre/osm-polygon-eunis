@@ -2,6 +2,7 @@
 
 from .common import (
     AttemptEvidenceRecord,
+    MeasurementSidecar,
     PoolPolygonInput,
     PoolPolygonLabelRecords,
     SupportArea,
@@ -17,6 +18,7 @@ from .lucas import (
     LucasGeoPackageReader,
     LucasLayerManifest,
     LucasReferenceManifest,
+    LucasResourceLimits,
     LucasTaxonomy,
     lucas_2022_copernicus_manifest,
     lucas_2022_reference_pin,
@@ -36,8 +38,10 @@ from .runner import (
 from .source_pins import (
     RawSourceTreePin,
     SourceTreeFile,
+    derived_text_layer_tree_pins,
     polygon_geometry_tree_pins,
     raw_source_tree_pins,
+    source_join_contract,
 )
 from .streaming import (
     AdapterStreamingOptions,
@@ -67,7 +71,9 @@ __all__ = [
     "LucasGeoPackageReader",
     "LucasLayerManifest",
     "LucasReferenceManifest",
+    "LucasResourceLimits",
     "LucasTaxonomy",
+    "MeasurementSidecar",
     "PoolPolygonInput",
     "PoolPolygonLabelRecords",
     "RawSourceTreePin",
@@ -77,6 +83,7 @@ __all__ = [
     "WorldCoverEvidence",
     "WorldCoverSourceAttempt",
     "build_raw_inventory_evidence",
+    "derived_text_layer_tree_pins",
     "export_labeled_polygons",
     "export_polygon_attempts",
     "iter_labeled_polygon_batches",
@@ -93,6 +100,7 @@ __all__ = [
     "measure_lucas_supports",
     "polygon_geometry_tree_pins",
     "raw_source_tree_pins",
+    "source_join_contract",
     "verify_lucas_file",
     "verify_lucas_taxonomy_file",
     "worldcover_supports",

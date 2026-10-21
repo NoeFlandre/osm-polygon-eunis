@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -19,7 +20,11 @@ from osm_polygon_eunis.pool_contract import (
     export_pool_batches,
 )
 
-from .common import PoolPolygonInput, PoolPolygonLabelRecords
+from .common import (
+    MeasurementSidecar,
+    PoolPolygonInput,
+    PoolPolygonLabelRecords,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,7 +71,7 @@ def export_labeled_polygons(
     stream_options = options or AdapterStreamingOptions()
     spec = PoolStreamSpec.from_build_input(metadata_input)
     batches = iter_labeled_polygon_batches(
-        labeled_polygons,
+        _persist_measurement_sidecars(labeled_polygons, sink, metadata_input.pool_key.name),
         max_batch_rows=stream_options.limits.max_batch_rows,
         supplemental_batches=stream_options.supplemental_batches,
     )
@@ -209,12 +214,18 @@ def _attempt_receipt(record: PoolPolygonLabelRecords) -> PolygonAttemptReceipt:
         )
     else:
         raise ValueError(f"unknown adapter attempt status {evidence.status!r}")
+    sidecar = evidence.attempted_reference_sidecar
+    if sidecar is not None and sidecar.uri is None:
+        raise ValueError("attempt measurement sidecar was not persisted before export")
     return PolygonAttemptReceipt(
         inventory_row_id=evidence.inventory_row_id,
         status=status,
         reference_id_namespace=evidence.reference_id_namespace,
         attempted_reference_ids=attempted_reference_ids,
         missing_reference_ids=missing_reference_ids,
+        measurement_sidecar_uri=sidecar.uri if sidecar else None,
+        measurement_sidecar_sha256=sidecar.sha256 if sidecar else None,
+        measurement_record_count=sidecar.record_count if sidecar else None,
         reason=reason,
     )
 
@@ -229,11 +240,19 @@ def _candidate_support_evidence(
     if len(ids_by_candidate) != len(evidence.support_evidence):
         raise ValueError("adapter emitted duplicate candidate support evidence")
     output = []
+    sidecars_by_candidate = {
+        (level, code): sidecar for level, code, sidecar in evidence.support_evidence_sidecars
+    }
+    if len(sidecars_by_candidate) != len(evidence.support_evidence_sidecars):
+        raise ValueError("adapter emitted duplicate candidate support sidecars")
     for candidate in record.label_candidates:
         key = candidate.level, candidate.code
-        reference_ids = ids_by_candidate.get(key)
-        if not reference_ids:
+        reference_ids = ids_by_candidate.get(key, ())
+        sidecar = sidecars_by_candidate.get(key)
+        if bool(reference_ids) == (sidecar is not None):
             raise ValueError(f"candidate {key} is missing its exact reference evidence IDs")
+        if sidecar is not None and sidecar.uri is None:
+            raise ValueError(f"candidate {key} support sidecar was not persisted before export")
         output.append(
             LabelSupportEvidence(
                 inventory_row_id=record.inventory_row_id,
@@ -241,12 +260,72 @@ def _candidate_support_evidence(
                 code=candidate.code,
                 reference_id_namespace=evidence.reference_id_namespace,
                 reference_ids=reference_ids,
+                measurement_sidecar_uri=sidecar.uri if sidecar else None,
+                measurement_sidecar_sha256=sidecar.sha256 if sidecar else None,
+                measurement_record_count=sidecar.record_count if sidecar else None,
             )
         )
-    extra = set(ids_by_candidate) - {(row.level, row.code) for row in record.label_candidates}
+    candidate_keys = {(row.level, row.code) for row in record.label_candidates}
+    extra = (set(ids_by_candidate) | set(sidecars_by_candidate)) - candidate_keys
     if extra:
         raise ValueError(f"adapter emitted support evidence without a candidate: {sorted(extra)}")
     return tuple(output)
+
+
+def _persist_measurement_sidecars(
+    labeled_polygons: Iterable[tuple[PoolPolygonInput, PoolPolygonLabelRecords]],
+    sink: FileArtifactSink,
+    pool_name: str,
+) -> Iterator[tuple[PoolPolygonInput, PoolPolygonLabelRecords]]:
+    """Persist one polygon's streamed ID files before advancing the source scan."""
+    for polygon, record in labeled_polygons:
+        evidence = record.attempt_evidence
+        row_key = hashlib.sha256(evidence.inventory_row_id.encode("utf-8")).hexdigest()
+        attempted = _persist_sidecar(
+            evidence.attempted_reference_sidecar,
+            sink,
+            f"measurement-sidecars/{pool_name}/{row_key}-attempted",
+        )
+        support_sidecars = tuple(
+            (
+                level,
+                code,
+                _persist_sidecar(
+                    sidecar,
+                    sink,
+                    f"measurement-sidecars/{pool_name}/{row_key}-support-"
+                    f"{hashlib.sha256(f'{level}:{code}'.encode()).hexdigest()}",
+                ),
+            )
+            for level, code, sidecar in evidence.support_evidence_sidecars
+        )
+        persisted = replace(
+            record,
+            attempt_evidence=replace(
+                evidence,
+                attempted_reference_sidecar=attempted,
+                support_evidence_sidecars=support_sidecars,
+            ),
+        )
+        yield polygon, persisted
+
+
+def _persist_sidecar(
+    sidecar: MeasurementSidecar | None,
+    sink: FileArtifactSink,
+    artifact_stem: str,
+) -> MeasurementSidecar | None:
+    if sidecar is None or sidecar.uri is not None:
+        return sidecar
+    if sidecar.path is None:
+        raise ValueError("measurement sidecar has neither a local file nor a persisted URI")
+    uri = sink.put_file(f"{artifact_stem}-{sidecar.sha256}.jsonl", sidecar.path)
+    sidecar.path.unlink(missing_ok=True)
+    return MeasurementSidecar(
+        sha256=sidecar.sha256,
+        record_count=sidecar.record_count,
+        uri=uri,
+    )
 
 
 def _require_metadata_only(metadata_input: PoolBuildInput) -> None:

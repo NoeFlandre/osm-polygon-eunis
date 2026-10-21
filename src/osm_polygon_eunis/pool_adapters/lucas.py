@@ -8,11 +8,13 @@ to provide the bytes so their size and SHA-256 can be verified.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import numbers
 import re
 import sqlite3
 import struct
+import tempfile
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -33,6 +35,7 @@ from osm_polygon_eunis.pool_contract import (
 )
 
 from .common import (
+    MeasurementSidecar,
     PoolPolygonInput,
     PoolPolygonLabelRecords,
     SupportArea,
@@ -42,6 +45,7 @@ from .common import (
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _GPKG_HEADER_SIZE = 8
+_LEGACY_GPKG_ROW_SIZE = 7
 _EPSG_3035 = 3035
 LUCAS_REFERENCE_ID_NAMESPACE = "lucas-footprint-id"
 LUCAS_2022_GPKG_URI = (
@@ -355,6 +359,41 @@ class LucasFeatureQuery:
     partial_reason: str | None = None
     attempt_reason: str | None = None
     preaggregated_supports: tuple[SupportArea, ...] | None = None
+    attempted_feature_sidecar: MeasurementSidecar | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LucasResourceLimits:
+    """Fail-closed ceilings for one source-polygon reference query."""
+
+    max_candidate_features: int = 100_000
+    max_geometry_blob_bytes: int = 16 * 1024 * 1024
+    max_footprint_coordinates: int = 100_000
+    max_total_input_coordinates: int = 2_000_000
+    max_union_coordinates: int = 2_000_000
+    max_overlay_operand_coordinates: int = 500_000
+
+    def __post_init__(self) -> None:
+        """Reject zero or negative ceilings before any reference is queried."""
+        if any(
+            value <= 0
+            for value in (
+                self.max_candidate_features,
+                self.max_geometry_blob_bytes,
+                self.max_footprint_coordinates,
+                self.max_total_input_coordinates,
+                self.max_union_coordinates,
+                self.max_overlay_operand_coordinates,
+            )
+        ):
+            raise ValueError("LUCAS resource limits must be positive")
+
+
+class LucasResourceLimitError(RuntimeError):
+    """A reference query hit an explicit geometry or scan resource ceiling."""
+
+
+DEFAULT_LUCAS_RESOURCE_LIMITS = LucasResourceLimits()
 
 
 class LucasGeoPackageReader:
@@ -368,6 +407,7 @@ class LucasGeoPackageReader:
         taxonomy: LucasTaxonomy,
         *,
         fetch_size: int = 512,
+        resource_limits: LucasResourceLimits = DEFAULT_LUCAS_RESOURCE_LIMITS,
     ) -> None:
         """Prepare a read-only reader without downloading reference data."""
 
@@ -384,7 +424,9 @@ class LucasGeoPackageReader:
         self.manifest = manifest
         self.taxonomy = taxonomy
         self.fetch_size = fetch_size
+        self.resource_limits = resource_limits
         self._connection: sqlite3.Connection | None = None
+        self._sidecar_directory: tempfile.TemporaryDirectory[str] | None = None
 
     def __enter__(self) -> LucasGeoPackageReader:
         """Verify supplied file pins and open the manifest-selected layer."""
@@ -394,11 +436,15 @@ class LucasGeoPackageReader:
         verify_lucas_file(self.path, self.manifest)
         verify_lucas_taxonomy_file(self.taxonomy_path, self.manifest)
         self._connection = sqlite3.connect(f"{self.path.resolve().as_uri()}?mode=ro", uri=True)
+        sidecar_directory = tempfile.TemporaryDirectory(prefix="lucas-reference-evidence-")
+        self._sidecar_directory = sidecar_directory
         try:
             self._validate_schema()
         except Exception:
             self._connection.close()
             self._connection = None
+            sidecar_directory.cleanup()
+            self._sidecar_directory = None
             raise
         return self
 
@@ -414,6 +460,9 @@ class LucasGeoPackageReader:
         if self._connection is not None:
             self._connection.close()
             self._connection = None
+        if self._sidecar_directory is not None:
+            self._sidecar_directory.cleanup()
+            self._sidecar_directory = None
 
     def query(self, geometry: BaseGeometry) -> LucasFeatureQuery:
         """Query all RTree candidates, retaining IDs even for zero-area touches."""
@@ -423,36 +472,64 @@ class LucasGeoPackageReader:
             raise RuntimeError("LUCAS GeoPackage reader must be opened before querying")
         if geometry.is_empty or not geometry.is_valid:
             raise ValueError("LUCAS query geometry must be valid and non-empty")
+        if shapely.get_num_coordinates(geometry) > self.resource_limits.max_total_input_coordinates:
+            return LucasFeatureQuery(
+                (), (), partial_reason="lucas_source_polygon_coordinate_limit_exceeded"
+            )
+        sidecar_directory = self._sidecar_directory
+        if sidecar_directory is None:
+            raise RuntimeError("LUCAS reader sidecar workspace is not open")
         try:
-            cursor = _query_rtree_candidates(connection, self.manifest.layer, geometry.bounds)
+            cursor = _query_rtree_candidates(
+                connection,
+                self.manifest.layer,
+                geometry.bounds,
+                max_geometry_blob_bytes=self.resource_limits.max_geometry_blob_bytes,
+            )
         except sqlite3.DatabaseError:
             return LucasFeatureQuery((), (), "lucas_reference_query_failed:DatabaseError")
-        attempted_ids, supports, filter_counts, partial_counts, scan_failed = (
-            _scan_rtree_candidates(
-                cursor, self.fetch_size, geometry, self.taxonomy, self.manifest.layer
-            )
+        scan = _scan_rtree_candidates(
+            cursor,
+            _LucasScanContext(
+                self.fetch_size,
+                geometry,
+                self.taxonomy,
+                self.manifest.layer,
+                Path(sidecar_directory.name),
+                self.resource_limits,
+            ),
         )
-        filter_summary = _reason_summary("filtered", filter_counts)
-        partial_summary = _reason_summary("partial", partial_counts)
+        filter_summary = _reason_summary("filtered", scan.filter_counts)
+        partial_summary = _reason_summary("partial", scan.partial_counts)
         attempt_reason = (
             ";".join(
                 summary for summary in (filter_summary, partial_summary) if summary is not None
             )
             or None
         )
-        if scan_failed:
+        if scan.scan_failed:
             return LucasFeatureQuery(
                 (),
-                attempted_ids,
+                (),
                 "lucas_reference_query_failed:DatabaseError",
                 attempt_reason=attempt_reason,
+                attempted_feature_sidecar=scan.attempted_sidecar,
+            )
+        if scan.resource_failure is not None:
+            return LucasFeatureQuery(
+                (),
+                (),
+                partial_reason=scan.resource_failure,
+                attempt_reason=attempt_reason,
+                attempted_feature_sidecar=scan.attempted_sidecar,
             )
         return LucasFeatureQuery(
             (),
-            attempted_ids,
+            (),
             partial_reason=partial_summary,
             attempt_reason=attempt_reason,
-            preaggregated_supports=supports,
+            preaggregated_supports=scan.supports,
+            attempted_feature_sidecar=scan.attempted_sidecar,
         )
 
     def _validate_schema(self) -> None:
@@ -583,6 +660,8 @@ def _query_rtree_candidates(
     connection: sqlite3.Connection,
     layer: LucasLayerManifest,
     bounds: tuple[float, float, float, float],
+    *,
+    max_geometry_blob_bytes: int,
 ) -> sqlite3.Cursor:
     """Open a bounded query over the manifest-selected RTree."""
     table = sql_identifier(layer.table)
@@ -600,59 +679,130 @@ def _query_rtree_candidates(
         )
     )
     query = (
-        f"SELECT t.{primary_key}, t.{columns[0]}, t.{geometry}, t.{columns[1]}, "  # noqa: S608
+        f"SELECT t.{primary_key}, t.{columns[0]}, "  # noqa: S608 -- pinned manifest identifiers
+        f"CASE WHEN length(t.{geometry}) <= ? THEN t.{geometry} ELSE NULL END, "
+        f"length(t.{geometry}), t.{columns[1]}, "
         f"t.{columns[2]}, t.{columns[3]}, t.{columns[4]} "
         f"FROM {table} AS t JOIN {rtree} AS r ON r.id=t.{primary_key} "
         "WHERE r.maxx >= ? AND r.minx <= ? AND r.maxy >= ? AND r.miny <= ?"
     )
     min_x, min_y, max_x, max_y = bounds
-    return connection.execute(query, (min_x, max_x, min_y, max_y))
+    return connection.execute(query, (max_geometry_blob_bytes, min_x, max_x, min_y, max_y))
 
 
-def _scan_rtree_candidates(
-    cursor: sqlite3.Cursor,
-    fetch_size: int,
-    geometry: BaseGeometry,
-    taxonomy: LucasTaxonomy,
-    layer: LucasLayerManifest,
-) -> tuple[
-    tuple[str, ...],
-    tuple[SupportArea, ...],
-    defaultdict[str, int],
-    defaultdict[str, int],
-    bool,
-]:
-    attempted_ids: list[str] = []
-    support_accumulator = _LucasSupportAccumulator(geometry, taxonomy)
-    filter_counts: defaultdict[str, int] = defaultdict(int)
-    partial_counts: defaultdict[str, int] = defaultdict(int)
+@dataclass(frozen=True, slots=True)
+class _LucasScanContext:
+    fetch_size: int
+    geometry: BaseGeometry
+    taxonomy: LucasTaxonomy
+    layer: LucasLayerManifest
+    sidecar_directory: Path
+    resource_limits: LucasResourceLimits
+
+
+@dataclass(frozen=True, slots=True)
+class _LucasScanResult:
+    attempted_sidecar: MeasurementSidecar | None
+    supports: tuple[SupportArea, ...]
+    filter_counts: dict[str, int]
+    partial_counts: dict[str, int]
+    scan_failed: bool
+    resource_failure: str | None
+
+
+class _LucasScanState:
+    """Consume bounded candidate rows while streaming receipts and support IDs."""
+
+    def __init__(self, context: _LucasScanContext) -> None:
+        self.context = context
+        self.attempted_writer = _JsonlReferenceIdWriter(context.sidecar_directory, "attempted")
+        self.supports = _LucasSupportAccumulator(
+            context.geometry,
+            context.taxonomy,
+            sidecar_directory=context.sidecar_directory,
+            resource_limits=context.resource_limits,
+        )
+        self.filter_counts: defaultdict[str, int] = defaultdict(int)
+        self.partial_counts: defaultdict[str, int] = defaultdict(int)
+        self.scanned_features = 0
+        self.resource_failure: str | None = None
+
+    def next_fetch_size(self) -> int:
+        remaining = self.context.resource_limits.max_candidate_features - self.scanned_features
+        return min(self.context.fetch_size, remaining + 1)
+
+    def process(self, row: tuple[object, ...]) -> bool:
+        """Process one row, returning false if the candidate scan must stop."""
+        limits = self.context.resource_limits
+        if self.scanned_features >= limits.max_candidate_features:
+            self.attempted_writer.write_id(str(row[0]))
+            self.resource_failure = "lucas_candidate_feature_limit_exceeded"
+            return False
+        parsed = _parse_reference_row(
+            row,
+            self.context.geometry,
+            self.context.taxonomy,
+            self.context.layer,
+            resource_limits=limits,
+        )
+        footprint_id, footprint, filtered_reason, partial_reason = parsed
+        self.attempted_writer.write_id(footprint_id)
+        self.scanned_features += 1
+        if filtered_reason is not None:
+            self.filter_counts[filtered_reason] += 1
+        if partial_reason is not None:
+            self.partial_counts[partial_reason] += 1
+        if footprint is not None:
+            try:
+                self.supports.add(footprint)
+            except LucasResourceLimitError as error:
+                self.resource_failure = f"lucas_resource_limit:{error}"
+                return False
+            except (ValueError, shapely.errors.GEOSException) as error:
+                self.resource_failure = f"lucas_measurement_incomplete:{type(error).__name__}"
+                return False
+        return True
+
+    def finish(self, *, scan_failed: bool) -> _LucasScanResult:
+        if scan_failed or self.resource_failure is not None or self.partial_counts:
+            self.supports.discard()
+            supports: tuple[SupportArea, ...] = ()
+        else:
+            try:
+                supports = self.supports.finish()
+            except (LucasResourceLimitError, ValueError, shapely.errors.GEOSException) as error:
+                reason = (
+                    "lucas_resource_limit"
+                    if isinstance(error, LucasResourceLimitError)
+                    else "lucas_measurement_incomplete"
+                )
+                self.resource_failure = f"{reason}:{type(error).__name__}"
+                self.supports.discard()
+                supports = ()
+        return _LucasScanResult(
+            attempted_sidecar=self.attempted_writer.finish(),
+            supports=supports,
+            filter_counts=dict(self.filter_counts),
+            partial_counts=dict(self.partial_counts),
+            scan_failed=scan_failed,
+            resource_failure=self.resource_failure,
+        )
+
+
+def _scan_rtree_candidates(cursor: sqlite3.Cursor, context: _LucasScanContext) -> _LucasScanResult:
+    state = _LucasScanState(context)
     scan_failed = False
     while True:
         try:
-            rows = cursor.fetchmany(fetch_size)
+            rows = cursor.fetchmany(state.next_fetch_size())
         except sqlite3.DatabaseError:
             scan_failed = True
             break
         if not rows:
             break
-        for row in rows:
-            footprint_id, footprint, filtered_reason, partial_reason = _parse_reference_row(
-                row, geometry, taxonomy, layer
-            )
-            attempted_ids.append(footprint_id)
-            if filtered_reason is not None:
-                filter_counts[filtered_reason] += 1
-            if partial_reason is not None:
-                partial_counts[partial_reason] += 1
-            if footprint is not None:
-                support_accumulator.add(footprint)
-    return (
-        tuple(attempted_ids),
-        support_accumulator.finish(),
-        filter_counts,
-        partial_counts,
-        scan_failed,
-    )
+        if any(not state.process(row) for row in rows):
+            break
+    return state.finish(scan_failed=scan_failed)
 
 
 def _parse_reference_row(
@@ -660,9 +810,15 @@ def _parse_reference_row(
     geometry: BaseGeometry,
     taxonomy: LucasTaxonomy,
     layer: LucasLayerManifest,
+    *,
+    resource_limits: LucasResourceLimits = DEFAULT_LUCAS_RESOURCE_LIMITS,
 ) -> tuple[str, LucasFootprint | None, str | None, str | None]:
     """Apply source filters, exact C3 lookup, and geometry checks to one row."""
-    raw_id, raw_code, raw_blob, year, copernicus, can_do, observation_type = row
+    if len(row) == _LEGACY_GPKG_ROW_SIZE:
+        raw_id, raw_code, raw_blob, year, copernicus, can_do, observation_type = row
+        raw_blob_bytes = len(raw_blob) if isinstance(raw_blob, (bytes, memoryview)) else None
+    else:
+        raw_id, raw_code, raw_blob, raw_blob_bytes, year, copernicus, can_do, observation_type = row
     feature_id = str(raw_id)
     rejected = _eligibility_reasons(year, copernicus, can_do, observation_type, raw_code)
     if rejected:
@@ -673,6 +829,11 @@ def _parse_reference_row(
     if code_path is None:
         return feature_id, None, "support_class_not_in_c3", None
     partial_reason = None
+    if (
+        isinstance(raw_blob_bytes, numbers.Integral)
+        and int(raw_blob_bytes) > resource_limits.max_geometry_blob_bytes
+    ):
+        return feature_id, None, None, "reference_geometry_blob_limit_exceeded"
     try:
         footprint_geometry = _decode_gpkg_geometry(raw_blob, layer.srs_id)
     except (TypeError, ValueError, struct.error, shapely.errors.GEOSException):
@@ -680,6 +841,12 @@ def _parse_reference_row(
         footprint_geometry = None
     if footprint_geometry is not None and not _is_positive_polygon(footprint_geometry):
         partial_reason = "reference_geometry_unusable"
+    if (
+        footprint_geometry is not None
+        and shapely.get_num_coordinates(footprint_geometry)
+        > resource_limits.max_footprint_coordinates
+    ):
+        partial_reason = "reference_geometry_coordinate_limit_exceeded"
     if partial_reason is not None:
         return feature_id, None, None, partial_reason
     footprint = (
@@ -728,6 +895,7 @@ def measure_lucas_supports(
             query.exclusion_reason,
             attempted_reference_ids=query.attempted_feature_ids,
             attempt_reason=query.attempt_reason,
+            attempted_reference_sidecar=query.attempted_feature_sidecar,
         )
     elif query.partial_reason is not None:
         attempt = SupportAttempt(
@@ -736,6 +904,7 @@ def measure_lucas_supports(
             attempted_reference_ids=query.attempted_feature_ids,
             partial_reason=query.partial_reason,
             attempt_reason=query.attempt_reason,
+            attempted_reference_sidecar=query.attempted_feature_sidecar,
         )
     elif (
         polygon.snapshot.original_area is None
@@ -747,6 +916,7 @@ def measure_lucas_supports(
             "geometry_area_unusable",
             attempted_reference_ids=query.attempted_feature_ids,
             attempt_reason=query.attempt_reason,
+            attempted_reference_sidecar=query.attempted_feature_sidecar,
         )
     else:
         original = polygon.geometry
@@ -765,6 +935,7 @@ def measure_lucas_supports(
                 "geometry_unusable",
                 attempted_reference_ids=query.attempted_feature_ids,
                 attempt_reason=query.attempt_reason,
+                attempted_reference_sidecar=query.attempted_feature_sidecar,
             )
         else:
             supports = query.preaggregated_supports
@@ -774,6 +945,7 @@ def measure_lucas_supports(
                 supports,
                 attempted_reference_ids=query.attempted_feature_ids,
                 attempt_reason=query.attempt_reason,
+                attempted_reference_sidecar=query.attempted_feature_sidecar,
             )
     return label_polygon(
         polygon,
@@ -805,39 +977,151 @@ class _SupportUnionForest:
     def retained_geometry_count(self) -> int:
         return sum(geometry is not None for geometry in self._levels)
 
-    def add(self, geometry: BaseGeometry) -> None:
+    @property
+    def retained_coordinate_count(self) -> int:
+        return sum(
+            int(shapely.get_num_coordinates(geometry))
+            for geometry in self._levels
+            if geometry is not None
+        )
+
+    def add(
+        self,
+        geometry: BaseGeometry,
+        *,
+        max_union_coordinates: int | None = None,
+        max_overlay_operand_coordinates: int | None = None,
+    ) -> None:
         level = 0
         while level < len(self._levels) and self._levels[level] is not None:
             previous = self._levels[level]
             if previous is None:
                 raise RuntimeError("support union forest has inconsistent levels")
+            operand_coordinates = int(shapely.get_num_coordinates(previous)) + int(
+                shapely.get_num_coordinates(geometry)
+            )
+            if (
+                max_overlay_operand_coordinates is not None
+                and operand_coordinates > max_overlay_operand_coordinates
+            ):
+                raise LucasResourceLimitError("union overlay operand coordinate limit exceeded")
             geometry = unary_union((previous, geometry))
+            output_coordinates = int(shapely.get_num_coordinates(geometry))
+            if max_union_coordinates is not None and output_coordinates > max_union_coordinates:
+                raise LucasResourceLimitError("union output coordinate limit exceeded")
             self._levels[level] = None
             level += 1
+        if (
+            max_union_coordinates is not None
+            and int(shapely.get_num_coordinates(geometry)) > max_union_coordinates
+        ):
+            raise LucasResourceLimitError("union output coordinate limit exceeded")
         if level == len(self._levels):
             self._levels.append(geometry)
         else:
             self._levels[level] = geometry
 
-    def finish(self) -> BaseGeometry:
+    def finish(
+        self,
+        *,
+        max_union_coordinates: int | None = None,
+        max_overlay_operand_coordinates: int | None = None,
+    ) -> BaseGeometry:
         geometries = [geometry for geometry in self._levels if geometry is not None]
         if not geometries:
             raise ValueError("cannot finish an empty support union")
-        return geometries[0] if len(geometries) == 1 else unary_union(geometries)
+        self._levels.clear()
+        geometry = geometries[0]
+        for next_geometry in geometries[1:]:
+            operand_coordinates = int(shapely.get_num_coordinates(geometry)) + int(
+                shapely.get_num_coordinates(next_geometry)
+            )
+            if (
+                max_overlay_operand_coordinates is not None
+                and operand_coordinates > max_overlay_operand_coordinates
+            ):
+                raise LucasResourceLimitError(
+                    "final union overlay operand coordinate limit exceeded"
+                )
+            geometry = unary_union((geometry, next_geometry))
+            if (
+                max_union_coordinates is not None
+                and int(shapely.get_num_coordinates(geometry)) > max_union_coordinates
+            ):
+                raise LucasResourceLimitError("final union output coordinate limit exceeded")
+        if (
+            max_union_coordinates is not None
+            and int(shapely.get_num_coordinates(geometry)) > max_union_coordinates
+        ):
+            raise LucasResourceLimitError("final union output coordinate limit exceeded")
+        return geometry
+
+
+class _JsonlReferenceIdWriter:
+    """Write one JSON string per line while maintaining a streaming digest."""
+
+    def __init__(self, directory: Path, prefix: str) -> None:
+        directory.mkdir(parents=True, exist_ok=True)
+        handle = tempfile.NamedTemporaryFile(  # noqa: SIM115 -- kept open until finish/discard
+            mode="wb", prefix=f"{prefix}-", suffix=".jsonl", dir=directory, delete=False
+        )
+        self.path = Path(handle.name)
+        self._handle = handle
+        self._digest = hashlib.sha256()
+        self.record_count = 0
+
+    def write_id(self, reference_id: str) -> None:
+        line = (json.dumps(reference_id, ensure_ascii=False, separators=(",", ":")) + "\n").encode(
+            "utf-8"
+        )
+        self._handle.write(line)
+        self._digest.update(line)
+        self.record_count += 1
+
+    def finish(self) -> MeasurementSidecar | None:
+        self._handle.flush()
+        self._handle.close()
+        if self.record_count == 0:
+            self.path.unlink(missing_ok=True)
+            return None
+        return MeasurementSidecar(
+            sha256=self._digest.hexdigest(),
+            record_count=self.record_count,
+            path=self.path,
+        )
+
+    def discard(self) -> None:
+        if not self._handle.closed:
+            self._handle.close()
+        self.path.unlink(missing_ok=True)
 
 
 class _LucasSupportAccumulator:
     """Union each hierarchy class as footprint rows arrive, retaining no row geometries."""
 
-    def __init__(self, original: BaseGeometry, taxonomy: LucasTaxonomy) -> None:
+    def __init__(
+        self,
+        original: BaseGeometry,
+        taxonomy: LucasTaxonomy,
+        *,
+        sidecar_directory: Path | None = None,
+        resource_limits: LucasResourceLimits | None = None,
+    ) -> None:
         self._original = original
         self._taxonomy = taxonomy
+        self._sidecar_directory = sidecar_directory
+        self._resource_limits = resource_limits
         self._unions: dict[tuple[str, str], _SupportUnionForest] = {}
         self._evidence_ids: dict[tuple[str, str], list[str]] = defaultdict(list)
+        self._evidence_writers: dict[tuple[str, str], _JsonlReferenceIdWriter] = {}
+        self._total_input_coordinates = 0
+        self._retained_union_coordinates = 0
         self.peak_retained_union_geometry_count = 0
 
     def add(self, footprint: LucasFootprint) -> None:
         self._taxonomy.validate_path(footprint.l1_code, footprint.l2_code, footprint.l3_code)
+        footprint_coordinates = int(shapely.get_num_coordinates(footprint.geometry))
+        self._check_footprint_limits(footprint_coordinates)
         clipped = footprint.geometry.intersection(self._original)
         if clipped.is_empty or float(shapely.area(clipped)) <= 0.0:
             return
@@ -848,14 +1132,59 @@ class _LucasSupportAccumulator:
         ):
             if code is None:
                 continue
-            key = (level, code)
-            forest = self._unions.setdefault(key, _SupportUnionForest())
-            forest.add(footprint.geometry)
-            self._evidence_ids[key].append(footprint.footprint_id)
+            self._add_class_support((level, code), footprint, footprint_coordinates)
         retained = sum(forest.retained_geometry_count for forest in self._unions.values())
         self.peak_retained_union_geometry_count = max(
             self.peak_retained_union_geometry_count, retained
         )
+
+    def _check_footprint_limits(self, footprint_coordinates: int) -> None:
+        limits = self._resource_limits
+        if limits is None:
+            return
+        if footprint_coordinates > limits.max_footprint_coordinates:
+            raise LucasResourceLimitError("footprint coordinate limit exceeded")
+        if (
+            footprint_coordinates + int(shapely.get_num_coordinates(self._original))
+            > limits.max_overlay_operand_coordinates
+        ):
+            raise LucasResourceLimitError("footprint clip operand coordinate limit exceeded")
+        self._total_input_coordinates += footprint_coordinates
+        if self._total_input_coordinates > limits.max_total_input_coordinates:
+            raise LucasResourceLimitError("total input coordinate limit exceeded")
+
+    def _add_class_support(
+        self, key: tuple[str, str], footprint: LucasFootprint, footprint_coordinates: int
+    ) -> None:
+        limits = self._resource_limits
+        forest = self._unions.setdefault(key, _SupportUnionForest())
+        if limits is not None and (
+            self._retained_union_coordinates + footprint_coordinates > limits.max_union_coordinates
+        ):
+            raise LucasResourceLimitError("retained union coordinate limit exceeded")
+        previous_coordinates = forest.retained_coordinate_count
+        forest.add(
+            footprint.geometry,
+            max_union_coordinates=(limits.max_union_coordinates if limits else None),
+            max_overlay_operand_coordinates=(
+                limits.max_overlay_operand_coordinates if limits else None
+            ),
+        )
+        self._retained_union_coordinates += forest.retained_coordinate_count - previous_coordinates
+        if limits is not None and self._retained_union_coordinates > limits.max_union_coordinates:
+            raise LucasResourceLimitError("retained union coordinate limit exceeded")
+        self._write_support_id(key, footprint.footprint_id)
+
+    def _write_support_id(self, key: tuple[str, str], reference_id: str) -> None:
+        if self._sidecar_directory is None:
+            self._evidence_ids[key].append(reference_id)
+            return
+        writer = self._evidence_writers.get(key)
+        if writer is None:
+            level_code = hashlib.sha256(f"{key[0]}:{key[1]}".encode()).hexdigest()
+            writer = _JsonlReferenceIdWriter(self._sidecar_directory, f"support-{level_code}")
+            self._evidence_writers[key] = writer
+        writer.write_id(reference_id)
 
     def finish(self) -> tuple[SupportArea, ...]:
         kinds = {
@@ -865,22 +1194,63 @@ class _LucasSupportAccumulator:
         }
         supports = []
         for level, code in sorted(self._unions):
-            unioned = self._unions[(level, code)].finish()
+            limits = self._resource_limits
+            forest = self._unions[(level, code)]
+            previous_coordinates = forest.retained_coordinate_count
+            unioned = forest.finish(
+                max_union_coordinates=(limits.max_union_coordinates if limits else None),
+                max_overlay_operand_coordinates=(
+                    limits.max_overlay_operand_coordinates if limits else None
+                ),
+            )
+            unioned_coordinates = int(shapely.get_num_coordinates(unioned))
+            retained_after_finish = self._retained_union_coordinates - previous_coordinates
+            if (
+                limits is not None
+                and retained_after_finish + unioned_coordinates > limits.max_union_coordinates
+            ):
+                raise LucasResourceLimitError("final retained union coordinate limit exceeded")
+            self._retained_union_coordinates = max(0, retained_after_finish + unioned_coordinates)
+            if limits is not None and (
+                int(shapely.get_num_coordinates(unioned))
+                + int(shapely.get_num_coordinates(self._original))
+                > limits.max_overlay_operand_coordinates
+            ):
+                raise LucasResourceLimitError(
+                    "final polygon clip operand coordinate limit exceeded"
+                )
             intersection = unioned.intersection(self._original)
             area = float(shapely.area(intersection))
             if not math.isfinite(area) or area < 0.0:
                 raise ValueError("LUCAS intersection area must be finite and non-negative")
             if area > 0.0:
+                writer = self._evidence_writers.pop((level, code), None)
+                sidecar = writer.finish() if writer is not None else None
                 supports.append(
                     SupportArea(
                         level,
                         code,
                         area,
                         kinds[level],
-                        tuple(self._evidence_ids[(level, code)]),
+                        tuple(self._evidence_ids.get((level, code), ())),
+                        sidecar,
                     )
                 )
+            else:
+                writer = self._evidence_writers.pop((level, code), None)
+                if writer is not None:
+                    writer.discard()
+            self._retained_union_coordinates = max(
+                0, self._retained_union_coordinates - unioned_coordinates
+            )
+            del unioned, intersection
         return tuple(supports)
+
+    def discard(self) -> None:
+        """Close and remove all temporary contributing-ID files after a failed scan."""
+        for writer in self._evidence_writers.values():
+            writer.discard()
+        self._evidence_writers.clear()
 
 
 def _decode_gpkg_geometry(blob: object, expected_srs_id: int) -> BaseGeometry:

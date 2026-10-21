@@ -4,6 +4,7 @@ import hashlib
 import json
 import sqlite3
 import struct
+import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -12,6 +13,7 @@ import shapely
 from shapely.geometry import LineString, box
 
 from osm_polygon_eunis.pool_adapters import (
+    LUCAS_LEVELS,
     WORLDCOVER_AREA_MEASUREMENT,
     WORLDCOVER_LEVELS,
     AdapterStreamingOptions,
@@ -21,12 +23,14 @@ from osm_polygon_eunis.pool_adapters import (
     LucasGeoPackageReader,
     LucasLayerManifest,
     LucasReferenceManifest,
+    LucasResourceLimits,
     LucasTaxonomy,
     PoolPolygonInput,
     SupportArea,
     SupportAttempt,
     WorldCoverEvidence,
     build_raw_inventory_evidence,
+    derived_text_layer_tree_pins,
     export_labeled_polygons,
     iter_labeled_polygon_batches,
     iter_lucas_attempts,
@@ -41,6 +45,7 @@ from osm_polygon_eunis.pool_adapters import (
     measure_lucas_supports,
     polygon_geometry_tree_pins,
     raw_source_tree_pins,
+    source_join_contract,
     verify_lucas_file,
     verify_lucas_taxonomy_file,
     worldcover_supports,
@@ -379,15 +384,48 @@ def test_source_tree_pins_verify_frozen_raw_files_without_claiming_key_counts() 
     description = polygon_geometry_tree_pins(TextSource.DESCRIPTION)
     website = polygon_geometry_tree_pins(TextSource.WEBSITE)
     wiki = polygon_geometry_tree_pins(TextSource.WIKI)
-    assert {pin.path_prefix for pin in description} == {"data/", "language-v1/data/"}
+    assert {pin.path_prefix for pin in description} == {"data/"}
+    assert {pin.path_prefix for pin in derived_text_layer_tree_pins(TextSource.DESCRIPTION)} == {
+        "language-v1/data/"
+    }
     assert {pin.path_prefix for pin in website} == {"polygons/"}
     assert {pin.path_prefix for pin in wiki} == {"polygons/"}
     assert all(pin.purpose == "polygon_geometry" for pin in (*description, *website, *wiki))
+    assert all(
+        pin.purpose == "derived_text_layer"
+        for pin in derived_text_layer_tree_pins(TextSource.DESCRIPTION)
+    )
     assert all(
         pin.purpose == "downstream_text_documents"
         for pin in pins
         if pin.path_prefix.endswith("/sentences/")
     )
+
+
+def test_source_join_contract_pins_downstream_joins_without_claiming_raw_counts() -> None:
+    contract = source_join_contract()
+    website = contract["sources"]["website"]
+    description = contract["sources"]["description"]
+    wiki = contract["sources"]["wiki"]
+
+    assert contract["metadata_handoff"]["sha256"] == (
+        "d1c4bf9e60468a85b17c535be17ae4efeba7284b718d60235e19a39a9e65a072"
+    )
+    assert website["join"]["label_key"] == ["polygon_id", "field", "sentence_index"]
+    assert website["join"]["field_to_text_column"]["contact_website"] == (
+        "contact_website_sentences"
+    )
+    assert website["join"]["duckdb_sentence_index"] == "sentence_index + 1"
+    assert description["raw_geometry_tree"]["path"] == "data/"
+    assert description["derived_text_tree"]["path"] == "language-v1/data/"
+    assert description["join"]["derived_to_geometry_key"] == [
+        "source_pbf",
+        "osm_type",
+        "osm_id",
+    ]
+    assert wiki["join"]["link_key"] == ["polygon_id", "document_id", "project", "language"]
+    assert wiki["join"]["language_split_rule"].startswith("Primary and per-language")
+    assert contract["inventory_status"]["unique_raw_polygon_keys"] == "not_computed"
 
 
 def test_source_tree_pin_validation_rejects_tampered_tree_metadata() -> None:
@@ -695,6 +733,10 @@ def test_worldcover_source_evidence_is_joined_one_to_one_in_raw_order() -> None:
             WORLDCOVER_AREA_MEASUREMENT,
             attempted_tiles=("N00E000",),
             class_evidence_ids=((10, ("N00E000",)),),
+            measurement_diagnostics=(
+                "adaptive_cea_refinement;steps=0.01,0.001,0.0001;"
+                "class=10,range=0.799995918:0.800002,spread=6.0818e-06"
+            ),
         ),
         WorldCoverEvidence(
             "way/2",
@@ -715,6 +757,7 @@ def test_worldcover_source_evidence_is_joined_one_to_one_in_raw_order() -> None:
     )
 
     assert [row.label_outcomes[0].assigned_code for row in results] == ["10", "20"]
+    assert results[0].attempt_evidence.reason.startswith("adaptive_cea_refinement;")
     with pytest.raises(ValueError, match="counts differ"):
         tuple(
             iter_worldcover_source_attempts(
@@ -850,6 +893,43 @@ def _gpkg_blob(geometry) -> bytes:
     return b"GP\x00\x01" + struct.pack("<i", 3035) + shapely.to_wkb(geometry)
 
 
+def _sidecar_ids(sidecar) -> tuple[str, ...]:
+    assert sidecar is not None and sidecar.path is not None
+    return tuple(json.loads(line) for line in sidecar.path.read_text(encoding="utf-8").splitlines())
+
+
+def _assert_lucas_reader_resource_limits(
+    path: Path,
+    taxonomy_path: Path,
+    manifest: LucasReferenceManifest,
+    taxonomy: LucasTaxonomy,
+) -> None:
+    limits_and_reasons = (
+        (
+            LucasResourceLimits(max_geometry_blob_bytes=1),
+            "partial:reference_geometry_blob_limit_exceeded",
+        ),
+        (
+            LucasResourceLimits(max_footprint_coordinates=4),
+            "partial:reference_geometry_coordinate_limit_exceeded",
+        ),
+        (
+            LucasResourceLimits(max_union_coordinates=1),
+            "lucas_resource_limit:retained union coordinate limit exceeded",
+        ),
+    )
+    for limits, reason_prefix in limits_and_reasons:
+        reader = LucasGeoPackageReader(
+            path, taxonomy_path, manifest, taxonomy, resource_limits=limits
+        )
+        with reader:
+            query = reader.query(box(0, 0, 10, 10))
+            attempted_ids = _sidecar_ids(query.attempted_feature_sidecar)
+        assert query.partial_reason is not None and query.partial_reason.startswith(reason_prefix)
+        assert not query.preaggregated_supports
+        assert attempted_ids
+
+
 def _create_lucas_fixture(path: Path) -> None:
     connection = sqlite3.connect(path)
     connection.executescript(
@@ -948,8 +1028,16 @@ def test_lucas_reader_uses_exact_file_pins_and_records_feature_ids(tmp_path: Pat
         ),
     )
     reader = LucasGeoPackageReader(path, taxonomy_path, manifest, taxonomy, fetch_size=1)
+    attempted_ids = ()
+    level_support_ids = {}
+    first_adapter_attempt_ids = ()
     with reader:
         result = reader.query(box(0, 0, 10, 10))
+        attempted_ids = _sidecar_ids(result.attempted_feature_sidecar)
+        level_support_ids = {
+            (row.level, row.code): _sidecar_ids(row.evidence_sidecar)
+            for row in result.preaggregated_supports or ()
+        }
         attempts = tuple(
             iter_lucas_attempts(
                 (
@@ -961,23 +1049,49 @@ def test_lucas_reader_uses_exact_file_pins_and_records_feature_ids(tmp_path: Pat
                 _reference_pin(ReferenceSystem.LUCAS),
             )
         )
+        first_adapter_attempt_ids = _sidecar_ids(
+            attempts[0].attempt_evidence.attempted_reference_sidecar
+        )
 
-    assert result.attempted_feature_ids == ("1", "2", "3", "4", "5", "6")
+    assert result.attempted_feature_ids == ()
+    assert attempted_ids == ("1", "2", "3", "4", "5", "6")
     assert result.attempt_reason == (
         "filtered:point_copernicus=1,survey_obs_type=1,survey_year=1,"
         "surveycprncando=1,surveycprnlc=1"
     )
     assert result.footprints == ()
     assert result.preaggregated_supports is not None
-    assert result.preaggregated_supports == (
-        SupportArea("L1", "A", 80.0, AssignmentKind.ANCESTOR_DERIVED, ("1",)),
-        SupportArea("L2", "A1", 80.0, AssignmentKind.ANCESTOR_DERIVED, ("1",)),
-        SupportArea("L3", "A11", 80.0, AssignmentKind.DIRECT, ("1",)),
+    assert tuple(
+        (row.level, row.code, row.numerator, row.assignment_kind)
+        for row in result.preaggregated_supports
+    ) == (
+        ("L1", "A", 80.0, AssignmentKind.ANCESTOR_DERIVED),
+        ("L2", "A1", 80.0, AssignmentKind.ANCESTOR_DERIVED),
+        ("L3", "A11", 80.0, AssignmentKind.DIRECT),
     )
+    assert level_support_ids == {("L1", "A"): ("1",), ("L2", "A1"): ("1",), ("L3", "A11"): ("1",)}
     assert result.exclusion_reason is None
     assert len(attempts) == 2
-    assert attempts[0].attempt_evidence.attempted_reference_ids == ("1", "2", "3", "4", "5", "6")
+    assert attempts[0].attempt_evidence.attempted_reference_ids == ()
+    assert first_adapter_attempt_ids == ("1", "2", "3", "4", "5", "6")
     assert attempts[1].label_outcomes[0].status is OutcomeStatus.UNASSIGNED
+
+    limited_reader = LucasGeoPackageReader(
+        path,
+        taxonomy_path,
+        manifest,
+        taxonomy,
+        fetch_size=1,
+        resource_limits=LucasResourceLimits(max_candidate_features=2),
+    )
+    with limited_reader:
+        partial = limited_reader.query(box(0, 0, 10, 10))
+        partial_ids = _sidecar_ids(partial.attempted_feature_sidecar)
+    assert partial.partial_reason == "lucas_candidate_feature_limit_exceeded"
+    assert partial.preaggregated_supports is None
+    assert partial_ids == ("1", "2", "3")
+
+    _assert_lucas_reader_resource_limits(path, taxonomy_path, manifest, taxonomy)
 
     taxonomy_path.write_bytes(b"changed codebook")
     with pytest.raises(ValueError, match="taxonomy SHA-256"):
@@ -990,6 +1104,78 @@ def test_lucas_reader_uses_exact_file_pins_and_records_feature_ids(tmp_path: Pat
         LucasGeoPackageReader(path, taxonomy_path, manifest, taxonomy),
     ):
         pass
+
+
+def test_lucas_streamed_id_sidecars_are_persisted_through_pool_export(tmp_path: Path) -> None:
+    path = tmp_path / "lucas-fixture.gpkg"
+    taxonomy_path = tmp_path / "lucas-codebook.fixture"
+    taxonomy_bytes = b"synthetic fixture taxonomy\n"
+    taxonomy_path.write_bytes(taxonomy_bytes)
+    taxonomy = _lucas_taxonomy(sha256=hashlib.sha256(taxonomy_bytes).hexdigest())
+    _create_lucas_fixture(path)
+    manifest = LucasReferenceManifest(
+        release_id="synthetic-fixture-only",
+        source_uri="https://example.test/fixture.gpkg",
+        source_revision="fixture-source-1",
+        file_size_bytes=path.stat().st_size,
+        file_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+        taxonomy_id=taxonomy.taxonomy_id,
+        taxonomy_uri="https://example.test/codebook.csv",
+        taxonomy_revision=taxonomy.revision,
+        taxonomy_sha256=taxonomy.sha256,
+        layer=LucasLayerManifest(
+            "survey",
+            "geom",
+            "fid",
+            "rtree_survey_geom",
+            "surveycprnlc",
+            geometry_type="MULTISURFACE",
+        ),
+    )
+    polygon = _polygon(0, crs="EPSG:3035").pool_polygon
+    scan_report = b"one synthetic raw polygon"
+    scan_path = tmp_path / "scan.json"
+    scan_path.write_bytes(scan_report)
+    source_snapshot = SourceSnapshot(
+        snapshot_id="raw-description",
+        repository="NoeFlandre/source-polygons",
+        revision="source-commit-1",
+        pbf_uri="https://artifacts.example/source.osm.pbf",
+        pbf_sha256=_SHA_A,
+    )
+    metadata = PoolBuildInput(
+        pool_key=PoolKey(TextSource.DESCRIPTION, ReferenceSystem.LUCAS),
+        source_snapshot=source_snapshot,
+        raw_inventory_evidence=build_raw_inventory_evidence(
+            enumeration_rule="all raw polygons before text/relevance/evaluation joins",
+            scan_report_uri=scan_path.as_uri(),
+            scan_report=scan_report,
+            expected_key_count=1,
+            expected_keyset_sha256=native_keyset_sha256((polygon.inventory.native_key,)),
+        ),
+        reference_pin=_reference_pin(ReferenceSystem.LUCAS),
+        adapter_id="lucas-source-wide-adapter",
+        adapter_revision="synthetic-test",
+        builder_revision="6ceddf3477c282b366bed4d502a1aaa68e8c194d",
+        inventory=(),
+        polygons=(),
+        levels=LUCAS_LEVELS,
+        label_candidates=(),
+        label_outcomes=(),
+    )
+    sink = FilesystemStreamingSink(tmp_path / "artifacts")
+    with LucasGeoPackageReader(path, taxonomy_path, manifest, taxonomy, fetch_size=2) as reader:
+        query = reader.query(box(0, 0, 10, 10))
+        record = measure_lucas_supports(
+            polygon, query, taxonomy, _reference_pin(ReferenceSystem.LUCAS)
+        )
+        receipt = export_labeled_polygons(metadata, ((polygon, record),), sink)
+
+    assert receipt.total_source_keys == 1
+    sidecars = tuple((tmp_path / "artifacts" / "measurement-sidecars").rglob("*.jsonl"))
+    assert len(sidecars) == 4
+    for sidecar in sidecars:
+        assert len(sidecar.read_text(encoding="utf-8").splitlines()) >= 1
 
 
 def test_lucas_failed_bounded_scan_preserves_ids_already_attempted(monkeypatch) -> None:
@@ -1016,6 +1202,7 @@ def test_lucas_failed_bounded_scan_preserves_ids_already_attempted(monkeypatch) 
     )
     reader = LucasGeoPackageReader(Path("unused.gpkg"), Path("unused.pdf"), manifest, taxonomy)
     reader._connection = sqlite3.connect(":memory:")
+    reader._sidecar_directory = tempfile.TemporaryDirectory(prefix="lucas-test-sidecars-")
 
     class BrokenCursor:
         calls = 0
@@ -1028,6 +1215,7 @@ def test_lucas_failed_bounded_scan_preserves_ids_already_attempted(monkeypatch) 
                         17,
                         "A11",
                         _gpkg_blob(box(0, 0, 5, 10)),
+                        len(_gpkg_blob(box(0, 0, 5, 10))),
                         2022,
                         1,
                         1,
@@ -1039,15 +1227,17 @@ def test_lucas_failed_bounded_scan_preserves_ids_already_attempted(monkeypatch) 
     monkeypatch.setattr(
         lucas_module,
         "_query_rtree_candidates",
-        lambda *_args: BrokenCursor(),
+        lambda *_args, **_kwargs: BrokenCursor(),
     )
     try:
         result = reader.query(box(0, 0, 10, 10))
+        attempted_ids = _sidecar_ids(result.attempted_feature_sidecar)
     finally:
         reader.__exit__()
 
     assert result.exclusion_reason == "lucas_reference_query_failed:DatabaseError"
-    assert result.attempted_feature_ids == ("17",)
+    assert result.attempted_feature_ids == ()
+    assert attempted_ids == ("17",)
 
 
 def test_bounded_export_preserves_adapter_rows_and_unmatched_text_link(tmp_path: Path) -> None:
@@ -1279,13 +1469,16 @@ def test_lucas_reader_query_and_schema_failures_are_reported(tmp_path: Path, mon
     with pytest.raises(RuntimeError, match="opened before querying"):
         reader.query(box(0, 0, 1, 1))
     reader._connection = sqlite3.connect(":memory:")
+    reader._sidecar_directory = tempfile.TemporaryDirectory(prefix="lucas-test-sidecars-")
     try:
         with pytest.raises(ValueError, match="valid and non-empty"):
             reader.query(shapely.GeometryCollection())
         monkeypatch.setattr(
             lucas_module,
             "_query_rtree_candidates",
-            lambda *_args: (_ for _ in ()).throw(sqlite3.DatabaseError("fixture query error")),
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                sqlite3.DatabaseError("fixture query error")
+            ),
         )
         failed = reader.query(box(0, 0, 1, 1))
         assert failed.exclusion_reason == "lucas_reference_query_failed:DatabaseError"
@@ -1395,9 +1588,11 @@ def test_lucas_support_statuses_units_and_bounded_union() -> None:
     assert shapely.area(forest.finish()) == 129.0
 
 
-def test_lucas_streaming_union_retains_logarithmic_geometry_state() -> None:
+def test_lucas_streaming_union_and_reference_ids_spill_to_disk(tmp_path: Path) -> None:
     taxonomy = _lucas_taxonomy()
-    accumulator = lucas_module._LucasSupportAccumulator(box(0, 0, 10, 10), taxonomy)
+    accumulator = lucas_module._LucasSupportAccumulator(
+        box(0, 0, 10, 10), taxonomy, sidecar_directory=tmp_path
+    )
     footprint_count = 4095
     for index in range(footprint_count):
         accumulator.add(LucasFootprint(str(index), "A", "A1", "A11", box(0, 0, 8, 10)))
@@ -1411,7 +1606,26 @@ def test_lucas_streaming_union_retains_logarithmic_geometry_state() -> None:
         ("L2", "A1", 80.0),
         ("L3", "A11", 80.0),
     ]
-    assert all(len(row.evidence_ids) == footprint_count for row in supports)
+    assert all(not row.evidence_ids for row in supports)
+    assert all(row.evidence_sidecar is not None for row in supports)
+    assert all(row.evidence_sidecar.record_count == footprint_count for row in supports)
+    assert _sidecar_ids(supports[0].evidence_sidecar) == tuple(
+        str(index) for index in range(footprint_count)
+    )
+
+
+def test_lucas_union_operand_limit_fails_closed() -> None:
+    taxonomy = _lucas_taxonomy()
+    accumulator = lucas_module._LucasSupportAccumulator(
+        box(0, 0, 10, 10),
+        taxonomy,
+        resource_limits=LucasResourceLimits(max_overlay_operand_coordinates=10),
+    )
+    accumulator.add(LucasFootprint("1", "A", "A1", "A11", box(0, 0, 1, 1)))
+    accumulator.add(LucasFootprint("2", "A", "A1", "A11", box(2, 2, 3, 3)))
+    accumulator.add(LucasFootprint("3", "A", "A1", "A11", box(4, 4, 5, 5)))
+    with pytest.raises(lucas_module.LucasResourceLimitError, match="operand coordinate limit"):
+        accumulator.add(LucasFootprint("4", "A", "A1", "A11", box(6, 6, 7, 7)))
 
 
 def test_source_wide_runners_attempt_raw_rows_and_report_query_errors(monkeypatch) -> None:

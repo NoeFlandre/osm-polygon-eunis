@@ -58,6 +58,12 @@ class WorldCoverSourceAttempt(Protocol):
         ...
 
     @property
+    def measurement_diagnostics(self) -> str | None:
+        """Observed area-refinement range, when the 0.8 gate required refinement."""
+
+        ...
+
+    @property
     def area_measurement(self) -> str:
         """Pinned area algorithm used for both numerator and denominator."""
 
@@ -156,6 +162,7 @@ def iter_worldcover_source_rows(
             missing_tiles=evidence.missing_tiles,
             extraction_error=evidence.extraction_error,
             class_evidence_ids=getattr(evidence, "class_evidence_ids", ()),
+            measurement_diagnostics=getattr(evidence, "measurement_diagnostics", None),
         )
         yield polygon, worldcover_supports(polygon, adapted, reference_pin)
     if next(evidence_iterator, None) is not None:

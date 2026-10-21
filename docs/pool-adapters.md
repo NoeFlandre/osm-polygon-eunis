@@ -51,32 +51,64 @@ downstream.
 the frozen source file trees. The adapter loader verifies each tree's file
 count, byte total, and canonical inventory SHA-256 before exposing its pins.
 The inventory contains 386 Website `polygons/` files; 386 Description `data/`
-and 386 `language-v1/data/` files; 386 Wiki `polygons/` files; and the two Wiki
-sentence trees (386 Wikipedia and 375 Wikivoyage files). Sentence trees are
-document inputs downstream of the raw polygon scan. Description's second tree
-is preserved as a separately pinned geometry candidate group because its
-overlap with `data/` has not been resolved. The metadata handoff has no
-Parquet row counts or unique native-key totals, so these tree pins do not prove
-raw polygon inventory completeness. A production scan must enumerate both
-Description groups and independently establish unique native keys before the
-shared gate can pass.
+and 386 derived `language-v1/data/` files; 386 Wiki `polygons/` files; and the
+two Wiki sentence trees (386 Wikipedia and 375 Wikivoyage files). Only
+Description `data/` is raw polygon geometry. `language-v1/data/` is a derived
+text layer keyed by `description_identity` and `tag_key` and joins back to the
+same geometry on `source_pbf`, `osm_type`, and `osm_id`; it must not be counted
+as a second polygon inventory. The Description source inventory is therefore
+one `data/` tree. The handoff reports no unique native-key totals, so these
+file-tree pins do not prove raw polygon inventory completeness.
+
+`pool_adapters.data/source-join-contract.json` records the verified v2
+metadata handoff SHA-256
+`d1c4bf9e60468a85b17c535be17ae4efeba7284b718d60235e19a39a9e65a072`, the
+relevance label tree pins, Wiki link/document tree pins, and exact downstream
+join columns. Website labels join on `(polygon_id, field, sentence_index)`;
+`field=website` selects `website_sentences`, while
+`field=contact_website` selects `contact_website_sentences`. `sentence_index`
+is zero based in the source and must be incremented for DuckDB list indexing;
+the label's `text_sha256` remains available for text integrity checks. For
+Description, relevance labels join to the derived layer on
+`(description_identity, tag_key)`, then that layer joins to raw geometry on
+`(source_pbf, osm_type, osm_id)`. For Wiki, use the primary
+`polygon_document_links/` tree with key `(polygon_id, document_id, project,
+language)` and join documents on `document_id`. The language-split link tree
+is a separate layout; do not union it with the primary links without explicit
+scope and deduplication. Relevance and text joins remain downstream of the
+complete raw polygon attempts. The handoff contains shard metadata and
+representative footer schemas, not a count of distinct polygon keys.
 
 | Text source | Frozen repository revision | Geometry tree groups |
 | --- | --- | --- |
 | Website | `NoeFlandre/osm-polygon-website-tag@4cbddf95ce614e68d5ada8b94ca21bf9e48d39dd` | `polygons/` |
-| Description | `NoeFlandre/osm-polygon-description-tag@b4706eb315c66a8a57135289e7612dca8e03caf8` | `data/`, `language-v1/data/` |
+| Description | `NoeFlandre/osm-polygon-description-tag@b4706eb315c66a8a57135289e7612dca8e03caf8` | `data/` |
 | Wiki | `NoeFlandre/osm-polygon-wikidata-and-wikipedia@d6fc058ccf4643bc5fe5bfd5c1c0bc403d3da801` | `polygons/` |
 
 ## Support rules
 
-WorldCover pool support uses a WGS84 ellipsoidal cylindrical equal-area (CEA)
-projection in square metres, with geographic edges densified to at most 0.01
-degrees before projection. The same transformation measures the full source
-polygon, raster cells, and clipped support geometries. NoData and unavailable
-tiles stay uncovered in the denominator. Class `0` is never a label. The
-pinned method is `WGS84 ellipsoidal CEA (lat_ts=30); geographic edges densified
-<=0.01deg; v2`; old degree-based fractions and published outputs remain legacy
-evidence.
+WorldCover pool support uses WGS84 ellipsoidal cylindrical equal-area (CEA),
+input EPSG:4326, output square metres, and PROJ string
+`+proj=cea +lat_ts=30 +lon_0=0 +datum=WGS84 +units=m +no_defs +type=crs`.
+The full original polygon is projected once per measurement step and that same
+projected boundary clips every raster-cell support across tile and memory
+chunks. CEA transforms axis-aligned geographic cell boundaries to straight
+segments, so cell edges are transformed without independent densification.
+Source polygon edges use a 0.01 degree maximum segment, with additional 0.001
+and 0.0001 degree passes when a class is within 0.001 of the 0.8 gate. A
+successful refinement records, in the attempt receipt, each class's observed
+minimum and maximum ratio and the spread across those three passes. If the
+passes land on different sides of 0.8, the source attempt records the exact
+class and ratios and fails closed. The adapter also fails closed on longitude
+wrapping, antimeridian-spanning, pole-edge, or over-budget boundaries. This is
+an implementation protocol for review, not scientific approval or a formal
+global error bound. NoData and unavailable tiles stay in the full-area
+denominator; class `0` is never a label. Old degree-based fractions and
+published outputs remain legacy evidence. The current measurement ID is
+`WGS84 ellipsoidal CEA (lat_ts=30, lon_0=0, EPSG:4326 input); canonical
+full-polygon boundary reused for clipping; geographic edges densified
+<=0.01deg, refined at <=0.001/0.0001deg when abs(ratio-0.8)<=0.001; unresolved
+threshold brackets fail closed; v3`.
 
 LUCAS support is measured in square metres in EPSG:3035. The reference pin
 identifies the official 2022 Copernicus asset
@@ -106,16 +138,26 @@ produces an excluded outcome. The reader records all RTree-hit footprint IDs
 and filter counts, while candidate evidence records the eligible IDs that
 contributed to each level and class.
 
-The GeoPackage cursor is consumed with `fetchmany`; the reader feeds each
-footprint into an independent binary-carry union forest for every supported
-`(level, class)` and does not retain the raw geometry rows. Each forest holds
-at most one partial union per binary level, so retained union-geometry count
-grows logarithmically with the number of intersecting footprints. The final
-union is clipped to the unchanged full polygon before area measurement.
-Attempted and contributing reference IDs are still emitted as exact tuples
-under the current adapter record shape; very large ID lists need a streamed
-sidecar path through the shared contract to bound that separate provenance
-buffer.
+The GeoPackage cursor is consumed with `fetchmany`; the reader streams
+attempted and contributing IDs into per-measurement UTF-8 JSONL sidecars (one
+JSON string ID per line, trailing LF), incrementally hashing and counting each
+file. The bounded exporter copies each sidecar through the existing immutable
+artifact sink and writes its URI, SHA-256, and record count into the shared
+attempt and support-evidence tables. The IDs do not accumulate as Python
+tuples. The shared core retains the sidecar URI/hash/count contract; the JSONL
+record format is defined by this source adapter.
+
+The reader feeds each footprint into an independent binary-carry union forest
+for every supported `(level, class)`. The forest retains logarithmically many
+geometry objects, but the adapter also checks coordinate counts because object
+count alone does not bound geometry memory. Default fail-closed limits per raw
+polygon are: 100,000 RTree candidates; 16 MiB per GPKG geometry blob; 100,000
+coordinates per footprint; 2,000,000 total input coordinates; 2,000,000 total
+retained union coordinates; and 500,000 coordinates across any union or clip
+overlay operands. A limit hit produces a reasoned partial attempt with no
+candidate labels. It does not truncate a support and report it as complete.
+The final class union is clipped to the unchanged full polygon before area
+measurement.
 
 ## Pin and persistence requirements
 
