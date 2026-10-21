@@ -14,6 +14,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from importlib.metadata import version
 from pathlib import Path
+from typing import cast
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 from zipfile import BadZipFile, ZipFile
 
@@ -123,24 +124,9 @@ class ClassificationTaxonomy:
     def __post_init__(self) -> None:
         """Reject missing labels and parent edges outside the parsed hierarchy."""
 
-        taxonomy_codes = set(self.levels) | set(self.parents) | set(self.parents.values())
-        missing = sorted(
-            code
-            for code in taxonomy_codes
-            if not isinstance(self.labels.get(code), str) or not self.labels[code].strip()
-        )
-        if missing:
-            raise ValueError(f"EUNIS taxonomy has missing label for {', '.join(missing)}")
-        for code, level in self.levels.items():
-            if not code or not isinstance(level, int) or isinstance(level, bool) or level < 1:
-                raise ValueError(f"EUNIS taxonomy has invalid Level for {code!r}")
-        for code, parent in self.parents.items():
-            if code not in self.levels or parent not in self.levels:
-                raise ValueError(f"EUNIS taxonomy has a parent without a Level for {code}")
-            if not code.startswith(parent) or len(parent) >= len(code):
-                raise ValueError(f"EUNIS taxonomy has invalid prefix parent for {code}")
-            if self.levels[parent] >= self.levels[code]:
-                raise ValueError(f"EUNIS taxonomy parent is not at a lower Level for {code}")
+        _validate_classification_labels(self.labels, self.levels, self.parents)
+        _validate_classification_levels(self.levels)
+        _validate_classification_parent_edges(self.parents, self.levels)
 
     def ancestors_including_self(self, code: str) -> tuple[str, ...]:
         """Return a code followed by its parsed parents, from specific to root."""
@@ -202,36 +188,147 @@ def validate_classification_taxonomy_lineage(
     checksum-pinned workbook; supplemental cache labels may be retained.
     """
 
-    actual_cache_sha256 = hashlib.sha256(cache_payload).hexdigest()
-    if actual_cache_sha256 != expected.cache_sha256:
-        raise ValueError("classification taxonomy cache checksum does not match its pin")
-    actual_workbook_sha256 = hashlib.sha256(workbook_payload).hexdigest()
-    if actual_workbook_sha256 != expected.workbook_sha256:
-        raise ValueError("classification workbook checksum does not match its pin")
-    if cache_lineage.classification_record_id != expected.classification_record_id:
-        raise ValueError("classification taxonomy cache references another EEA record")
-    if cache_lineage.workbook_sha256 != actual_workbook_sha256:
-        raise ValueError("classification taxonomy cache points to another workbook")
+    _validate_taxonomy_lineage_pins(
+        cache_payload,
+        workbook_payload,
+        cache_lineage,
+        expected,
+    )
 
     workbook_taxonomy = parse_classification_taxonomy_workbook(
         workbook_payload,
         supplemental_labels=supplemental_labels,
     )
-    if (
-        cached_taxonomy.levels != workbook_taxonomy.levels
-        or cached_taxonomy.parents != workbook_taxonomy.parents
-    ):
-        raise ValueError("cached EUNIS levels or parent hierarchy differs from the workbook")
-    mismatched_labels = sorted(
-        code
-        for code, name in workbook_taxonomy.labels.items()
-        if cached_taxonomy.labels.get(code) != name
+    _require_matching_classification_taxonomy(cached_taxonomy, workbook_taxonomy)
+    return cached_taxonomy
+
+
+def _validate_taxonomy_lineage_pins(
+    cache_payload: bytes,
+    workbook_payload: bytes,
+    cache_lineage: ClassificationTaxonomyCacheLineage,
+    expected: ClassificationTaxonomyLineagePin,
+) -> None:
+    _validate_payload_pin(
+        cache_payload,
+        expected.cache_sha256,
+        "classification taxonomy cache checksum does not match its pin",
     )
+    actual_workbook_sha256 = _validate_payload_pin(
+        workbook_payload,
+        expected.workbook_sha256,
+        "classification workbook checksum does not match its pin",
+    )
+    _validate_cache_lineage(cache_lineage, expected, actual_workbook_sha256)
+
+
+def _validate_payload_pin(payload: bytes, expected_sha256: str, message: str) -> str:
+    actual_sha256 = hashlib.sha256(payload).hexdigest()
+    if actual_sha256 != expected_sha256:
+        raise ValueError(message)
+    return actual_sha256
+
+
+def _validate_cache_lineage(
+    cache_lineage: ClassificationTaxonomyCacheLineage,
+    expected: ClassificationTaxonomyLineagePin,
+    workbook_sha256: str,
+) -> None:
+    if cache_lineage.classification_record_id != expected.classification_record_id:
+        raise ValueError("classification taxonomy cache references another EEA record")
+    if cache_lineage.workbook_sha256 != workbook_sha256:
+        raise ValueError("classification taxonomy cache points to another workbook")
+
+
+def _require_matching_classification_taxonomy(
+    cached_taxonomy: ClassificationTaxonomy,
+    workbook_taxonomy: ClassificationTaxonomy,
+) -> None:
+    _require_matching_classification_hierarchy(cached_taxonomy, workbook_taxonomy)
+    mismatched_labels = _mismatched_classification_labels(cached_taxonomy, workbook_taxonomy)
     if mismatched_labels:
         raise ValueError(
             "cached EUNIS labels differ from the workbook for " + ", ".join(mismatched_labels)
         )
-    return cached_taxonomy
+
+
+def _require_matching_classification_hierarchy(
+    cached_taxonomy: ClassificationTaxonomy,
+    workbook_taxonomy: ClassificationTaxonomy,
+) -> None:
+    if cached_taxonomy.levels != workbook_taxonomy.levels:
+        raise ValueError("cached EUNIS levels or parent hierarchy differs from the workbook")
+    if cached_taxonomy.parents != workbook_taxonomy.parents:
+        raise ValueError("cached EUNIS levels or parent hierarchy differs from the workbook")
+
+
+def _mismatched_classification_labels(
+    cached_taxonomy: ClassificationTaxonomy,
+    workbook_taxonomy: ClassificationTaxonomy,
+) -> list[str]:
+    return sorted(
+        code
+        for code, name in workbook_taxonomy.labels.items()
+        if cached_taxonomy.labels.get(code) != name
+    )
+
+
+def _validate_classification_labels(
+    labels: Mapping[str, str],
+    levels: Mapping[str, int],
+    parents: Mapping[str, str],
+) -> None:
+    taxonomy_codes = set(levels) | set(parents) | set(parents.values())
+    missing = sorted(
+        code
+        for code in taxonomy_codes
+        if not isinstance(labels.get(code), str) or not labels[code].strip()
+    )
+    if missing:
+        raise ValueError(f"EUNIS taxonomy has missing label for {', '.join(missing)}")
+
+
+def _validate_classification_levels(levels: Mapping[str, int]) -> None:
+    for code, level in levels.items():
+        if not _is_valid_classification_level(code, level):
+            raise ValueError(f"EUNIS taxonomy has invalid Level for {code!r}")
+
+
+def _is_valid_classification_level(code: str, level: object) -> bool:
+    return bool(code) and isinstance(level, int) and not isinstance(level, bool) and level >= 1
+
+
+def _validate_classification_parent_edges(
+    parents: Mapping[str, str],
+    levels: Mapping[str, int],
+) -> None:
+    for code, parent in parents.items():
+        _validate_classification_parent_edge(code, parent, levels)
+
+
+def _validate_classification_parent_edge(
+    code: str,
+    parent: str,
+    levels: Mapping[str, int],
+) -> None:
+    _require_parent_levels(code, parent, levels)
+    _require_proper_prefix_parent(code, parent)
+    _require_lower_level_parent(code, parent, levels)
+
+
+def _require_parent_levels(code: str, parent: str, levels: Mapping[str, int]) -> None:
+    if code not in levels or parent not in levels:
+        raise ValueError(f"EUNIS taxonomy has a parent without a Level for {code}")
+
+
+def _require_proper_prefix_parent(code: str, parent: str) -> None:
+    if not code.startswith(parent) or len(parent) >= len(code):
+        raise ValueError(f"EUNIS taxonomy has invalid prefix parent for {code}")
+
+
+def _require_lower_level_parent(code: str, parent: str, levels: Mapping[str, int]) -> None:
+    if levels[parent] >= levels[code]:
+        raise ValueError(f"EUNIS taxonomy parent is not at a lower Level for {code}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -424,17 +521,7 @@ def _classification_taxonomy_records(
     records: dict[str, tuple[str, int]] = {}
     current_indexes: tuple[int, int, int] | None = None
     for raw_row in rows:
-        row = tuple(raw_row)
-        if not row:
-            current_indexes = None
-            continue
-        indexes = _classification_taxonomy_indexes(row)
-        if indexes is not None:
-            current_indexes = indexes
-            continue
-        if current_indexes is None:
-            continue
-        record = _classification_taxonomy_record(row, current_indexes)
+        current_indexes, record = _classification_taxonomy_row(raw_row, current_indexes)
         if record is None:
             continue
         code, name, level = record
@@ -442,6 +529,21 @@ def _classification_taxonomy_records(
     if not records:
         raise ValueError("EEA classification workbook has no Level/Code/Name rows")
     return records
+
+
+def _classification_taxonomy_row(
+    raw_row: Iterable[object],
+    current_indexes: tuple[int, int, int] | None,
+) -> tuple[tuple[int, int, int] | None, tuple[str, str, int] | None]:
+    row = tuple(raw_row)
+    if not row:
+        return None, None
+    indexes = _classification_taxonomy_indexes(row)
+    if indexes is not None:
+        return indexes, None
+    if current_indexes is None:
+        return None, None
+    return current_indexes, _classification_taxonomy_record(row, current_indexes)
 
 
 def _merge_classification_taxonomy_record(
@@ -468,15 +570,32 @@ def _validated_supplemental_taxonomy_label(
     name: object,
     labels: Mapping[str, str],
 ) -> str:
+    normalized_code, normalized_name = _normalize_supplemental_taxonomy_label(code, name)
+    previous = labels.get(normalized_code)
+    if previous is not None and previous != normalized_name:
+        raise ValueError(
+            f"EEA supplemental label conflicts with classification for {normalized_code}"
+        )
+    return normalized_name
+
+
+def _normalize_supplemental_taxonomy_label(code: object, name: object) -> tuple[str, str]:
+    _require_supplemental_taxonomy_strings(code, name)
+    code = cast(str, code)
+    name = cast(str, name)
+    normalized_name = name.strip()
+    if not _has_supplemental_taxonomy_text(code, normalized_name):
+        raise ValueError("EEA classification has an invalid supplemental label")
+    return code, normalized_name
+
+
+def _require_supplemental_taxonomy_strings(code: object, name: object) -> None:
     if not isinstance(code, str) or not isinstance(name, str):
         raise TypeError("EEA supplemental labels must use string codes and names")
-    normalized_name = name.strip()
-    if not code or not normalized_name:
-        raise ValueError("EEA classification has an invalid supplemental label")
-    previous = labels.get(code)
-    if previous is not None and previous != normalized_name:
-        raise ValueError(f"EEA supplemental label conflicts with classification for {code}")
-    return normalized_name
+
+
+def _has_supplemental_taxonomy_text(code: str, name: str) -> bool:
+    return bool(code) and bool(name)
 
 
 def _classification_taxonomy_indexes(
@@ -496,16 +615,39 @@ def _classification_taxonomy_record(
     indexes: tuple[int, int, int],
 ) -> tuple[str, str, int] | None:
     level_index, code_index, name_index = indexes
-    code = _text_value(row[code_index]) if code_index < len(row) else ""
+    code = _classification_cell_text(row, code_index)
     if not code:
         return None
-    if name_index >= len(row) or not _text_value(row[name_index]):
+    name = _required_classification_name(row, name_index, code)
+    level_value = _classification_cell_value(row, level_index)
+    level = _classification_level_number(level_value, code)
+    return code, name, level
+
+
+def _classification_cell_value(row: tuple[object, ...], index: int) -> object:
+    return row[index] if index < len(row) else ""
+
+
+def _classification_cell_text(row: tuple[object, ...], index: int) -> str:
+    return _text_value(_classification_cell_value(row, index))
+
+
+def _required_classification_name(
+    row: tuple[object, ...],
+    index: int,
+    code: str,
+) -> str:
+    name = _classification_cell_text(row, index)
+    if not name:
         raise ValueError(f"EEA classification has a missing name for {code}")
-    level_value = row[level_index] if level_index < len(row) else ""
-    level_text = _classification_level_text(level_value)
-    if not level_text.isdecimal() or int(level_text) < 1:
+    return name
+
+
+def _classification_level_number(value: object, code: str) -> int:
+    text = _classification_level_text(value)
+    if not text.isdecimal() or int(text) < 1:
         raise ValueError(f"EEA classification has an invalid Level for {code}")
-    return code, _text_value(row[name_index]), int(level_text)
+    return int(text)
 
 
 def _classification_level_text(value: object) -> str:
@@ -603,12 +745,7 @@ def _shared_string_value(shared_strings: tuple[str, ...], raw: str) -> str:
 
 
 def _xlsx_rows(archive: ZipFile, shared_strings: tuple[str, ...]) -> Iterable[tuple[str, ...]]:
-    sheet_paths = sorted(
-        path
-        for path in archive.namelist()
-        if path.startswith("xl/worksheets/sheet") and path.endswith(".xml")
-    )
-    for path in sheet_paths:
+    for path in _taxonomy_sheet_paths(archive):
         root = _safe_fromstring(archive.read(path))
         yield from _sheet_rows(root, shared_strings)
 
@@ -630,16 +767,19 @@ def _xlsx_taxonomy_rows(
     archive: ZipFile,
     shared_strings: tuple[str, ...],
 ) -> Iterable[tuple[str, ...]]:
-    sheet_paths = sorted(
-        path
-        for path in archive.namelist()
-        if path.startswith("xl/worksheets/sheet") and path.endswith(".xml")
-    )
-    for index, path in enumerate(sheet_paths):
+    for index, path in enumerate(_taxonomy_sheet_paths(archive)):
         if index:
             yield ()
         root = _safe_fromstring(archive.read(path))
         yield from _sheet_rows(root, shared_strings)
+
+
+def _taxonomy_sheet_paths(archive: ZipFile) -> list[str]:
+    return sorted(
+        path
+        for path in archive.namelist()
+        if path.startswith("xl/worksheets/sheet") and path.endswith(".xml")
+    )
 
 
 def _row_cells(row_element: ET.Element, shared_strings: tuple[str, ...]) -> dict[int, str]:

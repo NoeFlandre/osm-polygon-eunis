@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable, Mapping
 from contextlib import ExitStack
-from typing import TYPE_CHECKING, Protocol
+from typing import Protocol, TypeGuard
 
 import numpy as np
 import rasterio
@@ -19,13 +19,11 @@ from .grid_overlap import (
     band_row_ranges,
     weighted_cells,
 )
+from .raster_reference_helpers import RasterLayerLike
 from .raster_reference_helpers import shares_square_grid as _shares_square_grid
 
 _GDAL_CACHE_MAX_MB = 256
 _SUPPORT_CLASS_KEY_FIELDS = 2
-
-if TYPE_CHECKING:
-    from .raster_reference import RasterLayer
 
 
 class _Reference(Protocol):
@@ -33,12 +31,12 @@ class _Reference(Protocol):
     def _stack(self) -> ExitStack | None: ...
 
     @property
-    def _datasets(self) -> tuple[tuple[RasterLayer, rasterio.DatasetReader], ...]: ...
+    def _datasets(self) -> tuple[tuple[RasterLayerLike, rasterio.DatasetReader], ...]: ...
 
     def _open_datasets(
         self,
         stack: ExitStack,
-    ) -> Iterable[tuple[RasterLayer, rasterio.DatasetReader]]: ...
+    ) -> Iterable[tuple[RasterLayerLike, rasterio.DatasetReader]]: ...
 
     def _covering_window(
         self,
@@ -48,7 +46,7 @@ class _Reference(Protocol):
 
     def _tile_stack(
         self,
-        datasets: tuple[tuple[RasterLayer, rasterio.DatasetReader], ...],
+        datasets: tuple[tuple[RasterLayerLike, rasterio.DatasetReader], ...],
         row: int,
         column: int,
     ) -> np.ndarray | None: ...
@@ -83,13 +81,11 @@ def support_areas(
 def _support_areas_open(
     reference: _Reference,
     polygon: BaseGeometry,
-    datasets: tuple[tuple[RasterLayer, rasterio.DatasetReader], ...],
+    datasets: tuple[tuple[RasterLayerLike, rasterio.DatasetReader], ...],
     classes: tuple[tuple[tuple[str, str], tuple[str, ...]], ...],
 ) -> dict[tuple[str, str], float]:
-    if not datasets or not _shares_square_grid(datasets):
-        raise ValueError("support reference layers must share one square-cell grid")
+    first = _support_grid_dataset(datasets)
     class_indexes = _class_layer_indexes(classes, datasets)
-    first = datasets[0][1]
     window = reference._covering_window(first, polygon)
     areas = {class_key: 0.0 for class_key, _indexes in class_indexes}
     if window is None:
@@ -99,9 +95,21 @@ def _support_areas_open(
     for band in band_row_ranges(rows[0], rows[1], cols[0], cols[1]):
         cells = weighted_cells(polygon, first.transform, band, cols)
         _accumulate_support_cells(reference, areas, class_indexes, cells, datasets)
+    _validate_support_areas(areas)
+    return areas
+
+
+def _support_grid_dataset(
+    datasets: tuple[tuple[RasterLayerLike, rasterio.DatasetReader], ...],
+) -> rasterio.DatasetReader:
+    if not datasets or not _shares_square_grid(datasets):
+        raise ValueError("support reference layers must share one square-cell grid")
+    return datasets[0][1]
+
+
+def _validate_support_areas(areas: Mapping[tuple[str, str], float]) -> None:
     if any(not math.isfinite(area) or area < 0.0 for area in areas.values()):
         raise ArithmeticError("support query produced a non-finite or negative area")
-    return areas
 
 
 def _accumulate_support_cells(
@@ -109,7 +117,7 @@ def _accumulate_support_cells(
     areas: dict[tuple[str, str], float],
     class_indexes: tuple[tuple[tuple[str, str], tuple[int, ...]], ...],
     cells: WeightedCells,
-    datasets: tuple[tuple[RasterLayer, rasterio.DatasetReader], ...],
+    datasets: tuple[tuple[RasterLayerLike, rasterio.DatasetReader], ...],
 ) -> None:
     if not len(cells.rows):
         return
@@ -143,33 +151,49 @@ def _normalize_class_groups(
         raise ValueError("at least one support class must be requested")
     normalized = []
     for class_key, raw_codes in classes.items():
-        if (
-            not isinstance(class_key, tuple)
-            or len(class_key) != _SUPPORT_CLASS_KEY_FIELDS
-            or any(not isinstance(value, str) or not value.strip() for value in class_key)
-        ):
+        if not _is_support_class_key(class_key):
             raise ValueError("support class keys must be non-empty (level, code) pairs")
-        codes = tuple(sorted(set(raw_codes)))
-        if not codes or any(not isinstance(code, str) or not code.strip() for code in codes):
-            raise ValueError(f"support class {class_key} needs non-empty raster codes")
-        normalized.append((class_key, codes))
+        normalized.append((class_key, _normalize_class_codes(class_key, raw_codes)))
     return tuple(sorted(normalized))
+
+
+def _is_support_class_key(value: object) -> TypeGuard[tuple[str, str]]:
+    return (
+        isinstance(value, tuple)
+        and len(value) == _SUPPORT_CLASS_KEY_FIELDS
+        and all(isinstance(part, str) and part.strip() for part in value)
+    )
+
+
+def _normalize_class_codes(
+    class_key: tuple[str, str],
+    raw_codes: Iterable[str],
+) -> tuple[str, ...]:
+    codes = tuple(sorted(set(raw_codes)))
+    if not codes or any(not isinstance(code, str) or not code.strip() for code in codes):
+        raise ValueError(f"support class {class_key} needs non-empty raster codes")
+    return codes
 
 
 def _class_layer_indexes(
     classes: tuple[tuple[tuple[str, str], tuple[str, ...]], ...],
-    datasets: tuple[tuple[RasterLayer, rasterio.DatasetReader], ...],
+    datasets: tuple[tuple[RasterLayerLike, rasterio.DatasetReader], ...],
 ) -> tuple[tuple[tuple[str, str], tuple[int, ...]], ...]:
     indexes_by_code: dict[str, list[int]] = {}
     for index, (layer, _dataset) in enumerate(datasets):
         indexes_by_code.setdefault(layer.code, []).append(index)
-    result = []
-    for class_key, member_codes in classes:
-        missing = sorted(set(member_codes) - indexes_by_code.keys())
-        if missing:
-            raise ValueError(
-                f"support class {class_key} references missing raster codes: {missing}"
-            )
-        indexes = tuple(index for code in member_codes for index in indexes_by_code[code])
-        result.append((class_key, indexes))
-    return tuple(result)
+    return tuple(
+        (class_key, _indexes_for_class(class_key, member_codes, indexes_by_code))
+        for class_key, member_codes in classes
+    )
+
+
+def _indexes_for_class(
+    class_key: tuple[str, str],
+    member_codes: tuple[str, ...],
+    indexes_by_code: Mapping[str, list[int]],
+) -> tuple[int, ...]:
+    missing = sorted(set(member_codes) - indexes_by_code.keys())
+    if missing:
+        raise ValueError(f"support class {class_key} references missing raster codes: {missing}")
+    return tuple(index for code in member_codes for index in indexes_by_code[code])

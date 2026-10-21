@@ -11,19 +11,26 @@ select the rows in either stage.
 
 | Pool source | Raw polygon snapshot | Downstream relevance snapshot | Downstream text evidence |
 | --- | --- | --- | --- |
-| Description | `NoeFlandre/osm-polygon-description-tag` at `b4706eb315c66a8a57135289e7612dca8e03caf8`, `data/*.parquet` (386 files; 746,727,545 bytes) | `NoeFlandre/osm-polygon-description-tag-landuse` at `ce98b328f3c6543800a3d931877b51eb3f0cf768`, `labels/language-v1/data/*.parquet` (386 files; 100,444,539 bytes) | Raw `language-v1/data/*.parquet` (386 files; 103,449,770 bytes); description fields remain attached to raw rows. |
+| Description | `NoeFlandre/osm-polygon-description-tag` at `b4706eb315c66a8a57135289e7612dca8e03caf8`, `data/*.parquet` (386 files; 746,727,545 bytes) | `NoeFlandre/osm-polygon-description-tag-landuse` at `ce98b328f3c6543800a3d931877b51eb3f0cf768`, `labels/language-v1/data/*.parquet` (386 files; 100,444,539 bytes) | Derived `language-v1/data/*.parquet` (386 files; 103,449,770 bytes); joins back to raw `data/` by `(source_pbf, osm_type, osm_id)`. |
 | Website | `NoeFlandre/osm-polygon-website-tag` at `4cbddf95ce614e68d5ada8b94ca21bf9e48d39dd`, `polygons/*.parquet` (386 files; 3,943,775,497 bytes) | `NoeFlandre/osm-polygon-website-tag-landuse` at `e6524c711ee0033c3cd5990e5fdbbe4b89992dfb`, `labels/polygons/*.parquet` (386 files; 3,299,123,482 bytes) | Website fields remain attached to raw rows. |
 | Wiki | `NoeFlandre/osm-polygon-wikidata-and-wikipedia` at `d6fc058ccf4643bc5fe5bfd5c1c0bc403d3da801`, `polygons/*.parquet` (386 files; 2,203,317,876 bytes) | `NoeFlandre/osm-polygon-wikidata-and-wikipedia-landuse` at `49307aeb05b6dcc8a5d393f77f59a1e6d13a967a`, Wikipedia labels (386 files; 8,191,284,820 bytes) and Wikivoyage labels (375 files; 189,959,172 bytes) | Raw `wikipedia/sentences/*.parquet` (386 files; 18,075,023,818 bytes) and `wikivoyage/sentences/*.parquet` (375 files; 373,112,864 bytes). |
 
-[`config/eunis-source-provenance-20261021.json`](../config/eunis-source-provenance-20261021.json)
-records the frozen tree entries, Git blob IDs, byte sizes, and canonical inventory
-hashes for these raw, text, and relevance groups. Its metadata handoff SHA-256 is
-`eef1267cca7cbf455f09d4df9d41cff592cf841b313ea0d9c71262d24ad5f107`. The
-metadata confirms the pinned Hub revisions and complete file inventories; it
-does not provide Parquet row counts, native-key counts, or proof that all rows
-have been scanned. `wikipedia/documents/*.parquet` and
-`polygon_document_links/*.parquet` still lack verified file-tree pins. The label
-snapshots are separate inputs and never select the raw polygons to enumerate.
+The checked-in `config/eunis-source-provenance-20261021.json` records the frozen
+tree entries, Git blob IDs, byte sizes, and canonical inventory hashes for these
+raw, text, relevance, and Wiki document/link groups. Its verified v2 metadata
+handoff SHA-256 is
+`d1c4bf9e60468a85b17c535be17ae4efeba7284b718d60235e19a39a9e65a072`. The
+handoff's per-group digests cover its complete file-entry objects; the checked-in
+manifest also records normalized inventory hashes used by the source-tree pin
+contract. The pinned Wiki groups are `polygon_document_links/` (386 files,
+112,581,825 bytes), `wikipedia/documents/` (386 files, 8,739,038,060 bytes),
+and `wikivoyage/documents/` (375 files, 80,078,157 bytes). The separate
+`language_splits/polygon_document_links_by_language/` group (356 files,
+154,309,530 bytes) is pinned separately and is not unioned with the primary
+polygon-document links. These pins confirm the frozen file inventories; they do
+not provide Parquet row counts, native-key counts, or proof that all rows have
+been scanned. The label snapshots are separate inputs and never select the raw
+polygons to enumerate.
 
 The Wiki repository is explicitly mapped to `TextSource.WIKI`; the older
 `DatasetSpec("wikidata", ...)` remains unchanged for legacy consumers. The raw
@@ -106,9 +113,10 @@ Join keys follow the pinned source conventions. Description uses
 `description_identity`, tag key, language, sentence index, and the source
 description's `text_sha256`; its identity formula matches the source's
 `[osm_type, osm_id, tag_key, text_sha256]` SHA-256. Website uses
-`polygon_id`, an explicit label-field-to-sentence-column map, sentence index,
-and sentence `text_sha256`. The map must cover both pinned sentence columns;
-the adapter does not guess the relevance dataset's `field` vocabulary. Wiki
+`polygon_id`, the pinned label-field mapping `website -> website_sentences` and
+`contact_website -> contact_website_sentences`, `sentence_index`, and sentence
+`text_sha256`. The adapter applies this mapping directly and rejects a supplied
+mapping that disagrees with it. Wiki
 uses `sentence_id` and `text_sha256`, verifies the stored sentence
 `content_hash`, and resolves each `(document_id, project)` link through the
 full `(source_pbf, osm_type, osm_id)` key.
@@ -122,13 +130,14 @@ records. Direct, linked, unmatched, and geometry-missing link states do not
 remove raw inventory rows. The adapter and contract do not perform YES/NO
 balancing, H3 sampling, or evaluation draws.
 
-Wiki source sentence and relevance groups are pinned, but the metadata handoff
-does not contain tree entries for the following exact groups, so a full pinned
-Wiki join fails closed until their metadata is supplied:
-`NoeFlandre/osm-polygon-wikidata-and-wikipedia@d6fc058ccf4643bc5fe5bfd5c1c0bc403d3da801`
-at `polygon_document_links/*.parquet`, `wikipedia/documents/*.parquet`, and
-`wikivoyage/documents/*.parquet`. No sentence-body sample or guessed tree pin
-is used to fill this gap.
+The v2 metadata handoff includes exact file trees for the Wiki link and document
+groups. A join consumes the `polygon_document_links/` rows and checks that the
+requested corpus document tree is pinned; it does not read document bodies.
+The `language_splits/polygon_document_links_by_language/` tree is retained as a
+separate pin and is never unioned into primary polygon links. The handoff's
+representative Parquet footer schemas are Afghanistan samples, not a scan of all
+386 or 375 files; source-wide schema and row integrity remain to be checked
+during the bounded production run.
 
 ## Staging artifacts and integration boundary
 
@@ -160,9 +169,10 @@ label attempts do not use relevance to select keys.
 
 The implementation tests use deterministic local fixtures and do not download
 the 5 GB EEA raster set or source shards. The Description, Website, and Wiki
-raw, text, and relevance groups have verified metadata pins, but unique raw
-row counts and key-set hashes are still unknown. The raw data blobs have not
-been staged or enumerated, so content and row-level integrity remain
-unverified. Production attempts and exports remain gated until the source PBF
-manifests are verified, the taxonomy lineage is checked against original
-workbook bytes, and the missing Wiki document/link trees are pinned.
+raw, text, relevance, and required Wiki link/document groups have verified
+metadata pins, but unique raw row counts and key-set hashes are still unknown.
+The raw data blobs have not been staged or enumerated, so content and row-level
+integrity remain unverified. Production attempts and exports remain gated until
+the authoritative source manifests are verified, the taxonomy lineage is
+checked against the original workbook bytes, and all frozen raw shards pass the
+source-wide scan.

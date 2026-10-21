@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pyarrow as pa
@@ -11,6 +12,7 @@ import pyarrow.parquet as pq
 import pytest
 from shapely.geometry import box, mapping
 
+from osm_polygon_eunis import pool_runner
 from osm_polygon_eunis.pool_adapter import (
     EUNIS_POOL_SOURCE_LAYOUTS,
     EunisTaxonomy,
@@ -42,6 +44,7 @@ from osm_polygon_eunis.pool_runner import (
     export_eunis_pool,
     iter_attempt_checkpoint,
     iter_eunis_attempt_inventory_rows,
+    iter_eunis_wiki_downstream_records,
     read_projected_geometry_wkb,
     read_raw_geometry,
     run_eunis_label_attempts,
@@ -229,6 +232,127 @@ def test_raw_scan_is_complete_and_uses_core_canonical_key_digest(tmp_path: Path)
     assert all("source_row_locator" in row for row in raw_rows)
 
 
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("source_sha256", "0" * 64),
+        ("source_size_bytes", 0),
+        ("row_count", 0),
+        ("checkpoint_sha256", "1" * 64),
+    ],
+)
+def test_raw_shard_report_receipt_checks_each_pinned_field(
+    tmp_path: Path,
+    field: str,
+    replacement: Any,
+) -> None:
+    source = _frozen_source(tmp_path, [_source_row(11, None)])
+    shard = scan_raw_inventory(source, tmp_path / "checkpoints", _code_pin()).shards[0]
+    row = asdict(shard)
+
+    pool_runner._validate_raw_shard_receipt(row, shard)
+    row[field] = replacement
+    with pytest.raises(ValueError, match="receipt changed"):
+        pool_runner._validate_raw_shard_receipt(row, shard)
+
+
+def test_scan_and_code_pins_reject_nonpositive_limits_and_invalid_revisions(tmp_path: Path) -> None:
+    source = _frozen_source(tmp_path, [_source_row(11, None)])
+    with pytest.raises(ValueError, match="chunk sizes must be positive"):
+        scan_raw_inventory(source, tmp_path / "invalid", _code_pin(), batch_size=0)
+    with pytest.raises(ValueError, match="adapter revision must be a full lowercase Git SHA"):
+        PoolAdapterCodePin("not-a-git-revision", "b" * 40)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("threshold", 0.7, "exact 0.8 area threshold"),
+        ("support_union_policy", "sum_by_class", "support union_by_class"),
+        (
+            "support_semantics",
+            SupportSemantics.MAPPED_COVER,
+            "modeled habitat support",
+        ),
+        ("support_unit", "km2", "must use m2"),
+    ],
+)
+def test_eunis_support_policy_rejects_each_unpinned_choice(
+    field: str,
+    value: Any,
+    error: str,
+) -> None:
+    with pytest.raises(ValueError, match=error):
+        pool_runner._validate_eunis_support_policy(replace(_reference_pin(), **{field: value}))
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, {"kind": "missing"}),
+        (b"binary", {"kind": "base64", "value": "YmluYXJ5"}),
+        (bytearray(b"binary"), {"kind": "base64", "value": "YmluYXJ5"}),
+        (memoryview(b"binary"), {"kind": "base64", "value": "YmluYXJ5"}),
+        ("WKT polygon", {"kind": "text", "value": "WKT polygon"}),
+        ({"coordinates": [1, 2]}, {"kind": "json", "value": {"coordinates": [1, 2]}}),
+        ([1, 2], {"kind": "json", "value": [1, 2]}),
+        (4, {"kind": "json", "value": 4}),
+        (4.5, {"kind": "json", "value": 4.5}),
+        (False, {"kind": "json", "value": False}),
+        (object(), {"kind": "unsupported", "value": "object"}),
+    ],
+)
+def test_geometry_payload_encodings_are_round_trip_safe(
+    value: Any, expected: dict[str, Any]
+) -> None:
+    encoded = pool_runner._encode_geometry_payload(value)
+    assert encoded == expected
+    decoded = pool_runner._decode_geometry_payload(encoded)
+    assert decoded == (None if expected["kind"] == "unsupported" else value)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"kind": "unknown"},
+        {"kind": "base64", "value": "not base64!"},
+    ],
+)
+def test_geometry_payload_decoder_rejects_bad_encodings(payload: dict[str, Any]) -> None:
+    with pytest.raises((ValueError, KeyError)):
+        pool_runner._decode_geometry_payload(payload)
+
+
+def test_empty_accumulator_flushes_cleanly_and_rejects_an_oversized_polygon() -> None:
+    accumulator = pool_runner._PoolBatchAccumulator(
+        limits=StreamingLimits(max_batch_rows=1),
+        max_polygons_per_batch=1,
+    )
+    assert accumulator.flush() is None
+    with pytest.raises(ValueError, match="one polygon attempt has"):
+        accumulator.add(cast(Any, None), None, (), (), cast(Any, None), ())
+
+
+def test_raw_inventory_digest_merges_more_than_one_bounded_key_run(tmp_path: Path) -> None:
+    rows = [_source_row(osm_id, None) for osm_id in range(1, 66)]
+    source = _frozen_source(tmp_path, rows)
+
+    scan = scan_raw_inventory(
+        source,
+        tmp_path / "merge-checkpoints",
+        _code_pin(),
+        batch_size=7,
+        key_chunk_size=1,
+    )
+
+    keys = (
+        canonical_native_key({"source_pbf": "region.osm.pbf", "osm_type": "way", "osm_id": osm_id})
+        for osm_id in range(1, 66)
+    )
+    assert scan.evidence.expected_key_count == 65
+    assert scan.evidence.expected_keyset_sha256 == native_keyset_sha256(keys)
+
+
 def test_raw_scan_resumes_verified_shards_without_reopening_source(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -252,7 +376,7 @@ def test_handoff_source_tree_inventory_pins_match_checked_in_provenance() -> Non
     )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["schema"]["metadata_handoff_sha256"] == (
-        "eef1267cca7cbf455f09d4df9d41cff592cf841b313ea0d9c71262d24ad5f107"
+        "d1c4bf9e60468a85b17c535be17ae4efeba7284b718d60235e19a39a9e65a072"
     )
     assert manifest["schema"]["raw_native_key_counts"] is None
     assert "/srv/storage/" not in manifest_path.read_text(encoding="utf-8")
@@ -263,12 +387,19 @@ def test_handoff_source_tree_inventory_pins_match_checked_in_provenance() -> Non
         for tree in manifest[section]
         for group in tree["groups"]
     }
+    wiki_tree = manifest["wiki_document_link_file_trees"]
+    groups.update(
+        {
+            (wiki_tree["repository"], wiki_tree["revision"], group["path_prefix"]): group
+            for group in wiki_tree["groups"]
+        }
+    )
     pins = [
         pin
         for layout in EUNIS_POOL_SOURCE_LAYOUTS.values()
         for pin in (layout.raw_polygon_tree_pin, *layout.additional_tree_pins)
     ]
-    assert len(groups) == len(pins) == 10
+    assert len(groups) == len(pins) == 14
     for pin in pins:
         group = groups[(pin.repository, pin.revision, pin.path_prefix)]
         files = tuple(
@@ -583,7 +714,7 @@ def test_full_pool_export_streams_downstream_text_and_relevance_rows(tmp_path: P
                 {
                     "label_id": "fixture-website-yes",
                     "polygon_id": "region:way:11",
-                    "field": "website_sentences",
+                    "field": "website",
                     "sentence_index": 0,
                     "text_sha256": digest,
                     "decision": "YES",
@@ -592,8 +723,8 @@ def test_full_pool_export_streams_downstream_text_and_relevance_rows(tmp_path: P
         ],
         inventory,
         website_field_to_column={
-            "website_sentences": "website_sentences",
-            "contact_website_sentences": "contact_website_sentences",
+            "website": "website_sentences",
+            "contact_website": "contact_website_sentences",
         },
     )
     sink_root = tmp_path / "full-pool-with-text"
@@ -622,6 +753,82 @@ def test_full_pool_export_streams_downstream_text_and_relevance_rows(tmp_path: P
     link_shard = next(row for row in shards if row["table"] == "text_polygon_links")
     links = pq.read_table(sink_root / link_shard["path"])
     assert links["status"][0].as_py() == TextLinkStatus.LINKED.value
+
+
+def test_wiki_downstream_wrapper_streams_both_corpora(monkeypatch) -> None:
+    calls = []
+
+    def fake_join(_attempts, text_table, relevance_table, **kwargs):
+        calls.append((text_table, relevance_table, kwargs))
+        yield kwargs["wiki_corpus"]
+
+    monkeypatch.setattr(pool_runner, "iter_eunis_downstream_records", fake_join)
+    attempts = cast(Any, None)
+    wikipedia_text, wikipedia_labels = cast(Any, "wiki-text"), cast(Any, "wiki-labels")
+    wikivoyage_text, wikivoyage_labels = cast(Any, "voyage-text"), cast(Any, "voyage-labels")
+    links = cast(Any, "links")
+
+    corpora = list(
+        iter_eunis_wiki_downstream_records(
+            attempts,
+            wikipedia_text,
+            wikipedia_labels,
+            wikivoyage_text,
+            wikivoyage_labels,
+            links,
+            batch_size=17,
+        )
+    )
+
+    assert corpora == ["wikipedia", "wikivoyage"]
+    assert [call[2]["wiki_corpus"] for call in calls] == corpora
+    assert [call[0] for call in calls] == [wikipedia_text, wikivoyage_text]
+    assert all(call[2]["wiki_link_table"] is links for call in calls)
+    assert all(call[2]["batch_size"] == 17 for call in calls)
+
+
+def test_attempt_inventory_iteration_checks_shard_and_global_counts(tmp_path: Path) -> None:
+    source = _frozen_source(tmp_path, [_source_row(11, _geojson_polygon())])
+    checkpoint_root = tmp_path / "checkpoints"
+    raw_scan = scan_raw_inventory(source, checkpoint_root, _code_pin())
+    attempts = run_eunis_label_attempts(
+        raw_scan,
+        cast(RasterReference, FakeReference()),
+        _reference_pin(),
+        _TAXONOMY,
+        checkpoint_root,
+    )
+    shard = attempts.shards[0]
+
+    [checkpoint_row] = list(iter_attempt_checkpoint(shard.checkpoint_uri))
+    assert checkpoint_row["inventory"]["inventory_row_id"]
+
+    missing_checkpoint = replace(shard, checkpoint_uri=(tmp_path / "absent.jsonl").as_uri())
+    with pytest.raises(FileNotFoundError, match="not available"):
+        list(iter_eunis_attempt_inventory_rows(replace(attempts, shards=(missing_checkpoint,))))
+    changed_checksum = replace(shard, checkpoint_sha256="0" * 64)
+    with pytest.raises(ValueError, match="checksum differs"):
+        list(iter_eunis_attempt_inventory_rows(replace(attempts, shards=(changed_checksum,))))
+
+    with pytest.raises(ValueError, match="attempt inventory changed"):
+        list(
+            iter_eunis_attempt_inventory_rows(
+                replace(attempts, shards=(replace(shard, row_count=2),))
+            )
+        )
+    changed_evidence = replace(attempts.raw_scan.evidence, expected_key_count=2)
+    changed_scan = replace(attempts.raw_scan, evidence=changed_evidence)
+    with pytest.raises(ValueError, match="raw source key count"):
+        list(iter_eunis_attempt_inventory_rows(replace(attempts, raw_scan=changed_scan)))
+
+
+def test_local_checkpoint_readers_reject_remote_and_malformed_fragments(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="local file URIs only"):
+        list(iter_attempt_checkpoint("https://example.org/checkpoint.jsonl"))
+    checkpoint = tmp_path / "fragment.jsonl"
+    checkpoint.write_text('{"other":"value"}\n', encoding="utf-8")
+    with pytest.raises(TypeError, match="no projected WKB geometry"):
+        read_projected_geometry_wkb(checkpoint.as_uri() + "#row=0/projected_geometry_wkb")
 
 
 def test_invalid_attempt_signature_is_recomputed_from_cached_raw_inventory(
@@ -692,6 +899,61 @@ def test_raw_shard_content_must_match_its_git_tree_blob_id(tmp_path: Path) -> No
 
     with pytest.raises(ValueError, match="Git blob id differs"):
         scan_raw_inventory(changed_source, tmp_path / "new-checkpoints", _code_pin())
+
+
+def test_raw_lfs_shard_must_match_its_tree_oid_and_size(tmp_path: Path) -> None:
+    source = _frozen_source(tmp_path, [_source_row(11, _geojson_polygon())])
+    shard = source.polygon_shards[0]
+    lfs_shard = replace(shard, lfs_oid=shard.sha256, lfs_size=shard.size_bytes)
+
+    pool_runner._verify_local_shard(lfs_shard)
+    with pytest.raises(ValueError, match="raw LFS shard differs from its tree pin"):
+        pool_runner._verify_local_shard(replace(lfs_shard, lfs_oid="0" * 64))
+    with pytest.raises(ValueError, match="raw LFS shard differs from its tree pin"):
+        pool_runner._verify_local_shard(replace(lfs_shard, lfs_size=shard.size_bytes + 1))
+
+
+def test_raw_source_revision_must_match_repository_and_frozen_layout(tmp_path: Path) -> None:
+    source = _frozen_source(tmp_path, [_source_row(11, None)])
+    bad_repository = SimpleNamespace(
+        source_snapshot=replace(source.source_snapshot, repository="another/repository"),
+        layout=source.layout,
+    )
+    with pytest.raises(ValueError, match="repository does not match"):
+        pool_runner._validate_source_repository_revision(cast(FrozenPolygonSource, bad_repository))
+
+    bad_sha = SimpleNamespace(
+        source_snapshot=replace(source.source_snapshot, revision="not-a-revision"),
+        layout=source.layout,
+    )
+    with pytest.raises(ValueError, match="full lowercase Git SHA"):
+        pool_runner._validate_source_repository_revision(cast(FrozenPolygonSource, bad_sha))
+
+    bad_pin = SimpleNamespace(
+        source_snapshot=replace(source.source_snapshot, revision="c" * 40),
+        layout=source.layout,
+    )
+    with pytest.raises(ValueError, match="does not match the pinned"):
+        pool_runner._validate_source_repository_revision(cast(FrozenPolygonSource, bad_pin))
+
+
+@pytest.mark.parametrize(
+    ("raw_geometry", "reason"),
+    [
+        (None, "missing_geometry"),
+        ("not a valid geometry payload", "invalid_or_empty_polygon_geometry"),
+        ({"type": "Point", "coordinates": [0, 0]}, "invalid_or_empty_polygon_geometry"),
+        ("{}", "geometry_transform_error"),
+    ],
+)
+def test_raw_geometry_projection_preserves_each_invalid_reason(
+    raw_geometry: Any,
+    reason: str,
+) -> None:
+    projected, exclusion = pool_runner._project_raw_geometry(raw_geometry)
+
+    assert projected is None
+    assert exclusion is not None and exclusion.startswith(reason)
 
 
 @pytest.mark.parametrize(

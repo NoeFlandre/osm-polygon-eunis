@@ -9,6 +9,8 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from math import isfinite
+from types import MappingProxyType
+from typing import cast
 
 from .eea import (
     EEA_2021_TAXONOMY_CACHE_SHA256 as EEA_2021_TAXONOMY_SHA256,
@@ -49,6 +51,12 @@ _EUNIS_DIRECT_MAP_LEVEL = 3
 EEA_2021_NATIVE_MANIFEST_SHA256 = "4a91e553b2e0271e7ca935e542dd092fe45288c5f9bb4a09f40f6b74da4eae22"
 EEA_2021_ASSET_COUNT = 136
 EEA_2021_ASSET_BYTES = 5_007_209_626
+EUNIS_WEBSITE_FIELD_TO_SENTENCE_COLUMN = MappingProxyType(
+    {
+        "website": "website_sentences",
+        "contact_website": "contact_website_sentences",
+    }
+)
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _GIT_SHA1_LENGTH = 40
 _SHA256_LENGTH = 64
@@ -79,17 +87,11 @@ class EunisTaxonomy:
     def __post_init__(self) -> None:
         """Validate the explicit mapping and its immutable taxonomy pin."""
 
-        if not self.taxonomy_id.strip() or not self.taxonomy_revision.strip():
-            raise ValueError("EUNIS taxonomy id and revision must be present")
-        if not _SHA256_RE.fullmatch(self.taxonomy_sha256):
-            raise ValueError("EUNIS taxonomy SHA-256 must be lowercase hexadecimal")
+        _validate_taxonomy_identity(self.taxonomy_id, self.taxonomy_revision, self.taxonomy_sha256)
         if not self.paths_by_direct_code:
             raise ValueError("EUNIS taxonomy mapping must contain direct map codes")
         for direct_code, path in self.paths_by_direct_code.items():
-            if not direct_code.strip() or path.level_3 != direct_code:
-                raise ValueError("each direct map code must map to itself at EUNIS L3")
-            if any(not value.strip() for value in (path.level_1, path.level_2, path.level_3)):
-                raise ValueError(f"taxonomy path for {direct_code} contains an empty code")
+            _validate_taxonomy_path(direct_code, path)
 
     @property
     def pinned_revision(self) -> str:
@@ -155,15 +157,40 @@ class SourceTreeFile:
 
         if not self.path.strip() or self.size_bytes < 0 or self.lfs_size < 0:
             raise ValueError("source tree file path and sizes must be valid")
-        if len(self.blob_id) != _GIT_SHA1_LENGTH or any(
-            c not in "0123456789abcdef" for c in self.blob_id
-        ):
-            raise ValueError("source tree blob id must be a full lowercase Git SHA-1")
-        if self.lfs_oid is not None and (
-            len(self.lfs_oid) != _SHA256_LENGTH
-            or any(c not in "0123456789abcdef" for c in self.lfs_oid)
-        ):
-            raise ValueError("source tree LFS oid must be a lowercase SHA-256")
+        _validate_tree_blob_id(self.blob_id)
+        _validate_tree_lfs_oid(self.lfs_oid)
+
+
+def _lowercase_hex(value: str) -> bool:
+    return all(character in "0123456789abcdef" for character in value)
+
+
+def _is_sha256(value: str) -> bool:
+    return _SHA256_RE.fullmatch(value) is not None
+
+
+def _validate_taxonomy_identity(taxonomy_id: str, revision: str, digest: str) -> None:
+    if not taxonomy_id.strip() or not revision.strip():
+        raise ValueError("EUNIS taxonomy id and revision must be present")
+    if not _is_sha256(digest):
+        raise ValueError("EUNIS taxonomy SHA-256 must be lowercase hexadecimal")
+
+
+def _validate_taxonomy_path(direct_code: str, path: EunisTaxonomyPath) -> None:
+    if not direct_code.strip() or path.level_3 != direct_code:
+        raise ValueError("each direct map code must map to itself at EUNIS L3")
+    if any(not value.strip() for value in (path.level_1, path.level_2, path.level_3)):
+        raise ValueError(f"taxonomy path for {direct_code} contains an empty code")
+
+
+def _validate_tree_blob_id(blob_id: str) -> None:
+    if len(blob_id) != _GIT_SHA1_LENGTH or not _lowercase_hex(blob_id):
+        raise ValueError("source tree blob id must be a full lowercase Git SHA-1")
+
+
+def _validate_tree_lfs_oid(lfs_oid: str | None) -> None:
+    if lfs_oid is not None and not _is_sha256(lfs_oid):
+        raise ValueError("source tree LFS oid must be a lowercase SHA-256")
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,18 +208,30 @@ class SourceTreeGroupPin:
     def __post_init__(self) -> None:
         """Validate group identity and inventory digest fields."""
 
-        if not self.repository.strip() or not self.role.strip() or not self.path_prefix:
-            raise ValueError("source tree pin requires repository, role, and path prefix")
-        if len(self.revision) not in {40, 64} or any(
-            c not in "0123456789abcdef" for c in self.revision
-        ):
-            raise ValueError("source tree revision must be a full lowercase Git SHA")
-        if self.file_count <= 0 or self.total_size_bytes < 0:
-            raise ValueError("source tree file count and byte total must be valid")
-        if len(self.inventory_sha256) != _SHA256_LENGTH or any(
-            c not in "0123456789abcdef" for c in self.inventory_sha256
-        ):
-            raise ValueError("source tree inventory SHA-256 must be lowercase hexadecimal")
+        _validate_tree_group_identity(self.repository, self.role, self.path_prefix)
+        _validate_tree_group_revision(self.revision)
+        _validate_tree_group_totals(self.file_count, self.total_size_bytes)
+        _validate_tree_group_hash(self.inventory_sha256)
+
+
+def _validate_tree_group_identity(repository: str, role: str, path_prefix: str) -> None:
+    if not repository.strip() or not role.strip() or not path_prefix:
+        raise ValueError("source tree pin requires repository, role, and path prefix")
+
+
+def _validate_tree_group_revision(revision: str) -> None:
+    if len(revision) not in {_GIT_SHA1_LENGTH, _SHA256_LENGTH} or not _lowercase_hex(revision):
+        raise ValueError("source tree revision must be a full lowercase Git SHA")
+
+
+def _validate_tree_group_totals(file_count: int, total_size_bytes: int) -> None:
+    if file_count <= 0 or total_size_bytes < 0:
+        raise ValueError("source tree file count and byte total must be valid")
+
+
+def _validate_tree_group_hash(inventory_sha256: str) -> None:
+    if not _is_sha256(inventory_sha256):
+        raise ValueError("source tree inventory SHA-256 must be lowercase hexadecimal")
 
 
 def source_tree_inventory_sha256(files: Iterable[SourceTreeFile]) -> str:
@@ -222,8 +261,20 @@ def validate_source_tree_group(
     """Require exact file paths, count, size, and metadata digest for one tree group."""
 
     entries = tuple(files)
-    if any(not row.path.startswith(pin.path_prefix) for row in entries):
-        raise ValueError(f"source tree entries fall outside pinned prefix {pin.path_prefix!r}")
+    _validate_tree_prefix(entries, pin.path_prefix)
+    _validate_tree_group_count_and_size(pin, entries)
+    _validate_tree_group_digest(pin, entries)
+
+
+def _validate_tree_prefix(entries: tuple[SourceTreeFile, ...], prefix: str) -> None:
+    if any(not row.path.startswith(prefix) for row in entries):
+        raise ValueError(f"source tree entries fall outside pinned prefix {prefix!r}")
+
+
+def _validate_tree_group_count_and_size(
+    pin: SourceTreeGroupPin,
+    entries: tuple[SourceTreeFile, ...],
+) -> None:
     if len(entries) != pin.file_count:
         raise ValueError(
             f"source tree file count differs for {pin.repository}:{pin.path_prefix}: "
@@ -235,6 +286,12 @@ def validate_source_tree_group(
             f"source tree byte total differs for {pin.repository}:{pin.path_prefix}: "
             f"{total_bytes} != {pin.total_size_bytes}"
         )
+
+
+def _validate_tree_group_digest(
+    pin: SourceTreeGroupPin,
+    entries: tuple[SourceTreeFile, ...],
+) -> None:
     digest = source_tree_inventory_sha256(entries)
     if digest != pin.inventory_sha256:
         raise ValueError(
@@ -367,6 +424,42 @@ EUNIS_POOL_SOURCE_LAYOUTS: Mapping[TextSource, EunisPoolSourceLayout] = {
                 189_959_172,
                 "3cdd0e4f0fa8b6588e578ff077467a3e4516e676d7a4abd30cb622477cf8245d",
             ),
+            SourceTreeGroupPin(
+                "NoeFlandre/osm-polygon-wikidata-and-wikipedia",
+                "d6fc058ccf4643bc5fe5bfd5c1c0bc403d3da801",
+                "wiki_document_links",
+                "polygon_document_links/",
+                386,
+                112_581_825,
+                "4d3bcf32094d8c7a42d72f6a52da61b7b6940b9feae564fe10622716f0b48cde",
+            ),
+            SourceTreeGroupPin(
+                "NoeFlandre/osm-polygon-wikidata-and-wikipedia",
+                "d6fc058ccf4643bc5fe5bfd5c1c0bc403d3da801",
+                "wiki_documents",
+                "wikipedia/documents/",
+                386,
+                8_739_038_060,
+                "780c9f7c187b08693e78c6aa37d2df005064fdc8d3d8472b6941b4f1c5f91e34",
+            ),
+            SourceTreeGroupPin(
+                "NoeFlandre/osm-polygon-wikidata-and-wikipedia",
+                "d6fc058ccf4643bc5fe5bfd5c1c0bc403d3da801",
+                "wiki_documents",
+                "wikivoyage/documents/",
+                375,
+                80_078_157,
+                "875520ce84370f18c1551c9f78cc3fdaba1f48932cb809e2df9a245988722d8d",
+            ),
+            SourceTreeGroupPin(
+                "NoeFlandre/osm-polygon-wikidata-and-wikipedia",
+                "d6fc058ccf4643bc5fe5bfd5c1c0bc403d3da801",
+                "wiki_language_split_links",
+                "language_splits/polygon_document_links_by_language/",
+                356,
+                154_309_530,
+                "7c1eb4caae9eb84a89db678bc7e2cbccfd5450ac808e89330c439c9a67b20c6a",
+            ),
         ),
         document_link_glob="polygon_document_links/*.parquet",
         document_glob="wikipedia/documents/*.parquet",
@@ -397,24 +490,57 @@ def make_eunis_taxonomy_from_classification(
     codes = tuple(sorted(set(direct_codes)))
     if not codes:
         raise ValueError("EEA direct map codes must be present")
-    paths: dict[str, EunisTaxonomyPath] = {}
-    for code in codes:
-        if classification.levels.get(code) != _EUNIS_DIRECT_MAP_LEVEL:
-            raise ValueError(f"EEA direct map code {code} is not a classification L3 code")
-        by_level = {
-            classification.levels[ancestor]: ancestor
-            for ancestor in classification.ancestors_including_self(code)
-            if ancestor in classification.levels and classification.levels[ancestor] in {1, 2, 3}
-        }
-        if set(by_level) != {1, 2, 3} or by_level[3] != code:
-            raise ValueError(f"EEA direct map code {code} lacks one L1-L2-L3 parent path")
-        paths[code] = EunisTaxonomyPath(by_level[1], by_level[2], by_level[3])
+    paths = {code: _classification_map_path(classification, code) for code in codes}
     return EunisTaxonomy(
         taxonomy_id=taxonomy_id,
         taxonomy_revision=taxonomy_revision,
         taxonomy_sha256=taxonomy_sha256,
         paths_by_direct_code=paths,
     )
+
+
+def _classification_map_path(
+    classification: ClassificationTaxonomy,
+    code: str,
+) -> EunisTaxonomyPath:
+    if not _is_direct_map_code(classification, code):
+        raise ValueError(f"EEA direct map code {code} is not a classification L3 code")
+    by_level = _classification_ancestor_levels(classification, code)
+    _validate_l123_map_path(code, by_level)
+    return EunisTaxonomyPath(by_level[1], by_level[2], by_level[3])
+
+
+def _is_direct_map_code(classification: ClassificationTaxonomy, code: str) -> bool:
+    return classification.levels.get(code) == _EUNIS_DIRECT_MAP_LEVEL
+
+
+def _classification_ancestor_levels(
+    classification: ClassificationTaxonomy,
+    code: str,
+) -> dict[int, str]:
+    ancestors_by_level: dict[int, str] = {}
+    for ancestor in classification.ancestors_including_self(code):
+        level = _supported_classification_ancestor_level(classification, ancestor)
+        if level is not None:
+            ancestors_by_level[level] = ancestor
+    return ancestors_by_level
+
+
+def _supported_classification_ancestor_level(
+    classification: ClassificationTaxonomy,
+    ancestor: str,
+) -> int | None:
+    level = classification.levels.get(ancestor)
+    if level in {1, 2, 3}:
+        return level
+    return None
+
+
+def _validate_l123_map_path(code: str, ancestors_by_level: Mapping[int, str]) -> None:
+    if set(ancestors_by_level) != {1, 2, 3}:
+        raise ValueError(f"EEA direct map code {code} lacks one L1-L2-L3 parent path")
+    if ancestors_by_level[3] != code:
+        raise ValueError(f"EEA direct map code {code} lacks one L1-L2-L3 parent path")
 
 
 def make_eunis_2021_reference_pin(taxonomy: EunisTaxonomy) -> ReferencePin:
@@ -468,31 +594,8 @@ def resolve_eunis_labels(
     excluded = _validated_exclusion(attempt)
     if excluded is not None:
         return (), _excluded_outcomes(attempt, excluded)
-    if attempt.original_area is None or attempt.support_areas is None:
-        raise ValueError("validated label attempts need a positive denominator and support map")
-
-    denominator = float(attempt.original_area)
-    taxonomy_by_class = _taxonomy_code_paths(attempt.taxonomy)
-    candidates = []
-    by_level: dict[str, list[LabelCandidate]] = {"L1": [], "L2": [], "L3": []}
-    for (level, code), raw_numerator in sorted(attempt.support_areas.items()):
-        if level not in by_level:
-            raise ValueError(f"unsupported EUNIS support level {level!r}")
-        numerator = float(raw_numerator)
-        if numerator < 0.0 or numerator > denominator:
-            raise ValueError(f"support for {level}/{code} falls outside full polygon area")
-        if numerator == 0.0:
-            continue
-        candidate = _make_candidate(
-            attempt,
-            level,
-            code,
-            numerator,
-            denominator,
-            taxonomy_by_class,
-        )
-        candidates.append(candidate)
-        by_level[level].append(candidate)
+    denominator = cast(float, attempt.original_area)
+    candidates, by_level = _positive_support_candidates(attempt, denominator)
 
     outcomes = tuple(
         _resolve_level(attempt, level, by_level[level.name])
@@ -502,23 +605,95 @@ def resolve_eunis_labels(
     return tuple(candidates), outcomes
 
 
+def _positive_support_candidates(
+    attempt: EunisLabelAttempt,
+    denominator: float,
+) -> tuple[list[LabelCandidate], dict[str, list[LabelCandidate]]]:
+    support_areas = cast(Mapping[tuple[str, str], float], attempt.support_areas)
+    taxonomy_by_class = _taxonomy_code_paths(attempt.taxonomy)
+    candidates: list[LabelCandidate] = []
+    by_level: dict[str, list[LabelCandidate]] = {"L1": [], "L2": [], "L3": []}
+    for (level, code), raw_numerator in sorted(support_areas.items()):
+        candidate = _positive_support_candidate(
+            attempt,
+            level,
+            code,
+            raw_numerator,
+            denominator,
+            taxonomy_by_class,
+        )
+        if candidate is None:
+            continue
+        candidates.append(candidate)
+        by_level[level].append(candidate)
+    return candidates, by_level
+
+
+def _positive_support_candidate(
+    attempt: EunisLabelAttempt,
+    level: str,
+    code: str,
+    raw_numerator: float,
+    denominator: float,
+    taxonomy_by_class: Mapping[tuple[str, str], set[str]],
+) -> LabelCandidate | None:
+    if level not in {"L1", "L2", "L3"}:
+        raise ValueError(f"unsupported EUNIS support level {level!r}")
+    numerator = float(raw_numerator)
+    if numerator < 0.0 or numerator > denominator:
+        raise ValueError(f"support for {level}/{code} falls outside full polygon area")
+    if numerator == 0.0:
+        return None
+    return _make_candidate(attempt, level, code, numerator, denominator, taxonomy_by_class)
+
+
 def _validated_exclusion(attempt: EunisLabelAttempt) -> str | None:
-    if attempt.threshold != EUNIS_THRESHOLD:
-        raise ValueError("EUNIS pool assignment uses the fixed 0.8 support threshold")
-    if not attempt.inventory_row_id.strip() or not attempt.source_revision.strip():
-        raise ValueError("inventory row id and EEA source revision must be present")
-    if attempt.query_error is not None and attempt.exclusion_reason is not None:
-        raise ValueError("a label attempt cannot have both a query error and geometry exclusion")
-    excluded = attempt.query_error or attempt.exclusion_reason
+    excluded = _terminal_attempt_exclusion(attempt)
     if excluded is not None:
         return excluded
-    if attempt.support_areas is None:
+    _validate_attempt_support_map(attempt.support_areas)
+    return _unusable_geometry_reason(attempt)
+
+
+def _terminal_attempt_exclusion(attempt: EunisLabelAttempt) -> str | None:
+    _validate_attempt_threshold(attempt)
+    _validate_attempt_identity(attempt)
+    _validate_terminal_error_exclusivity(attempt)
+    return _attempt_exclusion_reason(attempt)
+
+
+def _validate_attempt_threshold(attempt: EunisLabelAttempt) -> None:
+    if attempt.threshold != EUNIS_THRESHOLD:
+        raise ValueError("EUNIS pool assignment uses the fixed 0.8 support threshold")
+
+
+def _validate_attempt_identity(attempt: EunisLabelAttempt) -> None:
+    if not attempt.inventory_row_id.strip() or not attempt.source_revision.strip():
+        raise ValueError("inventory row id and EEA source revision must be present")
+
+
+def _validate_terminal_error_exclusivity(attempt: EunisLabelAttempt) -> None:
+    if attempt.query_error is not None and attempt.exclusion_reason is not None:
+        raise ValueError("a label attempt cannot have both a query error and geometry exclusion")
+
+
+def _attempt_exclusion_reason(attempt: EunisLabelAttempt) -> str | None:
+    return attempt.query_error or attempt.exclusion_reason
+
+
+def _validate_attempt_support_map(
+    support_areas: Mapping[tuple[str, str], float] | None,
+) -> None:
+    if support_areas is None:
         raise ValueError("a usable polygon label attempt needs all class support areas")
     if any(
         not isinstance(value, (int, float)) or not isfinite(value)
-        for value in attempt.support_areas.values()
+        for value in support_areas.values()
     ):
         raise TypeError("class support areas must be finite numeric values")
+
+
+def _unusable_geometry_reason(attempt: EunisLabelAttempt) -> str | None:
     if (
         attempt.polygon_snapshot_id is None
         or attempt.original_area is None
@@ -596,18 +771,19 @@ def _resolve_level(
             reason="multiple_classes_reach_80_percent_of_full_polygon_area",
             ambiguity_basis=AmbiguityBasis.MULTIPLE_QUALIFIERS,
         )
-    reason = (
-        "no_class_reaches_80_percent_of_full_polygon_area"
-        if candidates
-        else "no_positive_reference_support"
-    )
     return LabelOutcome(
         inventory_row_id=attempt.inventory_row_id,
         polygon_snapshot_id=attempt.polygon_snapshot_id,
         level=level.name,
         status=OutcomeStatus.UNASSIGNED,
-        reason=reason,
+        reason=_unassigned_level_reason(candidates),
     )
+
+
+def _unassigned_level_reason(candidates: list[LabelCandidate]) -> str:
+    if candidates:
+        return "no_class_reaches_80_percent_of_full_polygon_area"
+    return "no_positive_reference_support"
 
 
 @dataclass(frozen=True, slots=True)
@@ -633,46 +809,57 @@ def resolve_polygon_document_links(
     for row in inventory:
         inventory_by_key[row.native_key].append(row)
 
-    links = []
     seen_document_keys: set[tuple[str, NativeKey]] = set()
-    for item in evidence_rows:
-        if not item.document_id.strip() or not item.evidence.strip():
-            raise ValueError("text-link evidence needs a document id and evidence")
-        document_key = (item.document_id, item.polygon_native_key)
-        if document_key in seen_document_keys:
-            raise ValueError(f"duplicate source link evidence for {document_key}")
-        seen_document_keys.add(document_key)
-        matches = inventory_by_key.get(item.polygon_native_key, [])
-        if len(matches) == 1:
-            row = matches[0]
-            if row.polygon_snapshot_id is None:
-                status = TextLinkStatus.GEOMETRY_MISSING
-                inventory_row_id = None
-                candidates = (row.inventory_row_id,)
-            else:
-                status = TextLinkStatus.LINKED
-                inventory_row_id = row.inventory_row_id
-                candidates = ()
-        elif len(matches) > 1:
-            status = TextLinkStatus.AMBIGUOUS
-            inventory_row_id = None
-            candidates = tuple(sorted(row.inventory_row_id for row in matches))
-        else:
-            status = TextLinkStatus.UNMATCHED
-            inventory_row_id = None
-            candidates = ()
-        links.append(
-            TextPolygonLink(
-                document_id=item.document_id,
-                inventory_row_id=inventory_row_id,
-                native_link_key=item.polygon_native_key,
-                source_revision=source_revision,
-                status=status,
-                evidence=item.evidence,
-                candidate_inventory_row_ids=candidates,
-            )
-        )
+    links = [
+        _document_link(item, inventory_by_key, source_revision, seen_document_keys)
+        for item in evidence_rows
+    ]
     return tuple(sorted(links, key=lambda link: (link.document_id, link.inventory_row_id or "")))
+
+
+def _document_link(
+    item: PolygonDocumentEvidence,
+    inventory_by_key: Mapping[NativeKey, list[PolygonInventoryRow]],
+    source_revision: str,
+    seen_document_keys: set[tuple[str, NativeKey]],
+) -> TextPolygonLink:
+    if not item.document_id.strip() or not item.evidence.strip():
+        raise ValueError("text-link evidence needs a document id and evidence")
+    document_key = (item.document_id, item.polygon_native_key)
+    if document_key in seen_document_keys:
+        raise ValueError(f"duplicate source link evidence for {document_key}")
+    seen_document_keys.add(document_key)
+    status, inventory_row_id, candidates = _link_match_result(
+        inventory_by_key.get(item.polygon_native_key, [])
+    )
+    return TextPolygonLink(
+        document_id=item.document_id,
+        inventory_row_id=inventory_row_id,
+        native_link_key=item.polygon_native_key,
+        source_revision=source_revision,
+        status=status,
+        evidence=item.evidence,
+        candidate_inventory_row_ids=candidates,
+    )
+
+
+def _link_match_result(
+    matches: list[PolygonInventoryRow],
+) -> tuple[TextLinkStatus, str | None, tuple[str, ...]]:
+    if len(matches) == 1:
+        return _single_inventory_link(matches[0])
+    if len(matches) > 1:
+        candidates = tuple(sorted(row.inventory_row_id for row in matches))
+        return TextLinkStatus.AMBIGUOUS, None, candidates
+    return TextLinkStatus.UNMATCHED, None, ()
+
+
+def _single_inventory_link(
+    row: PolygonInventoryRow,
+) -> tuple[TextLinkStatus, str | None, tuple[str, ...]]:
+    if row.polygon_snapshot_id is None:
+        return TextLinkStatus.GEOMETRY_MISSING, None, (row.inventory_row_id,)
+    return TextLinkStatus.LINKED, row.inventory_row_id, ()
 
 
 def _taxonomy_code_paths(

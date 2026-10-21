@@ -31,9 +31,8 @@ from .grid_overlap import (
 from .matching import choose_winner
 from .raster_class_support import support_areas as _support_areas
 from .raster_geometry import is_epsg_3035, wgs84_envelope  # noqa: F401
-from .raster_reference_helpers import (
-    code_order_on_shared_grid as _code_order_on_shared_grid,
-)
+from .raster_reference_helpers import RasterLayerLike
+from .raster_reference_helpers import code_order_on_shared_grid as _code_order_on_shared_grid
 from .raster_reference_helpers import (
     wgs84_dataset_extent as _wgs84_dataset_extent,
 )
@@ -319,7 +318,7 @@ class RasterReference:
 
     def _tile_stack(
         self,
-        datasets: tuple[tuple[RasterLayer, rasterio.DatasetReader], ...],
+        datasets: tuple[tuple[RasterLayerLike, rasterio.DatasetReader], ...],
         row: int,
         column: int,
     ) -> np.ndarray | None:

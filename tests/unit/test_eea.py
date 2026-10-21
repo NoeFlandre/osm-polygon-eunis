@@ -143,6 +143,47 @@ def test_classification_taxonomy_rejects_invalid_levels_and_conflicting_rows() -
         parse_classification_taxonomy_rows(
             [["Level", "Code", "Name"], [1, "Q1", "Root"], [2, "Q11", ""]]
         )
+    with pytest.raises(ValueError, match="has no Level/Code/Name rows"):
+        parse_classification_taxonomy_rows([["Level", "Code", "Name"], [1, "", "No code"]])
+
+
+@pytest.mark.parametrize("invalid_level", [True, 0, -1, "1"])
+def test_classification_taxonomy_rejects_nonpositive_or_noninteger_levels(
+    invalid_level: object,
+) -> None:
+    with pytest.raises(ValueError, match="invalid Level"):
+        ClassificationTaxonomy(
+            labels={"A": "Root"},
+            levels={"A": cast(int, invalid_level)},
+            parents={},
+        )
+
+
+@pytest.mark.parametrize(
+    ("levels", "parents", "error"),
+    [
+        ({"A11": 3}, {"A11": "A"}, "parent without a Level"),
+        ({"A11": 3, "B": 1}, {"A11": "B"}, "invalid prefix parent"),
+        ({"A": 2, "A11": 2}, {"A11": "A"}, "not at a lower Level"),
+    ],
+)
+def test_classification_taxonomy_rejects_invalid_parent_edges(
+    levels: dict[str, int],
+    parents: dict[str, str],
+    error: str,
+) -> None:
+    labels = {code: f"Label {code}" for code in set(levels) | set(parents.values())}
+    with pytest.raises(ValueError, match=error):
+        ClassificationTaxonomy(labels=labels, levels=levels, parents=parents)
+
+
+def test_classification_taxonomy_requires_labels_for_every_parent() -> None:
+    with pytest.raises(ValueError, match="missing label for A"):
+        ClassificationTaxonomy(
+            labels={"A11": "Class A11"},
+            levels={"A": 1, "A11": 3},
+            parents={"A11": "A"},
+        )
 
 
 def test_cached_classification_hierarchy_must_match_pinned_workbook_lineage(

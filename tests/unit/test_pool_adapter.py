@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pytest
@@ -20,10 +22,14 @@ from osm_polygon_eunis.pool_adapter import (
     EunisTaxonomy,
     EunisTaxonomyPath,
     PolygonDocumentEvidence,
+    SourceTreeFile,
+    SourceTreeGroupPin,
     make_eunis_2021_reference_pin,
     make_eunis_taxonomy_from_classification,
     resolve_eunis_labels,
     resolve_polygon_document_links,
+    source_tree_inventory_sha256,
+    validate_source_tree_group,
 )
 from osm_polygon_eunis.pool_contract import (
     AssignmentKind,
@@ -160,6 +166,82 @@ def test_eunis_taxonomy_requires_a_complete_l1_l2_l3_path() -> None:
             taxonomy_sha256="c" * 64,
         )
 
+    with pytest.raises(ValueError, match="direct map codes must be present"):
+        make_eunis_taxonomy_from_classification(
+            classification,
+            (),
+            taxonomy_id="fixture-eunis",
+            taxonomy_revision="classification-fixture-v1",
+            taxonomy_sha256="c" * 64,
+        )
+    with pytest.raises(ValueError, match="is not a classification L3 code"):
+        make_eunis_taxonomy_from_classification(
+            classification,
+            ("X",),
+            taxonomy_id="fixture-eunis",
+            taxonomy_revision="classification-fixture-v1",
+            taxonomy_sha256="c" * 64,
+        )
+
+
+def test_taxonomy_and_source_tree_pins_reject_malformed_identity_fields() -> None:
+    with pytest.raises(ValueError, match="id and revision must be present"):
+        EunisTaxonomy(" ", "taxonomy-v1", "a" * 64, {"C1": EunisTaxonomyPath("A", "A1", "C1")})
+    with pytest.raises(ValueError, match="SHA-256 must be lowercase hexadecimal"):
+        EunisTaxonomy(
+            "taxonomy", "taxonomy-v1", "G" * 64, {"C1": EunisTaxonomyPath("A", "A1", "C1")}
+        )
+    with pytest.raises(ValueError, match="mapping must contain direct map codes"):
+        EunisTaxonomy("taxonomy", "taxonomy-v1", "a" * 64, {})
+    with pytest.raises(ValueError, match="map code must map to itself"):
+        EunisTaxonomy(
+            "taxonomy", "taxonomy-v1", "a" * 64, {"C1": EunisTaxonomyPath("A", "A1", "C2")}
+        )
+    with pytest.raises(ValueError, match="contains an empty code"):
+        EunisTaxonomy(
+            "taxonomy", "taxonomy-v1", "a" * 64, {"C1": EunisTaxonomyPath(" ", "A1", "C1")}
+        )
+
+    with pytest.raises(ValueError, match="path and sizes must be valid"):
+        SourceTreeFile(" ", 1, "a" * 40, None, 1)
+    with pytest.raises(ValueError, match="Git SHA-1"):
+        SourceTreeFile("data/a.parquet", 1, "G" * 40, None, 1)
+    with pytest.raises(ValueError, match="LFS oid must be a lowercase SHA-256"):
+        SourceTreeFile("data/a.parquet", 1, "a" * 40, "g" * 64, 1)
+
+
+def test_source_tree_group_validator_checks_prefix_count_size_digest_and_duplicates() -> None:
+    file = SourceTreeFile("data/a.parquet", 4, "a" * 40, None, 4)
+    pin = SourceTreeGroupPin(
+        repository="repo",
+        revision="b" * 40,
+        role="text",
+        path_prefix="data/",
+        file_count=1,
+        total_size_bytes=4,
+        inventory_sha256=source_tree_inventory_sha256((file,)),
+    )
+
+    validate_source_tree_group(pin, (file,))
+    with pytest.raises(ValueError, match="fall outside pinned prefix"):
+        validate_source_tree_group(replace(pin, path_prefix="labels/"), (file,))
+    with pytest.raises(ValueError, match="file count differs"):
+        validate_source_tree_group(replace(pin, file_count=2), (file,))
+    with pytest.raises(ValueError, match="byte total differs"):
+        validate_source_tree_group(replace(pin, total_size_bytes=5), (file,))
+    with pytest.raises(ValueError, match="inventory digest differs"):
+        validate_source_tree_group(replace(pin, inventory_sha256="c" * 64), (file,))
+    with pytest.raises(ValueError, match="duplicate paths"):
+        source_tree_inventory_sha256((file, file))
+    with pytest.raises(ValueError, match="repository, role, and path prefix"):
+        SourceTreeGroupPin("", "b" * 40, "text", "data/", 1, 4, "c" * 64)
+    with pytest.raises(ValueError, match="full lowercase Git SHA"):
+        SourceTreeGroupPin("repo", "G" * 40, "text", "data/", 1, 4, "c" * 64)
+    with pytest.raises(ValueError, match="file count and byte total"):
+        SourceTreeGroupPin("repo", "b" * 40, "text", "data/", 0, 4, "c" * 64)
+    with pytest.raises(ValueError, match="inventory SHA-256 must be lowercase hexadecimal"):
+        SourceTreeGroupPin("repo", "b" * 40, "text", "data/", 1, 4, "G" * 64)
+
 
 def test_pool_sources_cover_the_three_raw_text_sources_with_wiki_artifacts_downstream() -> None:
     assert set(EUNIS_POOL_SOURCE_LAYOUTS) == {
@@ -281,6 +363,43 @@ def test_no_data_remains_unassigned_with_full_polygon_as_denominator() -> None:
     assert {item.reason for item in outcomes} == {"no_positive_reference_support"}
 
 
+def test_label_attempts_retain_the_full_area_rule_and_reject_invalid_support() -> None:
+    zero_support = _attempt({("L3", "C1"): 0.0})
+    candidates, outcomes = resolve_eunis_labels(zero_support)
+    assert candidates == ()
+    assert {outcome.reason for outcome in outcomes} == {"no_positive_reference_support"}
+
+    with pytest.raises(ValueError, match="unsupported EUNIS support level"):
+        resolve_eunis_labels(_attempt({("L4", "C1"): 90.0}))
+    with pytest.raises(ValueError, match="outside full polygon area"):
+        resolve_eunis_labels(_attempt({("L3", "C1"): 101.0}))
+    with pytest.raises(ValueError, match="absent from pinned taxonomy"):
+        resolve_eunis_labels(_attempt({("L3", "UNKNOWN"): 90.0}))
+    with pytest.raises(TypeError, match="finite numeric values"):
+        resolve_eunis_labels(_attempt({("L3", "C1"): float("nan")}))
+    with pytest.raises(ValueError, match=r"fixed 0\.8 support threshold"):
+        resolve_eunis_labels(replace(_attempt({("L3", "C1"): 90.0}), threshold=0.79))
+    with pytest.raises(ValueError, match="both a query error and geometry exclusion"):
+        resolve_eunis_labels(
+            replace(
+                _attempt({("L3", "C1"): 90.0}),
+                query_error="raster failed",
+                exclusion_reason="bad geometry",
+            )
+        )
+    with pytest.raises(ValueError, match="inventory row id and EEA source revision"):
+        resolve_eunis_labels(replace(_attempt({("L3", "C1"): 90.0}), inventory_row_id=" "))
+    with pytest.raises(ValueError, match="usable polygon label attempt needs all class support"):
+        resolve_eunis_labels(replace(_attempt({}), support_areas=None))
+    missing_geometry = replace(
+        _attempt({("L3", "C1"): 0.0}),
+        polygon_snapshot_id=None,
+        original_area=0.0,
+    )
+    _candidates, excluded = resolve_eunis_labels(missing_geometry)
+    assert {outcome.reason for outcome in excluded} == {"usable_geometry_missing_full_area"}
+
+
 def test_excluded_geometry_and_failed_reference_are_recorded_for_all_levels() -> None:
     geometry_candidates, geometry_outcomes = resolve_eunis_labels(
         EunisLabelAttempt(
@@ -360,6 +479,25 @@ def test_support_query_fails_closed_when_a_class_uses_an_unpinned_layer(
         reference.support_areas(box(0, 0, 20, 10), {("L1", "A"): ("MISSING",)})
 
 
+def test_support_query_rejects_empty_geometry_and_malformed_class_groups() -> None:
+    reference = RasterReference(())
+    polygon = box(0, 0, 10, 10)
+
+    with pytest.raises(ValueError, match="usable projected polygon"):
+        reference.support_areas(box(0, 0, 0, 0), {("L1", "A"): ("C1",)})
+    with pytest.raises(ValueError, match="positive full polygon area"):
+        reference.support_areas(polygon.boundary, {("L1", "A"): ("C1",)})
+    with pytest.raises(ValueError, match="at least one support class"):
+        reference.support_areas(polygon, {})
+    with pytest.raises(ValueError, match=r"non-empty \(level, code\) pairs"):
+        reference.support_areas(
+            polygon,
+            cast(dict[tuple[str, str], tuple[str, ...]], {"L1": ("C1",)}),
+        )
+    with pytest.raises(ValueError, match="needs non-empty raster codes"):
+        reference.support_areas(polygon, {("L1", "A"): ()})
+
+
 def test_missing_document_links_stay_downstream_of_the_full_inventory() -> None:
     first_key = canonical_native_key({"source_pbf": "a.osm.pbf", "osm_type": "way", "osm_id": 1})
     second_key = canonical_native_key(
@@ -399,3 +537,43 @@ def test_missing_document_links_stay_downstream_of_the_full_inventory() -> None:
     assert by_document["doc-geometry-missing"].inventory_row_id is None
     assert by_document["doc-geometry-missing"].candidate_inventory_row_ids == ("row-2",)
     assert by_document["doc-unmatched"].inventory_row_id is None
+
+
+def test_document_links_preserve_ambiguous_and_reject_invalid_evidence() -> None:
+    linked_key = canonical_native_key(
+        {"source_pbf": "region.osm.pbf", "osm_type": "way", "osm_id": 1}
+    )
+    ambiguous_key = canonical_native_key(
+        {"source_pbf": "other-region.osm.pbf", "osm_type": "relation", "osm_id": 3}
+    )
+    inventory = (
+        PolygonInventoryRow("inv-linked", linked_key, "raw/0", "polygon-1"),
+        PolygonInventoryRow("inv-a", ambiguous_key, "raw/1", "polygon-3a"),
+        PolygonInventoryRow("inv-b", ambiguous_key, "raw/2", "polygon-3b"),
+    )
+    evidence = (
+        PolygonDocumentEvidence("doc-linked", linked_key, "direct key"),
+        PolygonDocumentEvidence("doc-ambiguous", ambiguous_key, "shared source link"),
+    )
+
+    links = resolve_polygon_document_links(evidence, inventory, source_revision="pinned-v1")
+
+    by_document = {link.document_id: link for link in links}
+    assert by_document["doc-linked"].status is TextLinkStatus.LINKED
+    assert by_document["doc-ambiguous"].status is TextLinkStatus.AMBIGUOUS
+    assert by_document["doc-ambiguous"].candidate_inventory_row_ids == ("inv-a", "inv-b")
+
+    with pytest.raises(ValueError, match="revision must be present"):
+        resolve_polygon_document_links(evidence, inventory, source_revision=" ")
+    with pytest.raises(ValueError, match="document id and evidence"):
+        resolve_polygon_document_links(
+            (PolygonDocumentEvidence("", linked_key, "evidence"),),
+            inventory,
+            source_revision="pinned-v1",
+        )
+    with pytest.raises(ValueError, match="duplicate source link evidence"):
+        resolve_polygon_document_links(
+            (evidence[0], evidence[0]),
+            inventory,
+            source_revision="pinned-v1",
+        )

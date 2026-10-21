@@ -2,19 +2,26 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import Protocol
 
 import rasterio
 
 from .grid_overlap import is_square_north_up
 from .raster_geometry import wgs84_envelope
 
-if TYPE_CHECKING:
-    from .raster_reference import RasterLayer
+
+class _RasterLayerLike(Protocol):
+    """The stable code field needed by raster ordering helpers."""
+
+    @property
+    def code(self) -> str: ...
+
+
+RasterLayerLike = _RasterLayerLike
 
 
 def shares_square_grid(
-    datasets: tuple[tuple[RasterLayer, rasterio.DatasetReader], ...],
+    datasets: tuple[tuple[RasterLayerLike, rasterio.DatasetReader], ...],
 ) -> bool:
     """Return whether all rasters share one square north-up grid."""
 
@@ -25,7 +32,7 @@ def shares_square_grid(
 
 
 def code_order_on_shared_grid(
-    datasets: tuple[tuple[RasterLayer, rasterio.DatasetReader], ...],
+    datasets: tuple[tuple[RasterLayerLike, rasterio.DatasetReader], ...],
 ) -> tuple[int, ...] | None:
     """Return stable code order when all unique layers share one grid."""
 
@@ -36,7 +43,7 @@ def code_order_on_shared_grid(
 
 
 def wgs84_dataset_extent(
-    datasets: tuple[tuple[RasterLayer, rasterio.DatasetReader], ...],
+    datasets: tuple[tuple[RasterLayerLike, rasterio.DatasetReader], ...],
 ) -> tuple[float, float, float, float] | None:
     """Return the envelope covering every raster dataset in WGS84."""
 
