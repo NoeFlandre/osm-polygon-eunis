@@ -597,34 +597,38 @@ def test_nine_pool_gate_requires_all_three_by_three_combinations():
     assert gate.missing_pools
 
 
+def _stream_fixture_pool(
+    tmp_path: Path,
+    text_source: TextSource = TextSource.DESCRIPTION,
+    reference_system: ReferenceSystem = ReferenceSystem.WORLDCOVER,
+):
+    source = _pool_input(text_source, reference_system)
+    scan_bytes = f"fixture scan {text_source.value}/{reference_system.value}\n".encode()
+    scan_path = tmp_path / "scan-reports" / f"{text_source.value}-{reference_system.value}.json"
+    scan_path.parent.mkdir(parents=True, exist_ok=True)
+    scan_path.write_bytes(scan_bytes)
+    evidence = replace(
+        source.raw_inventory_evidence,
+        scan_report_uri=scan_path.as_uri(),
+        scan_report_sha256=hashlib.sha256(scan_bytes).hexdigest(),
+    )
+    source = replace(source, raw_inventory_evidence=evidence)
+    sink = FilesystemStreamingSink(
+        tmp_path / "streamed" / f"{text_source.value}-{reference_system.value}"
+    )
+    return export_pool_batches(
+        PoolStreamSpec.from_build_input(source),
+        _single_batch(source),
+        sink,
+    )
+
+
 def _stream_nine_fixture_pools(tmp_path: Path):
-    receipts = []
-    for text_source in TextSource:
-        for reference_system in ReferenceSystem:
-            source = _pool_input(text_source, reference_system)
-            scan_bytes = f"fixture scan {text_source.value}/{reference_system.value}\n".encode()
-            scan_path = (
-                tmp_path / "scan-reports" / f"{text_source.value}-{reference_system.value}.json"
-            )
-            scan_path.parent.mkdir(parents=True, exist_ok=True)
-            scan_path.write_bytes(scan_bytes)
-            evidence = replace(
-                source.raw_inventory_evidence,
-                scan_report_uri=scan_path.as_uri(),
-                scan_report_sha256=hashlib.sha256(scan_bytes).hexdigest(),
-            )
-            source = replace(source, raw_inventory_evidence=evidence)
-            sink = FilesystemStreamingSink(
-                tmp_path / "streamed" / f"{text_source.value}-{reference_system.value}"
-            )
-            receipts.append(
-                export_pool_batches(
-                    PoolStreamSpec.from_build_input(source),
-                    _single_batch(source),
-                    sink,
-                )
-            )
-    return tuple(receipts)
+    return tuple(
+        _stream_fixture_pool(tmp_path, text_source, reference_system)
+        for text_source in TextSource
+        for reference_system in ReferenceSystem
+    )
 
 
 def test_streamed_nine_pool_gate_verifies_manifests_shards_and_inventory(tmp_path: Path):
@@ -650,16 +654,16 @@ def test_streamed_nine_pool_gate_verifies_manifests_shards_and_inventory(tmp_pat
 
 
 def test_streamed_gate_rejects_tampered_shard(tmp_path: Path):
-    receipts = _stream_nine_fixture_pools(tmp_path)
-    manifest = json.loads(_file_uri_path(receipts[0].manifest_uri).read_text())
-    shard_manifest = _file_uri_path(receipts[0].shard_manifest_uri)
+    receipt = _stream_fixture_pool(tmp_path)
+    manifest = json.loads(_file_uri_path(receipt.manifest_uri).read_text())
+    shard_manifest = _file_uri_path(receipt.shard_manifest_uri)
     first_shard = json.loads(shard_manifest.read_text().splitlines()[0])
     shard_path = _file_uri_path(
-        FilesystemArtifactReader().resolve_uri(receipts[0].manifest_uri, first_shard["path"])
+        FilesystemArtifactReader().resolve_uri(receipt.manifest_uri, first_shard["path"])
     )
     shard_path.write_bytes(shard_path.read_bytes() + b"tamper")
 
-    gate = validate_nine_streamed_pool_gate(receipts, FilesystemArtifactReader())
+    gate = validate_nine_streamed_pool_gate((receipt,), FilesystemArtifactReader())
 
     assert not gate.ok
     assert any(
@@ -693,8 +697,7 @@ def _rewrite_streamed_receipt(
 
 
 def test_streamed_gate_checks_parquet_footer_row_count_against_manifests(tmp_path: Path):
-    receipts = _stream_nine_fixture_pools(tmp_path)
-    receipt = receipts[0]
+    receipt = _stream_fixture_pool(tmp_path)
     manifest = json.loads(_file_uri_path(receipt.manifest_uri).read_text())
     shard_rows = [
         json.loads(line)
@@ -705,9 +708,7 @@ def test_streamed_gate_checks_parquet_footer_row_count_against_manifests(tmp_pat
     manifest["storage_layout"]["tables"]["document_relevance"]["row_count"] += 1
     forged_receipt = _rewrite_streamed_receipt(receipt, manifest, shard_rows)
 
-    gate = validate_nine_streamed_pool_gate(
-        (forged_receipt, *receipts[1:]), FilesystemArtifactReader()
-    )
+    gate = validate_nine_streamed_pool_gate((forged_receipt,), FilesystemArtifactReader())
 
     assert not gate.ok
     assert any(
@@ -719,8 +720,7 @@ def test_streamed_gate_checks_parquet_footer_row_count_against_manifests(tmp_pat
 
 
 def test_streamed_gate_checks_parquet_footer_schema_against_contract(tmp_path: Path):
-    receipts = _stream_nine_fixture_pools(tmp_path)
-    receipt = receipts[0]
+    receipt = _stream_fixture_pool(tmp_path)
     manifest = json.loads(_file_uri_path(receipt.manifest_uri).read_text())
     shard_rows = [
         json.loads(line)
@@ -744,9 +744,7 @@ def test_streamed_gate_checks_parquet_footer_schema_against_contract(tmp_path: P
     document_shard["sha256"] = hashlib.sha256(shard_path.read_bytes()).hexdigest()
     forged_receipt = _rewrite_streamed_receipt(receipt, manifest, shard_rows)
 
-    gate = validate_nine_streamed_pool_gate(
-        (forged_receipt, *receipts[1:]), FilesystemArtifactReader()
-    )
+    gate = validate_nine_streamed_pool_gate((forged_receipt,), FilesystemArtifactReader())
 
     assert not gate.ok
     assert any(
@@ -758,10 +756,10 @@ def test_streamed_gate_checks_parquet_footer_schema_against_contract(tmp_path: P
 
 
 def test_streamed_gate_reports_malformed_receipt_pool_id_after_read_failure(tmp_path: Path):
-    receipts = _stream_nine_fixture_pools(tmp_path)
-    broken_uri = _file_uri_path(receipts[0].manifest_uri).with_suffix(".missing").as_uri()
+    receipt = _stream_fixture_pool(tmp_path)
+    broken_uri = _file_uri_path(receipt.manifest_uri).with_suffix(".missing").as_uri()
     malformed = replace(
-        receipts[0],
+        receipt,
         pool_id="1.0.0/invalid/raw",
         manifest_uri=broken_uri,
     )
