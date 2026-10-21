@@ -1075,6 +1075,8 @@ def test_filesystem_verified_reader_rejects_bad_pins_and_batch_sizes(tmp_path: P
 
     with pytest.raises(ValueError, match="snapshot pin is not a SHA-256 digest"):
         list(reader.iter_verified_lines(artifact.as_uri(), "not-a-digest"))
+    with pytest.raises(FileNotFoundError):
+        list(reader.iter_verified_lines((tmp_path / "missing.jsonl").as_uri(), "0" * 64))
     with pytest.raises(ValueError, match="Parquet batch size must be positive"):
         list(
             reader.iter_verified_parquet_rows(
