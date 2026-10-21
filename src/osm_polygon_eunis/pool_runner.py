@@ -1548,6 +1548,8 @@ def _validate_frozen_source_identity(source: FrozenPolygonSource) -> None:
         character not in "0123456789abcdef" for character in revision
     ):
         raise ValueError("raw polygon source revision must be a full lowercase Git SHA")
+    if revision != source.layout.raw_revision:
+        raise ValueError("raw polygon source revision does not match the pinned EUNIS layout")
     _require_sha256(source.source_snapshot.pbf_sha256, "source PBF or PBF-manifest SHA-256")
     if not _has_uri(source.source_snapshot.pbf_uri):
         raise ValueError("source PBF or PBF-manifest URI must be resolvable")

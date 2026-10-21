@@ -113,11 +113,15 @@ class EunisTaxonomy:
 
 @dataclass(frozen=True, slots=True)
 class EunisPoolSourceLayout:
-    """Raw polygon shard and downstream text paths for one text-source pool."""
+    """Pinned raw and relevance-source paths for one text-source pool."""
 
     text_source: TextSource
     repository: str
     polygon_glob: str
+    raw_revision: str
+    relevance_repository: str
+    relevance_revision: str
+    relevance_path_globs: tuple[tuple[str, str], ...]
     document_link_glob: str | None = None
     document_glob: str | None = None
     sentence_glob: str | None = None
@@ -125,22 +129,37 @@ class EunisPoolSourceLayout:
 
 EUNIS_POOL_SOURCE_LAYOUTS: Mapping[TextSource, EunisPoolSourceLayout] = {
     TextSource.DESCRIPTION: EunisPoolSourceLayout(
-        TextSource.DESCRIPTION,
-        "NoeFlandre/osm-polygon-description-tag",
-        "data/*.parquet",
+        text_source=TextSource.DESCRIPTION,
+        repository="NoeFlandre/osm-polygon-description-tag",
+        polygon_glob="data/*.parquet",
+        raw_revision="b4706eb315c66a8a57135289e7612dca8e03caf8",
+        relevance_repository="NoeFlandre/osm-polygon-description-tag-landuse",
+        relevance_revision="ce98b328f3c6543800a3d931877b51eb3f0cf768",
+        relevance_path_globs=(("description", "labels/language-v1/data/*.parquet"),),
     ),
     TextSource.WEBSITE: EunisPoolSourceLayout(
-        TextSource.WEBSITE,
-        "NoeFlandre/osm-polygon-website-tag",
-        "polygons/*.parquet",
+        text_source=TextSource.WEBSITE,
+        repository="NoeFlandre/osm-polygon-website-tag",
+        polygon_glob="polygons/*.parquet",
+        raw_revision="4cbddf95ce614e68d5ada8b94ca21bf9e48d39dd",
+        relevance_repository="NoeFlandre/osm-polygon-website-tag-landuse",
+        relevance_revision="e6524c711ee0033c3cd5990e5fdbbe4b89992dfb",
+        relevance_path_globs=(("website", "labels/polygons/*.parquet"),),
     ),
     TextSource.WIKI: EunisPoolSourceLayout(
-        TextSource.WIKI,
-        "NoeFlandre/osm-polygon-wikidata-and-wikipedia",
-        "polygons/*.parquet",
-        "polygon_document_links/*.parquet",
-        "wikipedia/documents/*.parquet",
-        "wikivoyage/sentences/*.parquet",
+        text_source=TextSource.WIKI,
+        repository="NoeFlandre/osm-polygon-wikidata-and-wikipedia",
+        polygon_glob="polygons/*.parquet",
+        raw_revision="d6fc058ccf4643bc5fe5bfd5c1c0bc403d3da801",
+        relevance_repository="NoeFlandre/osm-polygon-wikidata-and-wikipedia-landuse",
+        relevance_revision="49307aeb05b6dcc8a5d393f77f59a1e6d13a967a",
+        relevance_path_globs=(
+            ("wikipedia", "labels/wikipedia/sentences/*.parquet"),
+            ("wikivoyage", "labels/wikivoyage/sentences/*.parquet"),
+        ),
+        document_link_glob="polygon_document_links/*.parquet",
+        document_glob="wikipedia/documents/*.parquet",
+        sentence_glob="wikivoyage/sentences/*.parquet",
     ),
 }
 

@@ -96,6 +96,18 @@ def test_eea_2021_reference_pin_records_verified_manifest_metrics() -> None:
     assert pin.taxonomy_revision == taxonomy.pinned_revision
 
 
+def test_eea_2021_reference_pin_rejects_an_unverified_taxonomy_digest() -> None:
+    taxonomy = EunisTaxonomy(
+        taxonomy_id="EUNIS 2021",
+        taxonomy_revision="taxonomy-2021",
+        taxonomy_sha256="a" * 64,
+        paths_by_direct_code={"C1": EunisTaxonomyPath("A", "A1", "C1")},
+    )
+
+    with pytest.raises(ValueError, match="verified EEA 2021 taxonomy input"):
+        make_eunis_2021_reference_pin(taxonomy)
+
+
 def test_taxonomy_groups_explicit_paths_without_guessing_code_prefixes() -> None:
     groups = _TAXONOMY.support_groups()
 
@@ -115,6 +127,49 @@ def test_pool_sources_cover_the_three_raw_text_sources_with_wiki_artifacts_downs
     assert wiki.document_link_glob == "polygon_document_links/*.parquet"
     assert wiki.document_glob == "wikipedia/documents/*.parquet"
     assert wiki.sentence_glob == "wikivoyage/sentences/*.parquet"
+
+
+def test_pool_source_layouts_pin_raw_and_relevance_snapshots_separately() -> None:
+    expected = {
+        TextSource.DESCRIPTION: (
+            "NoeFlandre/osm-polygon-description-tag",
+            "b4706eb315c66a8a57135289e7612dca8e03caf8",
+            "data/*.parquet",
+            "NoeFlandre/osm-polygon-description-tag-landuse",
+            "ce98b328f3c6543800a3d931877b51eb3f0cf768",
+            (("description", "labels/language-v1/data/*.parquet"),),
+        ),
+        TextSource.WEBSITE: (
+            "NoeFlandre/osm-polygon-website-tag",
+            "4cbddf95ce614e68d5ada8b94ca21bf9e48d39dd",
+            "polygons/*.parquet",
+            "NoeFlandre/osm-polygon-website-tag-landuse",
+            "e6524c711ee0033c3cd5990e5fdbbe4b89992dfb",
+            (("website", "labels/polygons/*.parquet"),),
+        ),
+        TextSource.WIKI: (
+            "NoeFlandre/osm-polygon-wikidata-and-wikipedia",
+            "d6fc058ccf4643bc5fe5bfd5c1c0bc403d3da801",
+            "polygons/*.parquet",
+            "NoeFlandre/osm-polygon-wikidata-and-wikipedia-landuse",
+            "49307aeb05b6dcc8a5d393f77f59a1e6d13a967a",
+            (
+                ("wikipedia", "labels/wikipedia/sentences/*.parquet"),
+                ("wikivoyage", "labels/wikivoyage/sentences/*.parquet"),
+            ),
+        ),
+    }
+
+    for source, pin in expected.items():
+        layout = EUNIS_POOL_SOURCE_LAYOUTS[source]
+        assert (
+            layout.repository,
+            layout.raw_revision,
+            layout.polygon_glob,
+            layout.relevance_repository,
+            layout.relevance_revision,
+            layout.relevance_path_globs,
+        ) == pin
 
 
 def test_threshold_is_inclusive_candidates_below_threshold_are_retained() -> None:

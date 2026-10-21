@@ -4,7 +4,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -38,6 +38,7 @@ from osm_polygon_eunis.pool_runner import (
     run_eunis_label_attempts,
     scan_raw_inventory,
 )
+from osm_polygon_eunis.raster_reference import RasterReference
 
 _TAXONOMY = EunisTaxonomy(
     taxonomy_id="fixture-taxonomy",
@@ -89,7 +90,7 @@ def _source_snapshot() -> SourceSnapshot:
     return SourceSnapshot(
         snapshot_id="website-fixture-snapshot",
         repository="NoeFlandre/osm-polygon-website-tag",
-        revision="f" * 40,
+        revision=EUNIS_POOL_SOURCE_LAYOUTS[TextSource.WEBSITE].raw_revision,
         pbf_uri="https://source.example/pbf-manifest.json",
         pbf_sha256="a" * 64,
     )
@@ -243,6 +244,36 @@ def test_source_snapshot_revision_must_be_an_immutable_git_sha(tmp_path: Path) -
         )
 
 
+def test_source_snapshot_revision_must_match_its_pinned_eunis_layout(tmp_path: Path) -> None:
+    shard = _write_source_shard(tmp_path / "staged" / "region-a.parquet", [_source_row(1, None)])
+    unexpected_revision = "e" * 40
+    snapshot = _source_snapshot()
+    mismatched_snapshot = SourceSnapshot(
+        snapshot_id=snapshot.snapshot_id,
+        repository=snapshot.repository,
+        revision=unexpected_revision,
+        pbf_uri=snapshot.pbf_uri,
+        pbf_sha256=snapshot.pbf_sha256,
+    )
+    mismatched_shard = PinnedPolygonShard(
+        path_in_repo=shard.path_in_repo,
+        revision=unexpected_revision,
+        sha256=shard.sha256,
+        size_bytes=shard.size_bytes,
+        local_path=shard.local_path,
+    )
+
+    with pytest.raises(ValueError, match="does not match the pinned EUNIS layout"):
+        FrozenPolygonSource(
+            layout=EUNIS_POOL_SOURCE_LAYOUTS[TextSource.WEBSITE],
+            source_snapshot=mismatched_snapshot,
+            manifest_uri="https://source.example/manifest.json",
+            manifest_sha256="b" * 64,
+            manifest_paths=(shard.path_in_repo,),
+            polygon_shards=(mismatched_shard,),
+        )
+
+
 def test_duplicate_raw_native_keys_fail_instead_of_silently_deduplicating(
     tmp_path: Path,
 ) -> None:
@@ -268,7 +299,7 @@ def test_label_attempts_follow_raw_inventory_and_keep_missing_geometry_outcome(
 
     attempts = run_eunis_label_attempts(
         raw,
-        reference,  # type: ignore[arg-type]
+        cast(RasterReference, reference),
         _reference_pin(),
         _TAXONOMY,
         root,
@@ -311,7 +342,7 @@ def test_query_error_is_excluded_with_reason_at_every_supported_level(tmp_path: 
     raw = scan_raw_inventory(source, root, _code_pin())
     attempts = run_eunis_label_attempts(
         raw,
-        FakeReference(fail=True),  # type: ignore[arg-type]
+        cast(RasterReference, FakeReference(fail=True)),
         _reference_pin(),
         _TAXONOMY,
         root,
@@ -333,7 +364,7 @@ def test_eunis_attempts_export_through_bounded_shared_streaming_contract(
     raw_scan = scan_raw_inventory(source, checkpoint_root, _code_pin())
     attempts = run_eunis_label_attempts(
         raw_scan,
-        FakeReference(),  # type: ignore[arg-type]
+        cast(RasterReference, FakeReference()),
         _reference_pin(),
         _TAXONOMY,
         checkpoint_root,
@@ -391,7 +422,7 @@ def test_invalid_attempt_signature_is_recomputed_from_cached_raw_inventory(
     first_reference = FakeReference()
     first = run_eunis_label_attempts(
         raw,
-        first_reference,  # type: ignore[arg-type]
+        cast(RasterReference, first_reference),
         _reference_pin(),
         _TAXONOMY,
         root,
@@ -399,7 +430,7 @@ def test_invalid_attempt_signature_is_recomputed_from_cached_raw_inventory(
     next_reference = FakeReference()
     second = run_eunis_label_attempts(
         raw,
-        next_reference,  # type: ignore[arg-type]
+        cast(RasterReference, next_reference),
         _reference_pin(),
         _TAXONOMY,
         root,
@@ -452,4 +483,10 @@ def test_map_inputs_must_match_threshold_and_release_pin(
     raw = scan_raw_inventory(source, root, _code_pin())
 
     with pytest.raises(ValueError, match=error):
-        run_eunis_label_attempts(raw, reference, _reference_pin(), _TAXONOMY, root)  # type: ignore[arg-type]
+        run_eunis_label_attempts(
+            raw,
+            cast(RasterReference, reference),
+            _reference_pin(),
+            _TAXONOMY,
+            root,
+        )

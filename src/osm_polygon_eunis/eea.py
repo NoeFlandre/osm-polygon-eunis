@@ -51,9 +51,12 @@ _HTTP_TOO_MANY_REQUESTS = 429
 _HTTP_SERVER_ERROR_MIN = 500
 _HTTP_STATUS_CODE_LIMIT = 600
 __all__ = [
+    "ClassificationTaxonomy",
     "EeaGroup",
     "RemoteAsset",
     "WebDavEntry",
+    "parse_classification_taxonomy_rows",
+    "parse_classification_taxonomy_workbook",
     "resolve_config",
     "resolve_config_data",
 ]
@@ -95,6 +98,56 @@ class EeaGroup:
     labels: Mapping[str, str]
     raster_assets: tuple[RemoteAsset, ...]
     vector_asset: RemoteAsset | None
+
+
+@dataclass(frozen=True, slots=True)
+class ClassificationTaxonomy:
+    """Level, label, and prefix-parent rows parsed from an EUNIS workbook."""
+
+    labels: Mapping[str, str]
+    levels: Mapping[str, int]
+    parents: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        """Reject missing labels and parent edges outside the parsed hierarchy."""
+
+        taxonomy_codes = set(self.levels) | set(self.parents) | set(self.parents.values())
+        missing = sorted(
+            code
+            for code in taxonomy_codes
+            if not isinstance(self.labels.get(code), str) or not self.labels[code].strip()
+        )
+        if missing:
+            raise ValueError(f"EUNIS taxonomy has missing label for {', '.join(missing)}")
+        for code, level in self.levels.items():
+            if not code or not isinstance(level, int) or isinstance(level, bool) or level < 1:
+                raise ValueError(f"EUNIS taxonomy has invalid Level for {code!r}")
+        for code, parent in self.parents.items():
+            if code not in self.levels or parent not in self.levels:
+                raise ValueError(f"EUNIS taxonomy has a parent without a Level for {code}")
+            if not code.startswith(parent) or len(parent) >= len(code):
+                raise ValueError(f"EUNIS taxonomy has invalid prefix parent for {code}")
+            if self.levels[parent] >= self.levels[code]:
+                raise ValueError(f"EUNIS taxonomy parent is not at a lower Level for {code}")
+
+    def ancestors_including_self(self, code: str) -> tuple[str, ...]:
+        """Return a code followed by its parsed parents, from specific to root."""
+
+        ancestors = [code]
+        seen = {code}
+        current = code
+        while current in self.parents:
+            current = self.parents[current]
+            if current in seen:
+                raise ValueError(f"EUNIS taxonomy contains a parent cycle at {current}")
+            ancestors.append(current)
+            seen.add(current)
+        return tuple(ancestors)
+
+    def root_for(self, code: str) -> str:
+        """Return the highest parsed ancestor, treating unknown codes as roots."""
+
+        return self.ancestors_including_self(code)[-1]
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,6 +315,130 @@ def parse_classification_rows(rows: Iterable[Iterable[object]]) -> dict[str, str
     return labels
 
 
+def parse_classification_taxonomy_rows(
+    rows: Iterable[Iterable[object]],
+    *,
+    supplemental_labels: Mapping[str, str] | None = None,
+) -> ClassificationTaxonomy:
+    """Parse repeated Level/Code/Name headers and derive present lower-level prefixes."""
+
+    records = _classification_taxonomy_records(rows)
+    labels = {code: name for code, (name, _level) in records.items()}
+    levels = {code: level for code, (_name, level) in records.items()}
+    _add_supplemental_taxonomy_labels(labels, supplemental_labels)
+    parents = {
+        code: parent
+        for code, level in levels.items()
+        if (parent := _longest_lower_level_prefix(code, level, levels)) is not None
+    }
+    return ClassificationTaxonomy(labels, levels, parents)
+
+
+def _classification_taxonomy_records(
+    rows: Iterable[Iterable[object]],
+) -> dict[str, tuple[str, int]]:
+    records: dict[str, tuple[str, int]] = {}
+    current_indexes: tuple[int, int, int] | None = None
+    for raw_row in rows:
+        row = tuple(raw_row)
+        if not row:
+            current_indexes = None
+            continue
+        indexes = _classification_taxonomy_indexes(row)
+        if indexes is not None:
+            current_indexes = indexes
+            continue
+        if current_indexes is None:
+            continue
+        record = _classification_taxonomy_record(row, current_indexes)
+        if record is None:
+            continue
+        code, name, level = record
+        _merge_classification_taxonomy_record(records, code, name, level)
+    if not records:
+        raise ValueError("EEA classification workbook has no Level/Code/Name rows")
+    return records
+
+
+def _merge_classification_taxonomy_record(
+    records: dict[str, tuple[str, int]],
+    code: str,
+    name: str,
+    level: int,
+) -> None:
+    row_value = (name, level)
+    if records.setdefault(code, row_value) != row_value:
+        raise ValueError(f"EEA classification has conflicting name or Level for {code}")
+
+
+def _add_supplemental_taxonomy_labels(
+    labels: dict[str, str],
+    supplemental_labels: Mapping[str, str] | None,
+) -> None:
+    for code, name in (supplemental_labels or {}).items():
+        labels[code] = _validated_supplemental_taxonomy_label(code, name, labels)
+
+
+def _validated_supplemental_taxonomy_label(
+    code: object,
+    name: object,
+    labels: Mapping[str, str],
+) -> str:
+    if not isinstance(code, str) or not isinstance(name, str):
+        raise TypeError("EEA supplemental labels must use string codes and names")
+    normalized_name = name.strip()
+    if not code or not normalized_name:
+        raise ValueError("EEA classification has an invalid supplemental label")
+    previous = labels.get(code)
+    if previous is not None and previous != normalized_name:
+        raise ValueError(f"EEA supplemental label conflicts with classification for {code}")
+    return normalized_name
+
+
+def _classification_taxonomy_indexes(
+    row: tuple[object, ...],
+) -> tuple[int, int, int] | None:
+    headers = {_normalise_header(value): index for index, value in enumerate(row)}
+    level_index = _find_header_index(headers, {"level"})
+    code_index = _find_header_index(headers, {"code", "code2018"})
+    name_index = _find_header_index(headers, {"name", "name2018"})
+    if level_index is None or code_index is None or name_index is None:
+        return None
+    return level_index, code_index, name_index
+
+
+def _classification_taxonomy_record(
+    row: tuple[object, ...],
+    indexes: tuple[int, int, int],
+) -> tuple[str, str, int] | None:
+    level_index, code_index, name_index = indexes
+    code = _text_value(row[code_index]) if code_index < len(row) else ""
+    if not code:
+        return None
+    if name_index >= len(row) or not _text_value(row[name_index]):
+        raise ValueError(f"EEA classification has a missing name for {code}")
+    level_value = row[level_index] if level_index < len(row) else ""
+    level_text = _classification_level_text(level_value)
+    if not level_text.isdecimal() or int(level_text) < 1:
+        raise ValueError(f"EEA classification has an invalid Level for {code}")
+    return code, _text_value(row[name_index]), int(level_text)
+
+
+def _classification_level_text(value: object) -> str:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    return _text_value(value)
+
+
+def _longest_lower_level_prefix(code: str, level: int, levels: Mapping[str, int]) -> str | None:
+    for end in range(len(code) - 1, 0, -1):
+        prefix = code[:end]
+        parent_level = levels.get(prefix)
+        if parent_level is not None and parent_level < level:
+            return prefix
+    return None
+
+
 def _merge_label(labels: dict[str, str], code: str, name: str, source: str) -> None:
     previous = labels.setdefault(code, name)
     if previous != name:
@@ -365,6 +542,22 @@ def _sheet_rows(
             yield tuple(cells.get(index, "") for index in range(width))
 
 
+def _xlsx_taxonomy_rows(
+    archive: ZipFile,
+    shared_strings: tuple[str, ...],
+) -> Iterable[tuple[str, ...]]:
+    sheet_paths = sorted(
+        path
+        for path in archive.namelist()
+        if path.startswith("xl/worksheets/sheet") and path.endswith(".xml")
+    )
+    for index, path in enumerate(sheet_paths):
+        if index:
+            yield ()
+        root = _safe_fromstring(archive.read(path))
+        yield from _sheet_rows(root, shared_strings)
+
+
 def _row_cells(row_element: ET.Element, shared_strings: tuple[str, ...]) -> dict[int, str]:
     return {
         _column_index(cell.attrib["r"]): _xlsx_cell_value(cell, shared_strings)
@@ -380,6 +573,21 @@ def parse_classification_workbook(payload: bytes) -> dict[str, str]:
         with ZipFile(io.BytesIO(payload)) as archive:
             rows = _xlsx_rows(archive, _shared_strings(archive))
             return parse_classification_rows(rows)
+    except (BadZipFile, KeyError) as error:
+        raise ValueError("EEA classification asset is not a valid XLSX workbook") from error
+
+
+def parse_classification_taxonomy_workbook(
+    payload: bytes,
+    *,
+    supplemental_labels: Mapping[str, str] | None = None,
+) -> ClassificationTaxonomy:
+    """Parse explicit taxonomy rows from an XLSX without resolving a remote asset."""
+
+    try:
+        with ZipFile(io.BytesIO(payload)) as archive:
+            rows = _xlsx_taxonomy_rows(archive, _shared_strings(archive))
+            return parse_classification_taxonomy_rows(rows, supplemental_labels=supplemental_labels)
     except (BadZipFile, KeyError) as error:
         raise ValueError("EEA classification asset is not a valid XLSX workbook") from error
 
