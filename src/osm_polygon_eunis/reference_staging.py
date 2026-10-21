@@ -23,10 +23,11 @@ from .transform import (
 _DEFAULT_LIMITS = BatchLimits()
 
 
-_WORKER_REFERENCE_STACKS: dict[tuple[str, int, int, tuple[str, ...]], ExitStack] = {}
+_WorkerReferenceKey = tuple[str, int, int, tuple[str, ...], tuple[str, ...]]
+_WORKER_REFERENCE_STACKS: dict[_WorkerReferenceKey, ExitStack] = {}
 
 
-_WORKER_REFERENCES: dict[tuple[str, int, int, tuple[str, ...]], tuple[OverlapReference, ...]] = {}
+_WORKER_REFERENCES: dict[_WorkerReferenceKey, tuple[OverlapReference, ...]] = {}
 
 
 def _asset_filename(asset: RemoteAsset) -> str:
@@ -142,7 +143,7 @@ def _open_local_raster_reference(
         )
         for asset in group.raster_assets
     )
-    with RasterReference(layers, threshold=threshold) as reference:
+    with RasterReference(layers, threshold=threshold, taxonomy=group.taxonomy) as reference:
         yield reference
 
 
@@ -160,6 +161,7 @@ def _open_local_vector_reference(
         dict(group.labels),
         source_version=asset.source_version,
         threshold=threshold,
+        taxonomy=group.taxonomy,
     ) as reference:
         yield reference
 
@@ -220,11 +222,38 @@ def worker_reference_batch(
 ) -> tuple[OverlapReference, ...]:
     """Reuse one opened reference batch for the lifetime of a worker process."""
 
-    key = (str(root), start_index, threshold, tuple(group.record_id for group in groups))
+    key = _worker_reference_key(groups, root, threshold, start_index)
     cached = _WORKER_REFERENCES.get(key)
     if cached is not None:
         return cached
     close_worker_reference_cache()
+    stack, references = _open_worker_reference_batch(groups, root, threshold, start_index)
+    _WORKER_REFERENCE_STACKS[key] = stack
+    _WORKER_REFERENCES[key] = references
+    return references
+
+
+def _worker_reference_key(
+    groups: tuple[EeaGroup, ...],
+    root: Path,
+    threshold: int,
+    start_index: int,
+) -> _WorkerReferenceKey:
+    return (
+        str(root),
+        start_index,
+        threshold,
+        tuple(group.record_id for group in groups),
+        tuple(group.taxonomy.fingerprint if group.taxonomy is not None else "" for group in groups),
+    )
+
+
+def _open_worker_reference_batch(
+    groups: tuple[EeaGroup, ...],
+    root: Path,
+    threshold: int,
+    start_index: int,
+) -> tuple[ExitStack, tuple[OverlapReference, ...]]:
     stack = ExitStack()
     try:
         references = tuple(
@@ -240,9 +269,7 @@ def worker_reference_batch(
     except BaseException:
         stack.close()
         raise
-    _WORKER_REFERENCE_STACKS[key] = stack
-    _WORKER_REFERENCES[key] = references
-    return references
+    return stack, references
 
 
 def close_worker_reference_cache() -> None:
@@ -275,7 +302,11 @@ def _raster_group_reference(
                 source_version=asset.source_version,
             )
         )
-    with RasterReference(tuple(layers), threshold=threshold) as reference:
+    with RasterReference(
+        tuple(layers),
+        threshold=threshold,
+        taxonomy=group.taxonomy,
+    ) as reference:
         yield reference
 
 
@@ -299,6 +330,7 @@ def _vector_group_reference(
         dict(group.labels),
         source_version=asset.source_version,
         threshold=threshold,
+        taxonomy=group.taxonomy,
     ) as reference:
         yield reference
 

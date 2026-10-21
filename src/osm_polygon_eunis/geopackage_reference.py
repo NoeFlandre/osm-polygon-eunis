@@ -15,10 +15,21 @@ from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 from shapely.wkb import loads as load_wkb
 
-from .domain import EPSG_LAEA_EUROPE, EunisResult, OverlapCandidate, SchemaError
+from .domain import (
+    EPSG_LAEA_EUROPE,
+    EunisResult,
+    EunisTaxonomy,
+    OverlapCandidate,
+    SchemaError,
+)
 from .geometry import is_usable, repair_polygonal
 from .geopackage_sql import sql_identifier
-from .geopackage_tiles import GeoPackageTileMethods, TileLayer
+from .geopackage_tiles import (
+    GeoPackageTileMethods,
+    RasterTileSourceError,
+    TileLayer,
+    has_raster_tiles,
+)
 from .grid_overlap import WeightedCells
 from .matching import choose_winner
 
@@ -93,6 +104,7 @@ class GeoPackageReference(GeoPackageTileMethods):
         *,
         source_version: str,
         threshold: int = 0,
+        taxonomy: EunisTaxonomy | None = None,
     ) -> None:
         """Prepare a GeoPackage reference without opening its SQLite handle.
 
@@ -100,7 +112,9 @@ class GeoPackageReference(GeoPackageTileMethods):
             path: Read-only GeoPackage path.
             labels: EUNIS code to display-name mapping.
             source_version: Immutable version recorded in output labels.
-            threshold: Minimum raster value counted as habitat presence.
+            threshold: Legacy pixel cutoff for decoder helpers; opening rejects
+                GeoPackages containing raster tiles.
+            taxonomy: Verified classification hierarchy used for parent roll-up.
 
         Raises:
             ValueError: If labels are empty or the threshold is negative.
@@ -112,6 +126,7 @@ class GeoPackageReference(GeoPackageTileMethods):
         self._path = path
         self._labels = labels
         self._source_version = source_version
+        self._taxonomy = taxonomy
         self.intersection_errors = 0
         self._threshold = threshold
         self._connection: sqlite3.Connection | None = None
@@ -120,15 +135,32 @@ class GeoPackageReference(GeoPackageTileMethods):
         self._tile_cache: OrderedDict[tuple[str, int, int], BaseGeometry | None] = OrderedDict()
 
     def __enter__(self) -> GeoPackageReference:
-        """Open the GeoPackage and validate its geometry or tile layers."""
+        """Open read-only, validate geometry layers, and reject raster-tile sources."""
         if self._connection is not None:
             raise RuntimeError("GeoPackage reference is already open")
-        self._connection = sqlite3.connect(f"file:{self._path}?mode=ro", uri=True)
-        self._layers = self._discover_layers(self._connection)
-        self._tile_layers = self._discover_tile_layers(self._connection)
+        connection = sqlite3.connect(f"file:{self._path}?mode=ro", uri=True)
+        self._connection = connection
+        try:
+            self._layers = self._discover_layers(connection)
+            self._reject_raster_tile_source(connection)
+            self._tile_layers = self._discover_tile_layers(connection)
+            self._require_reference_layers()
+        except BaseException:
+            self.close()
+            raise
+        return self
+
+    def _reject_raster_tile_source(self, connection: sqlite3.Connection) -> None:
+        if has_raster_tiles(connection):
+            raise RasterTileSourceError(
+                f"{self._path} contains raster tiles. They are not accepted as "
+                "ground truth; a validated native lossless raster and native "
+                "validity mask are required."
+            )
+
+    def _require_reference_layers(self) -> None:
         if not self._layers and not self._tile_layers:
             raise ValueError("GeoPackage has no EPSG:3035 geometry or tile layers")
-        return self
 
     def __exit__(self, *_args: object) -> None:
         """Close the SQLite connection and release cached geometries."""
@@ -150,7 +182,12 @@ class GeoPackageReference(GeoPackageTileMethods):
         """Return the largest exact polygon intersection from indexed features."""
 
         if not is_usable(polygon):
-            return choose_winner(polygon, (), source_version=self._source_version)
+            return choose_winner(
+                polygon,
+                (),
+                source_version=self._source_version,
+                taxonomy=self._taxonomy,
+            )
         if self._connection is None:
             with self:
                 return self._overlap_open(polygon)
@@ -167,6 +204,7 @@ class GeoPackageReference(GeoPackageTileMethods):
             source_version=self._source_version,
             on_error=self._count_intersection_error,
             extra_areas=self._tile_areas(connection, polygon),
+            taxonomy=self._taxonomy,
         )
 
     def _vector_candidates(

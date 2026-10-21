@@ -20,6 +20,24 @@ from .domain import EPSG_LAEA_EUROPE, SchemaError
 from .geopackage_sql import sql_identifier
 from .grid_overlap import WeightedCells, band_row_ranges, weighted_cells
 
+
+class RasterTileSourceError(Exception):
+    """A raster-tile GeoPackage cannot provide validated ground-truth support."""
+
+
+def has_raster_tiles(connection: sqlite3.Connection) -> bool:
+    """Return whether the GeoPackage metadata registers raster tile content."""
+    try:
+        row = connection.execute(
+            "SELECT 1 FROM gpkg_contents WHERE lower(data_type) = 'tiles' LIMIT 1"
+        ).fetchone()
+    except sqlite3.DatabaseError as error:
+        if "no such table" in str(error).lower():
+            return False
+        raise ValueError("not a readable GeoPackage") from error
+    return row is not None
+
+
 _GEOPACKAGE_TILE_CACHE_SIZE = 4096
 _ALPHA_BAND = 4
 _TILE_METADATA_FIELDS = 13

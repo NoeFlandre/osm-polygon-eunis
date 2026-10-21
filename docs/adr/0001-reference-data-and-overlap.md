@@ -2,21 +2,39 @@
 
 ## Decision
 
-Use the official EEA 2021 EUNIS habitat probability-map release. Its declared
-coordinate system is EPSG:3035. The positive raster cells become reference
-cells. The matcher calculates the actual geometry intersections. It chooses the
-largest area. A polygon outside the European reference coverage receives null
-fields.
+Use the official EEA 2021 EUNIS habitat reference. Its declared coordinate
+system is EPSG:3035. For each taxonomy node, union support from the node and all
+descendants before calculating the exact intersection with the OSM polygon.
+Divide each node's intersection by the full OSM polygon area. The taxonomy is
+read from the workbook's Level/Code/Name records: a code's parent is the
+longest proper code prefix present at a strictly lower Level. Assign the most
+specific qualifying node only when one qualifying node remains after removing
+its qualifying ancestors and its coverage reaches the inclusive 80% threshold.
+If multiple qualifying sibling nodes remain, withhold the code and name and
+retain their maximum coverage. Below 80%, withhold the code and name but keep
+the highest measured hierarchy-node coverage. A polygon with no valid
+positive-area intersection receives null overlap fields.
 
-The EEA raster families that are published as GeoPackages are tile pyramids.
-They are not feature layers. The adapter reads only the highest-resolution tiles
-that intersect the polygon bbox. It decodes the positive pixels into EPSG:3035
-cell geometry. Then it uses the same exact intersection matcher.
+The 80% coverage rule uses the full original OSM polygon area, including
+uncovered and NoData areas. It is separate from the EEA source-value cutoff.
 
-The raster-cell collections carry their disjoint-component invariant. This lets
-the matcher sum the exact cell intersections that Shapely calculates in a
-vectorized way. Arbitrary geometry collections still use the general overlay
-path. A bounded decoded-tile cache is a performance optimization only.
+At `threshold: 0`, valid raster cells contribute modeled support only when their
+values are greater than zero. The scientific status of this cutoff remains
+provisional pending source evaluation.
+
+Vector GeoPackages are queried as indexed feature layers. Raster-tile
+GeoPackages are refused as ground truth until their source values and validity
+masks are verified. Keep the bounded Q11 source evidence and recovery record in
+the separately scoped [PR #157](https://github.com/NoeFlandre/osm-polygon-eunis/pull/157).
+Raster labels require a validated native lossless raster with a native
+validity signal. Exclude NoData and masked pixels before thresholding. Roll up
+each taxonomy node by pixel-wise OR of its own and descendant masks, never by
+summing child areas. Fail closed when a raster has no native validity signal.
+Do not infer labels from an unchecked derived tile package.
+
+Native raster-cell collections carry their disjoint-component invariant. The
+matcher sums exact cell intersections that Shapely calculates in a vectorized
+way. Arbitrary geometry collections still use the general overlay path.
 
 The names come from the EEA 2021 classification workbook in the catalog record
 `bfe4c237-e378-4a83-ab21-b3807f96c2e2`. The saltmarsh service has one null name

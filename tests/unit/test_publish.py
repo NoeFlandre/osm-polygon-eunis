@@ -99,7 +99,7 @@ def test_manifest_records_software_provenance(monkeypatch) -> None:
         )
     )
 
-    assert manifest["manifest_version"] == 5
+    assert manifest["manifest_version"] == 6
     assert manifest["software"] == {
         "name": "osm-polygon-eunis",
         "version": "0.1.0",
@@ -185,7 +185,7 @@ def test_manifest_records_added_card_artifacts() -> None:
         )
     )
 
-    assert manifest["manifest_version"] == 5
+    assert manifest["manifest_version"] == 6
     assert manifest["added_paths"] == ["eunis/world-map.svg"]
     assert manifest["shared_paths"] == []
     assert manifest["schema_by_path"] == {"polygons/a.parquet": "schema"}
@@ -837,7 +837,7 @@ def test_build_manifest_exact_output_with_card_and_schema() -> None:
     )
 
     assert manifest == {
-        "manifest_version": 5,
+        "manifest_version": 6,
         "source_repo": "org/source",
         "target_repo": "org/target",
         "source_revision": "rev",

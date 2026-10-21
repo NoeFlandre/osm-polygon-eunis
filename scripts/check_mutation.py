@@ -27,6 +27,11 @@ def _equivalent(reason: str, module: str, *mutants: str) -> dict[str, str]:
 
 ALLOWED_MUTANTS: dict[str, str] = {
     **_equivalent(
+        "Equivalent: both branches return 100.0 for an exact 100% overlap.",
+        "matching",
+        "x__bounded_percentage__mutmut_6",
+    ),
+    **_equivalent(
         "Equivalent: the caller checks unequal percentages before comparing with >.",
         "matching",
         "x__outranks__mutmut_5",

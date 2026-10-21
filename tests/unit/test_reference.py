@@ -21,6 +21,7 @@ from shapely.wkb import dumps
 import osm_polygon_eunis.geopackage_reference as geopackage_module
 import osm_polygon_eunis.geopackage_tiles as tiles_module
 import osm_polygon_eunis.raster_reference as raster_module
+from osm_polygon_eunis.domain import EunisResult, EunisTaxonomy
 from osm_polygon_eunis.geopackage_reference import GeoPackageReference
 from osm_polygon_eunis.raster_reference import (
     RasterLayer,
@@ -144,6 +145,29 @@ def _write_raster(path: Path, values: list[list[int]]) -> Path:
     return path
 
 
+def _write_grid_raster(
+    path: Path,
+    values: list[list[int]],
+    *,
+    nodata: int | None = 0,
+) -> Path:
+    array = np.asarray(values, dtype="uint8")
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        width=array.shape[1],
+        height=array.shape[0],
+        count=1,
+        dtype="uint8",
+        crs="EPSG:3035",
+        transform=from_origin(0, array.shape[0], 1, 1),
+        nodata=nodata,
+    ) as dataset:
+        dataset.write(array, 1)
+    return path
+
+
 def test_parse_layer_code() -> None:
     assert parse_layer_code("Prob_R11_100m.tif") == "R11"
 
@@ -161,8 +185,115 @@ def test_actual_cell_intersection_drives_percentage(tmp_path: Path) -> None:
 
     result = reference.overlap(box(1, 11, 19, 19))
 
-    assert result.code == "R11"
-    assert result.overlap_percentage == 50.0
+    assert result == EunisResult(None, None, 50.0, "EEA-test")
+
+
+def test_native_nodata_value_is_masked_before_habitat_threshold(tmp_path: Path) -> None:
+    raster = _write_grid_raster(
+        tmp_path / "Prob_R11_100m.tif",
+        [[255, 1]],
+        nodata=255,
+    )
+
+    with RasterReference((RasterLayer("R11", "steppe", raster, "EEA-test"),)) as reference:
+        result = reference.overlap(box(0, 0, 2, 1))
+
+    assert result == EunisResult(None, None, 50.0, "EEA-test")
+
+
+def test_declared_nodata_is_excluded_when_internal_mask_marks_it_valid(tmp_path: Path) -> None:
+    raster = _write_grid_raster(
+        tmp_path / "Prob_R11_100m.tif",
+        [[255, 1]],
+        nodata=255,
+    )
+    with rasterio.Env(GDAL_TIFF_INTERNAL_MASK=True), rasterio.open(raster, "r+") as dataset:
+        dataset.write_mask(np.array([[255, 255]], dtype="uint8"))
+
+    with RasterReference((RasterLayer("R11", "steppe", raster, "EEA-test"),)) as reference:
+        result = reference.overlap(box(0, 0, 2, 1))
+
+    assert result == EunisResult(None, None, 50.0, "EEA-test")
+
+
+def test_nonfinite_raster_values_are_not_habitat(tmp_path: Path) -> None:
+    raster = tmp_path / "Prob_R11_100m.tif"
+    with rasterio.open(
+        raster,
+        "w",
+        driver="GTiff",
+        width=4,
+        height=1,
+        count=1,
+        dtype="float32",
+        crs="EPSG:3035",
+        transform=from_origin(0, 1, 1, 1),
+        nodata=0.0,
+    ) as dataset:
+        dataset.write(np.array([[np.inf, 1.0, np.nan, 0.0]], dtype="float32"), 1)
+
+    with RasterReference((RasterLayer("R11", "steppe", raster, "EEA-test"),)) as reference:
+        result = reference.overlap(box(0, 0, 4, 1))
+
+    assert result == EunisResult(None, None, 25.0, "EEA-test")
+
+
+def test_raster_without_native_validity_mask_fails_closed(tmp_path: Path) -> None:
+    raster = _write_grid_raster(
+        tmp_path / "Prob_R11_100m.tif",
+        [[1, 0]],
+        nodata=None,
+    )
+
+    with pytest.raises(ValueError, match="no native validity mask"):
+        RasterReference((RasterLayer("R11", "steppe", raster, "EEA-test"),)).__enter__()
+
+
+def test_sibling_raster_supports_roll_up_as_pixel_union(tmp_path: Path) -> None:
+    first = _write_grid_raster(
+        tmp_path / "Prob_Q111_100m.tif",
+        [[1, 1, 1, 1, 0, 0, 0, 0, 0, 0]],
+    )
+    second = _write_grid_raster(
+        tmp_path / "Prob_Q112_100m.tif",
+        [[0, 0, 0, 1, 1, 1, 1, 1, 0, 0]],
+    )
+    taxonomy = EunisTaxonomy(
+        labels={"Q11": "parent", "Q111": "first child", "Q112": "second child"},
+        levels={"Q11": 2, "Q111": 3, "Q112": 3},
+        parents={"Q111": "Q11", "Q112": "Q11"},
+    )
+
+    with RasterReference(
+        (
+            RasterLayer("Q111", "first child", first, "EEA-test"),
+            RasterLayer("Q112", "second child", second, "EEA-test"),
+        ),
+        taxonomy=taxonomy,
+    ) as reference:
+        result = reference.overlap(box(0, 0, 10, 1))
+
+    assert result == EunisResult("Q11", "parent", 80.0, "EEA-test")
+
+
+def test_duplicate_raster_layers_for_one_code_union_before_threshold(tmp_path: Path) -> None:
+    first = _write_grid_raster(
+        tmp_path / "first.tif",
+        [[1, 1, 1, 1, 0, 0, 0, 0, 0, 0]],
+    )
+    second = _write_grid_raster(
+        tmp_path / "second.tif",
+        [[0, 0, 0, 0, 1, 1, 1, 1, 0, 0]],
+    )
+    layers = (
+        RasterLayer("Q111", "fine habitat", first, "EEA-test"),
+        RasterLayer("Q111", "fine habitat", second, "EEA-test"),
+    )
+
+    with RasterReference(layers) as reference:
+        result = reference.overlap(box(0, 0, 10, 1))
+
+    assert result == EunisResult("Q111", "fine habitat", 80.0, "EEA-test")
 
 
 def test_bbox_touch_without_actual_intersection_is_null(tmp_path: Path) -> None:
@@ -186,10 +317,10 @@ def test_largest_actual_overlap_wins_across_raster_layers(tmp_path: Path) -> Non
         ),
     )
 
-    result = reference.overlap(box(1, 11, 18, 19))
+    result = reference.overlap(box(1, 11, 11, 19))
 
     assert result.code == "R11"
-    assert result.overlap_percentage == pytest.approx(9 * 8 / (17 * 8) * 100)
+    assert result.overlap_percentage == pytest.approx(9 * 8 / (10 * 8) * 100)
 
 
 def test_window_rounds_outwards_to_cover_polygon_bounds(tmp_path: Path) -> None:
@@ -205,13 +336,13 @@ def test_window_rounds_outwards_to_cover_polygon_bounds(tmp_path: Path) -> None:
 
 def test_overlap_keeps_positive_cell_at_next_tile_boundary(tmp_path: Path) -> None:
     path = tmp_path / "Prob_R11_100m.tif"
-    values = np.zeros((4, 128), dtype="uint8")
-    values[0, 64] = 1
+    values = np.zeros((4, 256), dtype="uint8")
+    values[0, 128] = 1
     with rasterio.open(
         path,
         "w",
         driver="GTiff",
-        width=128,
+        width=256,
         height=4,
         count=1,
         dtype="uint8",
@@ -222,7 +353,7 @@ def test_overlap_keeps_positive_cell_at_next_tile_boundary(tmp_path: Path) -> No
         dataset.write(values, 1)
 
     reference = RasterReference((RasterLayer("R11", "steppe", path, "EEA-test"),))
-    result = reference.overlap(box(623.3, 33.3, 643.8, 39.0))
+    result = reference.overlap(box(1279.0, 33.3, 1288.0, 39.0))
     assert result.code == "R11"
     assert result.overlap_percentage is not None
     assert result.overlap_percentage > 0.0
@@ -300,8 +431,10 @@ def test_raster_tile_cache_evicts_oldest_tile_at_its_byte_budget(tmp_path: Path)
 
     with reference:
         datasets = reference._datasets
-        reference._tile_stack(datasets, 0, 0)
-        reference._tile_stack(datasets, 0, 1)
+        classes = reference._shared_grid_order(datasets)
+        assert classes is not None
+        reference._tile_stack(datasets, classes, 0, 0)
+        reference._tile_stack(datasets, classes, 0, 1)
 
         assert list(reference._stack_cache) == [(0, 1)]
         assert reference.tile_cache_bytes == tile_bytes
@@ -420,6 +553,106 @@ def test_geopackage_reference_uses_rtree_as_candidate_filter(tmp_path: Path) -> 
     assert result.overlap_percentage == 100.0
 
 
+def test_geopackage_keeps_unmapped_taxonomy_code_as_an_isolated_root(tmp_path: Path) -> None:
+    database = tmp_path / "saltmarshes.gpkg"
+    taxonomy = EunisTaxonomy(
+        labels={"MA223": "configured saltmarsh root"},
+        levels={},
+        parents={},
+    )
+    reference = GeoPackageReference(
+        database,
+        {"MA221": "Atlantic saltmarsh driftlines"},
+        source_version="EEA-test",
+        taxonomy=taxonomy,
+    )
+    _write_geopackage(database, (("MA221", box(0, 0, 10, 10)),))
+
+    with reference:
+        result = reference.overlap(box(0, 0, 10, 10))
+
+    assert result == EunisResult(
+        "MA221",
+        "Atlantic saltmarsh driftlines",
+        100.0,
+        "EEA-test",
+    )
+
+
+def test_geopackage_unions_disjoint_features_of_the_same_class(tmp_path: Path) -> None:
+    database = tmp_path / "habitats.gpkg"
+    reference = GeoPackageReference(
+        database,
+        {"Q111": "Fine habitat"},
+        source_version="EEA-test",
+    )
+    _write_geopackage(
+        database,
+        (
+            ("Q111", box(0, 0, 4.5, 10)),
+            ("Q111", box(5.5, 0, 9.5, 10)),
+        ),
+    )
+
+    with reference:
+        result = reference.overlap(box(0, 0, 10, 10))
+
+    assert result == EunisResult("Q111", "Fine habitat", 85.0, "EEA-test")
+
+
+def test_raster_reference_uses_source_label_for_unmapped_taxonomy_root(tmp_path: Path) -> None:
+    raster = _write_raster(tmp_path / "Prob_MA221_100m.tif", [[1]])
+    taxonomy = EunisTaxonomy(
+        labels={"MA223": "configured saltmarsh root"},
+        levels={},
+        parents={},
+    )
+    reference = RasterReference(
+        (RasterLayer("MA221", "Atlantic saltmarsh driftlines", raster, "EEA-test"),),
+        taxonomy=taxonomy,
+    )
+
+    with reference:
+        result = reference.overlap(box(1, 11, 9, 19))
+
+    assert result == EunisResult(
+        "MA221",
+        "Atlantic saltmarsh driftlines",
+        100.0,
+        "EEA-test",
+    )
+
+
+def test_raster_reference_keeps_multiple_qualifying_classes_ambiguous(tmp_path: Path) -> None:
+    parent = _write_raster(tmp_path / "Prob_Q11_100m.tif", [[1, 1], [1, 1]])
+    child = _write_raster(tmp_path / "Prob_Q111_100m.tif", [[1, 1], [1, 1]])
+    reference = RasterReference(
+        (
+            RasterLayer("Q11", "Parent habitat", parent, "EEA-test"),
+            RasterLayer("Q111", "Fine habitat", child, "EEA-test"),
+        )
+    )
+
+    result = reference.overlap(box(0, 0, 20, 20))
+
+    assert result == EunisResult(None, None, 100.0, "EEA-test")
+
+
+def test_geopackage_vector_dominant_below_threshold_is_withheld(tmp_path: Path) -> None:
+    database = tmp_path / "habitats.gpkg"
+    reference = GeoPackageReference(
+        database,
+        {"Q11": "Raised bog"},
+        source_version="EEA-test",
+    )
+    _write_geopackage(database, (("Q11", box(0, 0, 7, 10)),))
+
+    with reference:
+        result = reference.overlap(box(0, 0, 10, 10))
+
+    assert result == EunisResult(None, None, 70.0, "EEA-test")
+
+
 def test_geopackage_bbox_touch_is_not_an_intersection(tmp_path: Path) -> None:
     database = tmp_path / "habitats.gpkg"
     reference = GeoPackageReference(database, {"Q11": "Raised bog"}, source_version="EEA-test")
@@ -470,15 +703,19 @@ def test_geopackage_geometry_header_round_trip() -> None:
     assert GeoPackageReference.decode_geometry(blob).equals(geometry)
 
 
-def test_geopackage_tile_reference_uses_exact_positive_pixels(tmp_path: Path) -> None:
+def test_geopackage_tile_reference_fails_closed_before_reading_tile_values(
+    tmp_path: Path,
+) -> None:
     database = tmp_path / "tiles.gpkg"
     _write_tile_geopackage(database)
     reference = GeoPackageReference(database, {"R11": "steppe"}, source_version="EEA-test")
 
-    result = reference.overlap(box(1, 11, 19, 19))
+    with pytest.raises(tiles_module.RasterTileSourceError, match="contains raster tiles") as error:
+        reference.overlap(box(1, 11, 19, 19))
 
-    assert result.code == "R11"
-    assert result.overlap_percentage == 50.0
+    assert not isinstance(error.value, (ValueError, RuntimeError))
+    assert reference._connection is None
+    assert reference.intersection_errors == 0
 
 
 def test_geopackage_tile_lookup_returns_nothing_for_a_missing_tile() -> None:
@@ -579,6 +816,7 @@ def test_geopackage_empty_and_vector_metadata_errors(tmp_path: Path) -> None:
 
     connection = sqlite3.connect(":memory:")
     assert GeoPackageReference._geometry_rows(connection) == []
+    assert tiles_module.has_raster_tiles(connection) is False
     assert GeoPackageReference._tile_rows(connection) == []
     with pytest.raises(ValueError, match="geometry table is missing"):
         GeoPackageReference._vector_columns(connection, "missing")
@@ -600,12 +838,22 @@ def test_geopackage_tile_cache_and_metadata_guards(tmp_path: Path) -> None:
     database = tmp_path / "tiles.gpkg"
     _write_tile_geopackage(database)
     reference = GeoPackageReference(database, {"R11": "steppe"}, source_version="EEA-test")
-    with reference:
-        first = reference.overlap(box(1, 11, 19, 19))
-        second = reference.overlap(box(1, 11, 19, 19))
-        outside = reference.overlap(box(30, 30, 40, 40))
-    assert first.code == second.code == "R11"
-    assert outside.is_empty
+    with pytest.raises(tiles_module.RasterTileSourceError, match="contains raster tiles"):
+        reference.overlap(box(1, 11, 9, 19))
+    assert reference._connection is None
+    assert reference.intersection_errors == 0
+
+    # Exercise the legacy decoder as a low-level diagnostic only. The public
+    # reference entrypoint above rejects raster-tile packages as ground truth.
+    with sqlite3.connect(database) as connection:
+        reference._tile_layers = reference._discover_tile_layers(connection)
+        layer = reference._tile_layers[0]
+        expected = [(72.0, "R11", "steppe")]
+        assert reference._tile_areas(connection, box(1, 11, 19, 19)) == expected
+        assert reference._tile_areas(connection, box(1, 11, 19, 19)) == expected
+        assert reference._tile_areas(connection, box(30, 30, 40, 40)) == []
+        assert reference._tile_mask(connection, layer, 5, 5) is None
+        assert reference._tile_mask(connection, layer, 5, 5) is None
 
     with pytest.raises(ValueError, match="not EPSG"):
         tiles_module._validate_tile_header("R11", 4326, {"R11": "steppe"})
@@ -724,7 +972,7 @@ def test_raster_reference_rejects_layers_on_different_grids(tmp_path: Path) -> N
         reference.overlap(box(1, 11, 9, 19))
 
 
-def test_raster_reference_picks_the_lower_code_on_equal_overlap(tmp_path: Path) -> None:
+def test_raster_reference_keeps_equal_qualifying_classes_ambiguous(tmp_path: Path) -> None:
     layers = tuple(
         RasterLayer(
             code, code.lower(), _write_raster(tmp_path / f"Prob_{code}_100m.tif", [[1]]), "v"
@@ -733,7 +981,7 @@ def test_raster_reference_picks_the_lower_code_on_equal_overlap(tmp_path: Path) 
     )
 
     with RasterReference(layers) as reference:
-        assert reference.overlap(box(1, 1, 9, 9)).code == "R11"
+        assert reference.overlap(box(1, 1, 9, 9)) == EunisResult(None, None, 100.0, "v")
 
 
 def _tiny_raster(directory: Path, code: str) -> Path:

@@ -27,6 +27,7 @@ from osm_polygon_eunis.eea import (
     extract_share_token,
     parse_arcgis_labels,
     parse_classification_rows,
+    parse_classification_taxonomy_rows,
     parse_classification_workbook,
     parse_webdav_entries,
     raster_assets_from_entries,
@@ -91,6 +92,44 @@ def test_parse_classification_rows_accepts_multiple_sheet_headers() -> None:
     }
 
 
+def test_classification_taxonomy_uses_longest_proper_prefix_at_lower_level() -> None:
+    taxonomy = parse_classification_taxonomy_rows(
+        [
+            ["Level", "Code", "Name"],
+            [1, "A", "Root A"],
+            [4, "AB", "Higher-level number"],
+            [3, "ABC", "Child of A"],
+            [2, "X", "Root X"],
+            [2, "XY", "Same-level prefix"],
+            [3, "XYZ", "Child of X"],
+            ["Level", "Code 2018", "Name 2018"],
+            [1, "Q", "Q root"],
+            [2, "Q1", "Q child"],
+        ],
+        supplemental_labels={"MA223": "Saltmarsh"},
+    )
+
+    assert taxonomy.parents == {"AB": "A", "ABC": "A", "XYZ": "XY", "Q1": "Q"}
+    assert taxonomy.root_for("ABC") == "A"
+    assert taxonomy.root_for("MA223") == "MA223"
+    assert taxonomy.labels["MA223"] == "Saltmarsh"
+
+
+def test_classification_taxonomy_rejects_bad_levels_and_conflicting_rows() -> None:
+    with pytest.raises(ValueError, match="invalid Level"):
+        parse_classification_taxonomy_rows(
+            [["Level", "Code", "Name"], ["not-a-level", "Q1", "Child"]]
+        )
+    with pytest.raises(ValueError, match="conflicting name or Level"):
+        parse_classification_taxonomy_rows(
+            [
+                ["Level", "Code", "Name"],
+                ["1", "Q1", "Child"],
+                ["2", "Q1", "Different"],
+            ]
+        )
+
+
 def test_parse_classification_workbook_reads_shared_strings() -> None:
     workbook = io.BytesIO()
     with zipfile.ZipFile(workbook, "w") as archive:
@@ -110,6 +149,39 @@ def test_parse_classification_workbook_reads_shared_strings() -> None:
         )
 
     assert parse_classification_workbook(workbook.getvalue()) == {"R11": "Pannonian steppe"}
+
+
+def test_classification_taxonomy_headers_do_not_leak_between_sheets() -> None:
+    workbook = io.BytesIO()
+    with zipfile.ZipFile(workbook, "w") as archive:
+        archive.writestr(
+            "xl/sharedStrings.xml",
+            '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            "<si><t>Level</t></si><si><t>Code</t></si><si><t>Name</t></si>"
+            "<si><t>1</t></si><si><t>N</t></si><si><t>Coastal habitats</t></si>"
+            "<si><t>Name 2021</t></si><si><t>R11</t></si><si><t>Other note</t></si></sst>",
+        )
+        archive.writestr(
+            "xl/worksheets/sheet1.xml",
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            '<sheetData><row r="1"><c r="A1" t="s"><v>0</v></c>'
+            '<c r="B1" t="s"><v>1</v></c><c r="C1" t="s"><v>2</v></c></row>'
+            '<row r="2"><c r="A2" t="s"><v>3</v></c>'
+            '<c r="B2" t="s"><v>4</v></c><c r="C2" t="s"><v>5</v></c>'
+            "</row></sheetData></worksheet>",
+        )
+        archive.writestr(
+            "xl/worksheets/sheet2.xml",
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            '<sheetData><row r="1"><c r="A1" t="s"><v>6</v></c>'
+            '<c r="B1" t="s"><v>7</v></c><c r="C1" t="s"><v>8</v></c>'
+            "</row></sheetData></worksheet>",
+        )
+
+    taxonomy = eea._parse_classification_taxonomy_workbook(workbook.getvalue(), None)
+
+    assert taxonomy.labels == {"N": "Coastal habitats"}
+    assert taxonomy.levels == {"N": 1}
 
 
 def test_classification_entry_selection_decodes_webdav_path() -> None:
@@ -244,6 +316,23 @@ class _FakeHttpClient:
     def request(self, method, url, **kwargs):
         del method, kwargs
         return self.responses[url]
+
+
+def test_classification_workbook_content_validates_metadata_size() -> None:
+    url = "https://example.test/classification.xlsx"
+    content = b"workbook"
+    client = _FakeHttpClient({url: _FakeResponse(content=content)})
+    entry = WebDavEntry("/classification.xlsx", url, len(content), None, False)
+
+    assert eea._classification_workbook_content(client, entry) == content
+
+    missing_size = WebDavEntry("/classification.xlsx", url, None, None, False)
+    with pytest.raises(ValueError, match="no byte size"):
+        eea._classification_workbook_content(_FakeHttpClient({}), missing_size)
+
+    size_mismatch = WebDavEntry("/classification.xlsx", url, len(content) + 1, None, False)
+    with pytest.raises(ValueError, match="byte count differs"):
+        eea._classification_workbook_content(client, size_mismatch)
 
 
 def test_metadata_get_retries_timeout_and_server_error(monkeypatch) -> None:
@@ -406,6 +495,7 @@ def test_resolve_group_uses_fallback_labels_for_code_only_service() -> None:
     )
 
     assert group.raster_assets[0].name == "coastal"
+    assert group.claimed_codes == frozenset({"N11"})
 
 
 def test_resolve_classification_labels_reads_one_workbook() -> None:
@@ -823,14 +913,21 @@ def test_config_resolution_and_asset_download(monkeypatch, tmp_path: Path) -> No
         def __exit__(self, *_args) -> None:
             return None
 
-    resolved_group = object()
+    from osm_polygon_eunis.domain import EunisTaxonomy
+
+    resolved_group = eea.EeaGroup("one", "title", "folder", "service", {"R11": "steppe"}, (), None)
+    taxonomy = EunisTaxonomy({"R11": "steppe"}, {"R11": 1}, {})
     monkeypatch.setattr(eea.httpx, "Client", lambda **kwargs: FakeClient())
     monkeypatch.setattr(
         eea,
-        "resolve_classification_labels",
-        lambda client, record: {"R11": "steppe"},
+        "resolve_classification_taxonomy",
+        lambda client, record, *, supplemental_labels: taxonomy,
     )
-    monkeypatch.setattr(eea, "_resolve_groups", lambda client, current, labels: (resolved_group,))
+    monkeypatch.setattr(
+        eea,
+        "_resolve_groups",
+        lambda client, current, labels, current_taxonomy: (resolved_group,),
+    )
     assert eea.resolve_config(config_path) == (resolved_group,)
 
     class Response:

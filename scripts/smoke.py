@@ -59,8 +59,9 @@ def main() -> int:
         enrich_parquet_shard(source, output, reference=reference, batch_size=1)
         result = pq.read_table(output)
         codes = result["eunis_code"].to_pylist()
-        if codes != ["R11"]:
-            raise SystemExit(f"smoke: unexpected codes {codes!r}")
+        names = result["eunis_name"].to_pylist()
+        if codes != [None] or names != [None]:
+            raise SystemExit(f"smoke: unexpected labels {(codes, names)!r}")
         (percentage,) = result["eunis_overlap_percentage"].to_pylist()
         if not math.isclose(percentage, 4.822971, abs_tol=1e-4):
             raise SystemExit(f"smoke: unexpected overlap {percentage!r}")

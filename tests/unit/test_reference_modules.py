@@ -7,6 +7,8 @@ def test_reference_modules_stay_under_four_hundred_lines() -> None:
     module_names = (
         "reference_staging.py",
         "reference_cache.py",
+        "raster_aggregation.py",
+        "raster_validation.py",
         "raster_reference.py",
         "raster_geometry.py",
         "geopackage_reference.py",
