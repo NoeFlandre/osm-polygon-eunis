@@ -74,7 +74,7 @@ def worldcover_supports(
     if evidence.extraction_error is not None:
         attempt = SupportAttempt(
             (),
-            "worldcover_extraction_failed",
+            f"worldcover_extraction_failed:{evidence.extraction_error}",
             attempted_tile_ids=evidence.attempted_tiles,
             missing_tile_ids=evidence.missing_tiles,
         )
