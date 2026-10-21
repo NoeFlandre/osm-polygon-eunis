@@ -646,6 +646,9 @@ def test_bounded_export_preserves_adapter_rows_and_unmatched_text_link(tmp_path:
         pbf_sha256=_SHA_A,
     )
     inventory = (sample.pool_polygon.inventory,)
+    scan_report = b"complete one-row raw scan"
+    scan_report_path = tmp_path / "raw-scan.json"
+    scan_report_path.write_bytes(scan_report)
     document = SourceDocument(
         "unmatched-document",
         canonical_native_key({"document": "unmatched-document"}),
@@ -666,15 +669,15 @@ def test_bounded_export_preserves_adapter_rows_and_unmatched_text_link(tmp_path:
         source_snapshot=source,
         raw_inventory_evidence=build_raw_inventory_evidence(
             enumeration_rule="all polygons before text/relevance/evaluation joins",
-            scan_report_uri="https://artifacts.example/raw-scan.json",
-            scan_report=b"complete one-row raw scan",
+            scan_report_uri=scan_report_path.as_uri(),
+            scan_report=scan_report,
             expected_key_count=1,
             expected_keyset_sha256=native_keyset_sha256(row.native_key for row in inventory),
         ),
         reference_pin=_reference_pin(ReferenceSystem.WORLDCOVER),
         adapter_id="worldcover-source-wide-adapter",
         adapter_revision="adapter-commit-1",
-        builder_revision="26a6ce9bf934530e2bb9a5ca51eb5147d2adb9a7",
+        builder_revision="6ceddf3477c282b366bed4d502a1aaa68e8c194d",
         inventory=(),
         polygons=(),
         levels=WORLDCOVER_LEVELS,
