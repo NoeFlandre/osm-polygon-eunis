@@ -19,6 +19,7 @@ from .builder import (
 )
 from .models import (
     AmbiguityBasis,
+    AttemptStatus,
     BodyStatus,
     EligibilityStatus,
     EntityLink,
@@ -29,7 +30,9 @@ from .models import (
     LabelCandidate,
     LabelLevel,
     LabelOutcome,
+    LabelSupportEvidence,
     OutcomeStatus,
+    PolygonAttemptReceipt,
     PolygonInventoryRow,
     PolygonSnapshot,
     PoolBuildInput,
@@ -40,6 +43,8 @@ from .models import (
     RawInventoryEvidence,
     ReferencePin,
     ReferenceSystem,
+    RelevanceAssessment,
+    RelevanceStatus,
     SourceDocument,
     SourceSnapshot,
     SplitAssignment,
@@ -69,6 +74,10 @@ def validate_full_pool(bundle: PoolBundle) -> PoolValidationReport:
     inventory_by_id, polygon_by_id = _validate_inventory(bundle, issues)
     candidates_by_key = _validate_candidates(bundle, inventory_by_id, polygon_by_id, issues)
     _validate_outcomes(bundle, inventory_by_id, polygon_by_id, candidates_by_key, issues)
+    _validate_attempt_receipts(bundle.attempt_receipts, inventory_by_id, issues)
+    _validate_support_evidence(
+        bundle.support_evidence, bundle.label_candidates, inventory_by_id, issues
+    )
     _validate_documents(bundle, inventory_by_id, issues)
     _validate_entity_links(bundle.entity_links, issues)
     _validate_eligibility(bundle, inventory_by_id, issues)
@@ -620,6 +629,133 @@ def _validate_documents(
 ) -> None:
     docs = _validate_source_documents(bundle, issues)
     _validate_text_links(bundle, docs, inventory_by_id, issues)
+    _validate_relevance_assessments(bundle.relevance_assessments, docs, issues)
+
+
+def _validate_attempt_receipts(
+    receipts: tuple[PolygonAttemptReceipt, ...],
+    inventory_by_id: dict[str, PolygonInventoryRow],
+    issues: list[str],
+) -> None:
+    by_inventory: dict[str, PolygonAttemptReceipt] = {}
+    for receipt in receipts:
+        row_id = receipt.inventory_row_id
+        if row_id in by_inventory:
+            issues.append(f"duplicate polygon attempt receipt for {row_id}")
+        by_inventory[row_id] = receipt
+        if row_id not in inventory_by_id:
+            issues.append(f"polygon attempt receipt references unknown inventory {row_id}")
+        if not isinstance(receipt.status, AttemptStatus):
+            issues.append(f"polygon attempt receipt for {row_id} has an unknown status")
+        if not _present(receipt.reference_id_namespace):
+            issues.append(f"polygon attempt receipt for {row_id} needs a reference ID namespace")
+        _validate_reference_ids(
+            receipt.attempted_reference_ids,
+            f"attempted references for {row_id}",
+            issues,
+        )
+        _validate_reference_ids(
+            receipt.missing_reference_ids,
+            f"missing references for {row_id}",
+            issues,
+        )
+        if (
+            isinstance(receipt.status, AttemptStatus)
+            and receipt.status
+            in {
+                AttemptStatus.FAILED,
+                AttemptStatus.EXCLUDED,
+                AttemptStatus.PARTIAL,
+            }
+            and not _present(receipt.reason)
+        ):
+            issues.append(f"non-complete polygon attempt {row_id} needs a reason")
+        _validate_measurement_sidecar(
+            receipt.measurement_sidecar_uri,
+            receipt.measurement_sidecar_sha256,
+            receipt.measurement_record_count,
+            f"polygon attempt {row_id}",
+            issues,
+            required=False,
+        )
+    missing = set(inventory_by_id) - set(by_inventory)
+    extra = set(by_inventory) - set(inventory_by_id)
+    if missing or extra:
+        issues.append(
+            "polygon attempt receipt coverage mismatch: "
+            f"missing={sorted(missing)}, extra={sorted(extra)}"
+        )
+
+
+def _validate_support_evidence(
+    evidence_rows: tuple[LabelSupportEvidence, ...],
+    candidates: tuple[LabelCandidate, ...],
+    inventory_by_id: dict[str, PolygonInventoryRow],
+    issues: list[str],
+) -> None:
+    candidate_keys = {(row.inventory_row_id, row.level, row.code) for row in candidates}
+    evidence_by_key: dict[tuple[str, str, str], LabelSupportEvidence] = {}
+    for evidence in evidence_rows:
+        key = evidence.inventory_row_id, evidence.level, evidence.code
+        if key in evidence_by_key:
+            issues.append(f"duplicate label support evidence {key}")
+        evidence_by_key[key] = evidence
+        if evidence.inventory_row_id not in inventory_by_id:
+            issues.append(f"label support evidence {key} references unknown inventory")
+        if not _present(evidence.reference_id_namespace):
+            issues.append(f"label support evidence {key} needs a reference ID namespace")
+        _validate_reference_ids(evidence.reference_ids, f"label support evidence {key}", issues)
+        has_ids = bool(evidence.reference_ids)
+        has_sidecar = evidence.measurement_sidecar_uri is not None
+        if has_ids == has_sidecar:
+            issues.append(
+                f"label support evidence {key} needs either reference IDs or a measurement sidecar"
+            )
+        _validate_measurement_sidecar(
+            evidence.measurement_sidecar_uri,
+            evidence.measurement_sidecar_sha256,
+            evidence.measurement_record_count,
+            f"label support evidence {key}",
+            issues,
+            required=has_sidecar,
+        )
+    missing = candidate_keys - set(evidence_by_key)
+    extra = set(evidence_by_key) - candidate_keys
+    if missing or extra:
+        issues.append(
+            "candidate support evidence coverage mismatch: "
+            f"missing={sorted(missing)}, extra={sorted(extra)}"
+        )
+
+
+def _validate_reference_ids(ids: tuple[str, ...], name: str, issues: list[str]) -> None:
+    if any(not _present(value) for value in ids):
+        issues.append(f"{name} contains an empty ID")
+    if len(ids) != len(set(ids)):
+        issues.append(f"{name} repeats an ID")
+
+
+def _validate_measurement_sidecar(
+    uri: str | None,
+    digest: str | None,
+    record_count: int | None,
+    name: str,
+    issues: list[str],
+    *,
+    required: bool,
+) -> None:
+    present = (uri is not None, digest is not None, record_count is not None)
+    if required and not all(present):
+        issues.append(f"{name} sidecar requires URI, SHA-256, and record count")
+    if any(present) and not all(present):
+        issues.append(f"{name} sidecar fields must be supplied together")
+    if all(present):
+        if uri is None or not _valid_uri(uri):
+            issues.append(f"{name} sidecar URI is invalid")
+        if not _valid_sha256(digest):
+            issues.append(f"{name} sidecar SHA-256 is invalid")
+        if not isinstance(record_count, int) or isinstance(record_count, bool) or record_count <= 0:
+            issues.append(f"{name} sidecar record count must be positive")
 
 
 def _validate_source_documents(
@@ -641,6 +777,56 @@ def _validate_source_documents(
         if document.content_sha256 is not None and not _valid_sha256(document.content_sha256):
             issues.append(f"source document {document.document_id} has an invalid content hash")
     return docs
+
+
+def _validate_relevance_assessments(
+    assessments: tuple[RelevanceAssessment, ...],
+    documents: dict[str, SourceDocument],
+    issues: list[str],
+) -> None:
+    keys: set[tuple[str, str]] = set()
+    for assessment in assessments:
+        key = assessment.document_id, assessment.release_id
+        if key in keys:
+            issues.append(f"duplicate document relevance assessment {key}")
+        keys.add(key)
+        if assessment.document_id not in documents:
+            issues.append(
+                f"relevance assessment references unknown document {assessment.document_id}"
+            )
+        _validate_relevance_record(assessment, key, issues)
+
+
+def _validate_relevance_record(
+    assessment: RelevanceAssessment,
+    key: tuple[str, str],
+    issues: list[str],
+) -> None:
+    required = (
+        assessment.document_id,
+        assessment.release_id,
+        assessment.source_repository,
+        assessment.source_revision,
+        assessment.mapping_rule_version,
+        assessment.evidence,
+    )
+    if any(not _present(value) for value in required):
+        issues.append(f"relevance assessment {key} lacks provenance")
+    if not isinstance(assessment.status, RelevanceStatus):
+        issues.append(f"relevance assessment {key} has an unknown status")
+        return
+    if assessment.status in {RelevanceStatus.YES, RelevanceStatus.NO} and not _present(
+        assessment.raw_value
+    ):
+        issues.append(f"yes/no relevance assessment {key} must preserve its source value")
+    if assessment.status is RelevanceStatus.UNKNOWN and not _present(assessment.reason):
+        issues.append(f"unknown relevance assessment {key} needs a reason")
+    if assessment.status is RelevanceStatus.MISSING and (
+        assessment.raw_value is not None or not _present(assessment.reason)
+    ):
+        issues.append(f"missing relevance assessment {key} needs an absence reason only")
+    if assessment.evidence_sha256 is not None and not _valid_sha256(assessment.evidence_sha256):
+        issues.append(f"relevance assessment {key} has an invalid evidence SHA-256")
 
 
 def _validate_text_links(

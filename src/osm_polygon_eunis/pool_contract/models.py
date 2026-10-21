@@ -57,6 +57,24 @@ class OutcomeStatus(StrEnum):
     EXCLUDED = "excluded"
 
 
+class AttemptStatus(StrEnum):
+    """Whether reference measurements were completed for a source polygon."""
+
+    COMPLETED = "completed"
+    PARTIAL = "partial"
+    FAILED = "failed"
+    EXCLUDED = "excluded"
+
+
+class RelevanceStatus(StrEnum):
+    """Typed downstream text relevance, independent of pool labels and eval arms."""
+
+    YES = "yes"
+    NO = "no"
+    UNKNOWN = "unknown"
+    MISSING = "missing"
+
+
 class AmbiguityBasis(StrEnum):
     """Why a per-level label outcome remains unassigned as ambiguous."""
 
@@ -229,6 +247,51 @@ class LabelOutcome:
 
 
 @dataclass(frozen=True, slots=True)
+class PolygonAttemptReceipt:
+    """One reference-query receipt for each raw polygon inventory row."""
+
+    inventory_row_id: str
+    status: AttemptStatus
+    reference_id_namespace: str
+    attempted_reference_ids: tuple[str, ...] = ()
+    missing_reference_ids: tuple[str, ...] = ()
+    measurement_sidecar_uri: str | None = None
+    measurement_sidecar_sha256: str | None = None
+    measurement_record_count: int | None = None
+    reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LabelSupportEvidence:
+    """Inspectable provenance for one polygon, level, and class measurement."""
+
+    inventory_row_id: str
+    level: str
+    code: str
+    reference_id_namespace: str
+    reference_ids: tuple[str, ...] = ()
+    measurement_sidecar_uri: str | None = None
+    measurement_sidecar_sha256: str | None = None
+    measurement_record_count: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RelevanceAssessment:
+    """Versioned source relevance for one text document, including unknown states."""
+
+    document_id: str
+    release_id: str
+    status: RelevanceStatus
+    source_repository: str
+    source_revision: str
+    mapping_rule_version: str
+    evidence: str
+    raw_value: str | None = None
+    evidence_sha256: str | None = None
+    reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class SourceDocument:
     """Source-native document metadata without exposing a private text body."""
 
@@ -303,6 +366,9 @@ class PoolBuildInput:
     text_polygon_links: tuple[TextPolygonLink, ...] = ()
     entity_links: tuple[EntityLink, ...] = ()
     eligibility: tuple[PoolEligibility, ...] = ()
+    attempt_receipts: tuple[PolygonAttemptReceipt, ...] = ()
+    support_evidence: tuple[LabelSupportEvidence, ...] = ()
+    relevance_assessments: tuple[RelevanceAssessment, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -359,6 +425,9 @@ class PoolBundle:
     text_polygon_links: tuple[TextPolygonLink, ...]
     entity_links: tuple[EntityLink, ...]
     eligibility: tuple[PoolEligibility, ...]
+    attempt_receipts: tuple[PolygonAttemptReceipt, ...] = ()
+    support_evidence: tuple[LabelSupportEvidence, ...] = ()
+    relevance_assessments: tuple[RelevanceAssessment, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

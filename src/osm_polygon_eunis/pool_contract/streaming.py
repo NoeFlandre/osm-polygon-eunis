@@ -9,12 +9,14 @@ import os
 import shutil
 import sqlite3
 import tempfile
+from collections import defaultdict
 from collections.abc import Iterable, Iterator
 from contextlib import suppress
 from dataclasses import dataclass, fields, is_dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Protocol, TypeGuard, cast
+from urllib.parse import quote, unquote, urlparse
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -33,14 +35,18 @@ from .export import (
 from .models import (
     AmbiguityBasis,
     AssignmentKind,
+    AttemptStatus,
     BodyStatus,
     EligibilityStatus,
     EntityLink,
+    GateReport,
     GeometryStatus,
     LabelCandidate,
     LabelLevel,
     LabelOutcome,
+    LabelSupportEvidence,
     OutcomeStatus,
+    PolygonAttemptReceipt,
     PolygonInventoryRow,
     PolygonSnapshot,
     PoolBuildInput,
@@ -50,10 +56,14 @@ from .models import (
     PoolValidationReport,
     RawInventoryEvidence,
     ReferencePin,
+    ReferenceSystem,
+    RelevanceAssessment,
+    RelevanceStatus,
     SourceDocument,
     SourceSnapshot,
     TextLinkStatus,
     TextPolygonLink,
+    TextSource,
 )
 from .validation import _valid_uri, validate_full_pool
 
@@ -69,8 +79,11 @@ _KEY_SHA_EMPTY = hashlib.sha256(b"").hexdigest()
 _SQLITE_CACHE_KIB = 4_096
 _SHA256_LENGTH = 64
 _KEY_COMPONENT_WIDTH = 2
+_POOL_ID_PARTS = 3
+_FIRST_SHARD_INDEX = 0
 _MIN_AMBIGUOUS_COUNT = 2
 _MAX_DIAGNOSTICS = 100
+_POOL_THRESHOLD = 0.8
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,7 +98,7 @@ class PoolStreamSpec:
     adapter_revision: str
     builder_revision: str
     levels: tuple[LabelLevel, ...]
-    contract_version: str = "1.0.0"
+    contract_version: str = "1.1.0"
     pool_version: str = "1.0.0"
 
     @classmethod
@@ -93,7 +106,7 @@ class PoolStreamSpec:
         cls,
         source: PoolBuildInput,
         *,
-        contract_version: str = "1.0.0",
+        contract_version: str = "1.1.0",
         pool_version: str = "1.0.0",
     ) -> PoolStreamSpec:
         """Create stream metadata from an existing adapter build input."""
@@ -125,6 +138,9 @@ class PoolBatch:
     text_polygon_links: tuple[TextPolygonLink, ...] = ()
     entity_links: tuple[EntityLink, ...] = ()
     eligibility: tuple[PoolEligibility, ...] = ()
+    attempt_receipts: tuple[PolygonAttemptReceipt, ...] = ()
+    support_evidence: tuple[LabelSupportEvidence, ...] = ()
+    relevance_assessments: tuple[RelevanceAssessment, ...] = ()
 
     @property
     def row_count(self) -> int:
@@ -141,6 +157,9 @@ class PoolBatch:
                 self.text_polygon_links,
                 self.entity_links,
                 self.eligibility,
+                self.attempt_receipts,
+                self.support_evidence,
+                self.relevance_assessments,
             )
         )
         link_candidates = sum(
@@ -215,6 +234,22 @@ class FileArtifactSink(Protocol):
         """Atomically persist a file and permit only identical retries."""
 
 
+class PoolArtifactReader(Protocol):
+    """Read small manifests and stream hashes/lines for exported pool artifacts."""
+
+    def read_bytes(self, uri: str) -> bytes:
+        """Read a small completion manifest from its URI."""
+
+    def iter_lines(self, uri: str) -> Iterable[bytes]:
+        """Stream lines from a JSONL manifest or sidecar without materializing it."""
+
+    def sha256(self, uri: str) -> str:
+        """Return the content SHA-256, streaming large artifacts when needed."""
+
+    def resolve_uri(self, manifest_uri: str, relative_path: str) -> str:
+        """Resolve a sink-relative artifact path beside the given pool manifest."""
+
+
 @dataclass(frozen=True, slots=True)
 class FilesystemStreamingSink:
     """Atomic local sink for pool shards, manifests, and retry tests."""
@@ -260,6 +295,623 @@ class FilesystemStreamingSink:
             return target.resolve().as_uri()
         finally:
             temporary.unlink(missing_ok=True)
+
+
+@dataclass(frozen=True, slots=True)
+class FilesystemArtifactReader:
+    """Filesystem reader used by streamed gate verification and tests."""
+
+    def read_bytes(self, uri: str) -> bytes:
+        """Read a small manifest from a local file URI."""
+
+        return self._path(uri).read_bytes()
+
+    def iter_lines(self, uri: str) -> Iterable[bytes]:
+        """Yield one line at a time from a local JSONL artifact."""
+
+        with self._path(uri).open("rb") as source:
+            yield from source
+
+    def sha256(self, uri: str) -> str:
+        """Hash a local artifact in bounded chunks."""
+
+        return _sha256_file(self._path(uri))
+
+    def resolve_uri(self, manifest_uri: str, relative_path: str) -> str:
+        """Resolve a pool-relative path under the local artifact root."""
+
+        parsed = urlparse(manifest_uri)
+        if parsed.scheme != "file" or parsed.netloc not in ("", "localhost"):
+            raise ValueError("filesystem artifact reader only accepts file URIs")
+        path = unquote(parsed.path)
+        marker = "/pools/"
+        if marker not in path:
+            raise ValueError("pool manifest URI does not contain the artifact root")
+        root = path.split(marker, 1)[0]
+        artifact_path = f"{root}/{relative_path}"
+        return parsed._replace(path=quote(artifact_path, safe="/")).geturl()
+
+    @staticmethod
+    def _path(uri: str) -> Path:
+        parsed = urlparse(uri)
+        if parsed.scheme != "file" or parsed.netloc not in ("", "localhost"):
+            raise ValueError("filesystem artifact reader only accepts file URIs")
+        return Path(unquote(parsed.path))
+
+
+def validate_nine_streamed_pool_gate(
+    receipts: Iterable[StreamingExportReceipt],
+    reader: PoolArtifactReader,
+) -> GateReport:
+    """Verify nine streamed completion manifests and their immutable artifacts."""
+
+    expected = {
+        PoolKey(text_source, reference_system)
+        for text_source in TextSource
+        for reference_system in ReferenceSystem
+    }
+    seen: dict[PoolKey, int] = defaultdict(int)
+    invalid: list[tuple[str, tuple[str, ...]]] = []
+    versions: set[tuple[str, str]] = set()
+    for receipt_count, receipt in enumerate(receipts):
+        if receipt_count == len(expected):
+            invalid.append(("nine-pool-set", ("the streamed gate accepts exactly nine receipts",)))
+            break
+        issues: list[str] = []
+        pool_name = receipt.pool_id or "unknown-streamed-pool"
+        pool_key: PoolKey | None = None
+        try:
+            manifest, pool_key, actual_manifest_sha = _read_streamed_manifest(receipt, reader)
+            if actual_manifest_sha != receipt.manifest_sha256:
+                issues.append("completion manifest SHA-256 does not match receipt")
+            pool_name = pool_key.name
+            seen[pool_key] += 1
+            version = (manifest.get("contract_version"), manifest.get("pool_version"))
+            if all(_present(value) for value in version):
+                versions.add(cast(tuple[str, str], version))
+            issues.extend(_stream_manifest_issues(receipt, manifest, reader, pool_key))
+        except (OSError, TypeError, ValueError, KeyError, AttributeError) as error:
+            issues.append(
+                f"streamed receipt could not be verified: {type(error).__name__}: {error}"
+            )
+            parsed_key = _pool_key_from_id(receipt.pool_id)
+            if parsed_key is not None and pool_key is None:
+                pool_key = parsed_key
+                pool_name = pool_key.name
+                seen[pool_key] += 1
+        if issues:
+            invalid.append((pool_name, tuple(issues)))
+
+    missing = tuple(sorted(key.name for key in expected - seen.keys()))
+    duplicates = tuple(sorted(key.name for key, count in seen.items() if count > 1))
+    if len(versions) > 1:
+        invalid.append(
+            ("nine-pool-version-set", ("pool versions must match across all nine pools",))
+        )
+    return GateReport(missing, duplicates, tuple(invalid))
+
+
+def _read_streamed_manifest(
+    receipt: StreamingExportReceipt,
+    reader: PoolArtifactReader,
+) -> tuple[dict[str, object], PoolKey, str]:
+    manifest_bytes = reader.read_bytes(receipt.manifest_uri)
+    actual_sha = hashlib.sha256(manifest_bytes).hexdigest()
+    manifest = json.loads(manifest_bytes)
+    if not isinstance(manifest, dict):
+        raise TypeError("completion manifest must be a JSON object")
+    pool_data = manifest.get("pool_key")
+    if not isinstance(pool_data, dict):
+        raise TypeError("completion manifest has no pool key")
+    pool_key = PoolKey(
+        TextSource(pool_data["text_source"]),
+        ReferenceSystem(pool_data["reference_system"]),
+    )
+    return manifest, pool_key, actual_sha
+
+
+def _pool_key_from_id(pool_id: str) -> PoolKey | None:
+    parts = pool_id.split("/")
+    if len(parts) != _POOL_ID_PARTS:
+        return None
+    text_source, reference_system = parts[1].split("-", 1)
+    try:
+        return PoolKey(TextSource(text_source), ReferenceSystem(reference_system))
+    except (ValueError, IndexError):
+        return None
+
+
+def _stream_manifest_issues(
+    receipt: StreamingExportReceipt,
+    manifest: dict[str, object],
+    reader: PoolArtifactReader,
+    pool_key: PoolKey,
+) -> list[str]:
+    issues: list[str] = []
+    source = _manifest_mapping(manifest, "source_snapshot", issues)
+    raw_evidence = _manifest_mapping(manifest, "raw_inventory_evidence", issues)
+    reference = _manifest_mapping(manifest, "reference_pin", issues)
+    implementation = _manifest_mapping(manifest, "implementation_pins", issues)
+    issues.extend(_manifest_identity_issues(receipt, manifest, pool_key, source, implementation))
+    issues.extend(_manifest_reference_issues(pool_key, reference))
+    issues.extend(_manifest_inventory_issues(receipt, manifest, raw_evidence, reader))
+    total_keys = manifest.get("total_source_keys")
+    source_id = source.get("snapshot_id")
+    issues.extend(_stream_accounting_issues(manifest, receipt, total_keys))
+    issues.extend(_stream_artifact_issues(manifest, receipt, reader, pool_key, source_id))
+    return issues
+
+
+def _manifest_mapping(
+    manifest: dict[str, object],
+    field_name: str,
+    issues: list[str],
+) -> dict[str, object]:
+    value = manifest.get(field_name)
+    if isinstance(value, dict):
+        return value
+    issues.append(f"completion manifest is missing {field_name}")
+    return {}
+
+
+def _manifest_identity_issues(
+    receipt: StreamingExportReceipt,
+    manifest: dict[str, object],
+    pool_key: PoolKey,
+    source: dict[str, object],
+    implementation: dict[str, object],
+) -> list[str]:
+    issues: list[str] = []
+    contract_version = manifest.get("contract_version")
+    pool_version = manifest.get("pool_version")
+    source_id = source.get("snapshot_id")
+    if manifest.get("contract") != "noeflandre.polygon-label-pool":
+        issues.append("completion manifest contract identifier is invalid")
+    if manifest.get("pool_complete") is not True:
+        issues.append("completion manifest does not mark the pool complete")
+    if not all(_present(value) for value in (contract_version, pool_version)):
+        issues.append("completion manifest contract and pool versions are missing")
+    expected_pool_id = f"{pool_version}/{pool_key.name}/{source_id}"
+    if manifest.get("pool_id") != expected_pool_id or receipt.pool_id != expected_pool_id:
+        issues.append("pool identity differs between receipt and completion manifest")
+    if manifest.get("storage_layout_version") != _STORAGE_LAYOUT_VERSION:
+        issues.append("streaming storage layout version is unsupported")
+    expected_suffix = (
+        f"/pools/{contract_version}/{pool_key.text_source.value}/"
+        f"{pool_key.reference_system.value}/{source_id}/{pool_version}/layouts/"
+        f"{_STORAGE_LAYOUT_VERSION}/manifest.json"
+    )
+    if not unquote(urlparse(receipt.manifest_uri).path).endswith(expected_suffix):
+        issues.append("completion manifest URI does not match its pinned pool identity")
+    required = (
+        source_id,
+        source.get("repository"),
+        source.get("revision"),
+        source.get("pbf_uri"),
+        implementation.get("adapter_id"),
+        implementation.get("adapter_revision"),
+        implementation.get("builder_revision"),
+    )
+    if any(not _present(value) for value in required):
+        issues.append("completion manifest has incomplete source or code provenance")
+    pbf_uri = source.get("pbf_uri")
+    if (
+        not isinstance(pbf_uri, str)
+        or not _valid_uri(pbf_uri)
+        or not _valid_sha256(source.get("pbf_sha256"))
+    ):
+        issues.append("completion manifest has an invalid PBF artifact pin")
+    return issues
+
+
+def _manifest_reference_issues(
+    pool_key: PoolKey,
+    reference: dict[str, object],
+) -> list[str]:
+    required = (
+        reference.get("release_id"),
+        reference.get("source_repository"),
+        reference.get("source_revision"),
+        reference.get("taxonomy_id"),
+        reference.get("taxonomy_revision"),
+        reference.get("support_unit"),
+    )
+    if any(not _present(value) for value in required):
+        return ["completion manifest has incomplete reference provenance"]
+    expected_semantics = {
+        ReferenceSystem.WORLDCOVER: "mapped_cover",
+        ReferenceSystem.LUCAS: "surveyed_footprint",
+        ReferenceSystem.EUNIS: "modeled_habitat_support",
+    }[pool_key.reference_system]
+    if (
+        reference.get("threshold") != _POOL_THRESHOLD
+        or reference.get("support_union_policy") != "union_by_class"
+        or reference.get("support_semantics") != expected_semantics
+    ):
+        return ["completion manifest reference rule does not match the shared contract"]
+    return []
+
+
+def _manifest_inventory_issues(
+    receipt: StreamingExportReceipt,
+    manifest: dict[str, object],
+    raw_evidence: dict[str, object],
+    reader: PoolArtifactReader,
+) -> list[str]:
+    issues: list[str] = []
+    total_keys = manifest.get("total_source_keys")
+    inventory_receipt = manifest.get("source_inventory_receipt")
+    expected_count = raw_evidence.get("expected_key_count")
+    expected_keyset = raw_evidence.get("expected_keyset_sha256")
+    observed_count = (
+        inventory_receipt.get("processed_key_count")
+        if isinstance(inventory_receipt, dict)
+        else None
+    )
+    observed_keyset = (
+        inventory_receipt.get("observed_keyset_sha256")
+        if isinstance(inventory_receipt, dict)
+        else None
+    )
+    valid_total = (
+        isinstance(total_keys, int)
+        and not isinstance(total_keys, bool)
+        and total_keys >= 0
+        and isinstance(expected_count, int)
+        and not isinstance(expected_count, bool)
+        and expected_count >= 0
+        and isinstance(observed_count, int)
+        and not isinstance(observed_count, bool)
+        and observed_count >= 0
+        and total_keys == expected_count
+        and total_keys == observed_count
+    )
+    valid_digest = _valid_sha256(expected_keyset) and expected_keyset == observed_keyset
+    if (
+        not valid_total
+        or not valid_digest
+        or not isinstance(inventory_receipt, dict)
+        or inventory_receipt.get("matches_source_evidence") is not True
+    ):
+        issues.append("raw inventory receipt is incomplete or differs from source evidence")
+    if (
+        not _is_nonnegative_count(receipt.total_source_keys)
+        or not _is_nonnegative_count(receipt.shard_count)
+        or receipt.total_source_keys != total_keys
+        or receipt.inventory_keyset_sha256 != observed_keyset
+    ):
+        issues.append("raw inventory receipt differs between object and manifest")
+    if not all(
+        _present(value)
+        for value in (
+            raw_evidence.get("enumeration_rule"),
+            raw_evidence.get("scan_report_uri"),
+        )
+    ) or not _valid_sha256(raw_evidence.get("scan_report_sha256")):
+        issues.append("raw inventory scan-report pin is incomplete")
+        return issues
+    try:
+        actual_scan_hash = reader.sha256(str(raw_evidence["scan_report_uri"]))
+    except (OSError, TypeError, ValueError) as error:
+        issues.append(f"raw inventory scan report could not be verified: {type(error).__name__}")
+    else:
+        if actual_scan_hash != raw_evidence.get("scan_report_sha256"):
+            issues.append("raw inventory scan report does not match its pinned hash")
+    return issues
+
+
+def _stream_accounting_issues(
+    manifest: dict[str, object],
+    receipt: StreamingExportReceipt,
+    total_keys: object,
+) -> list[str]:
+    issues: list[str] = []
+    levels = manifest.get("levels")
+    accounting = manifest.get("level_accounting")
+    if not isinstance(levels, list) or not isinstance(accounting, list):
+        return ["completion manifest has no level accounting"]
+    level_names = [row.get("name") for row in levels if isinstance(row, dict)]
+    accounting_names = [row.get("level") for row in accounting if isinstance(row, dict)]
+    if (
+        not level_names
+        or len(level_names) != len(set(level_names))
+        or len(accounting_names) != len(set(accounting_names))
+        or set(level_names) != set(accounting_names)
+    ):
+        issues.append("completion manifest level declarations and accounting differ")
+    declared_levels = {row.get("name"): row for row in levels if isinstance(row, dict)}
+    for item in accounting:
+        issues.extend(
+            _stream_level_accounting_row_issues(
+                item, total_keys, cast(dict[object, object], declared_levels)
+            )
+        )
+    receipt_levels = tuple(
+        {
+            "level": row.level,
+            "supported": row.supported,
+            "unsupported_reason": row.unsupported_reason,
+            "total_source_keys": row.total_source_keys,
+            "processed_decisions": row.processed_decisions,
+            "qualifying_candidates": row.qualifying_candidates,
+            "assigned": row.assigned,
+            "ambiguous": row.ambiguous,
+            "unassigned": row.unassigned,
+            "excluded": row.excluded,
+            "exclusion_reason_group_count": row.exclusion_reason_group_count,
+        }
+        for row in receipt.level_accounting
+    )
+    if tuple(accounting) != receipt_levels:
+        issues.append("per-level accounting differs between receipt and completion manifest")
+    return issues
+
+
+def _stream_level_accounting_row_issues(
+    item: object,
+    total_keys: object,
+    declared_levels: dict[object, object],
+) -> list[str]:
+    if not isinstance(item, dict):
+        return ["completion manifest has invalid level accounting"]
+    issues: list[str] = []
+    name = item.get("level")
+    supported = item.get("supported")
+    if not isinstance(supported, bool):
+        return [f"level {name} has no Boolean supported state"]
+    declared = declared_levels.get(name)
+    if (
+        not isinstance(declared, dict)
+        or declared.get("supported") is not supported
+        or declared.get("unsupported_reason") != item.get("unsupported_reason")
+    ):
+        issues.append(f"level {name} accounting differs from its level declaration")
+    counts = [
+        item.get("total_source_keys"),
+        item.get("processed_decisions"),
+        item.get("qualifying_candidates"),
+        item.get("assigned"),
+        item.get("ambiguous"),
+        item.get("unassigned"),
+        item.get("excluded"),
+        item.get("exclusion_reason_group_count"),
+    ]
+    if any(not _is_nonnegative_count(value) for value in counts):
+        issues.append(f"level {name} has invalid accounting counts")
+        return issues
+    (
+        total,
+        processed,
+        qualifying,
+        assigned,
+        ambiguous,
+        unassigned,
+        excluded,
+        _,
+    ) = cast(tuple[int, int, int, int, int, int, int, int], tuple(counts))
+    if total != total_keys or processed != (total if supported else 0):
+        issues.append(f"level {name} does not account for every source key")
+    if assigned + ambiguous + unassigned + excluded != processed:
+        issues.append(f"level {name} outcome counts do not match processed decisions")
+    if qualifying < assigned:
+        issues.append(f"level {name} qualifying candidate count is inconsistent")
+    if not supported and not _present(item.get("unsupported_reason")):
+        issues.append(f"unsupported level {name} needs a reason")
+    return issues
+
+
+def _stream_artifact_issues(
+    manifest: dict[str, object],
+    receipt: StreamingExportReceipt,
+    reader: PoolArtifactReader,
+    pool_key: PoolKey,
+    source_id: object,
+) -> list[str]:
+    storage = manifest.get("storage_layout")
+    if not isinstance(storage, dict):
+        return ["completion manifest has no streaming storage receipt"]
+    shard_manifest = storage.get("shard_manifest")
+    exclusions = storage.get("exclusions")
+    tables = storage.get("tables")
+    if not all(isinstance(value, dict) for value in (shard_manifest, exclusions, tables)):
+        return ["completion manifest has incomplete storage metadata"]
+    shard_manifest = cast(dict[str, object], shard_manifest)
+    exclusions = cast(dict[str, object], exclusions)
+    tables = cast(dict[str, object], tables)
+    expected_root = _stream_layout_root(manifest, pool_key, source_id)
+    issues = _shard_manifest_reference_issues(shard_manifest, receipt, reader, expected_root)
+    issues.extend(_exclusion_sidecar_issues(exclusions, receipt, reader, expected_root))
+    shard_counts, row_counts, inventory_issues = _verify_shard_inventory(
+        receipt, reader, expected_root
+    )
+    issues.extend(inventory_issues)
+    issues.extend(
+        _table_inventory_issues(
+            tables,
+            shard_counts,
+            row_counts,
+            manifest,
+            receipt,
+            shard_manifest,
+        )
+    )
+    return issues
+
+
+def _stream_layout_root(
+    manifest: dict[str, object],
+    pool_key: PoolKey,
+    source_id: object,
+) -> str:
+    return (
+        f"pools/{manifest.get('contract_version')}/{pool_key.text_source.value}/"
+        f"{pool_key.reference_system.value}/{source_id}/{manifest.get('pool_version')}/"
+        f"layouts/{_STORAGE_LAYOUT_VERSION}"
+    )
+
+
+def _shard_manifest_reference_issues(
+    shard_manifest: dict[str, object],
+    receipt: StreamingExportReceipt,
+    reader: PoolArtifactReader,
+    expected_root: str,
+) -> list[str]:
+    issues: list[str] = []
+    if shard_manifest.get("sha256") != receipt.shard_manifest_sha256:
+        issues.append("shard manifest differs between receipt and completion manifest")
+    if shard_manifest.get("path") != f"{expected_root}/shards.jsonl":
+        issues.append("shard manifest path differs from pool layout")
+    try:
+        expected_shard_manifest_uri = reader.resolve_uri(
+            receipt.manifest_uri, str(shard_manifest.get("path"))
+        )
+        if expected_shard_manifest_uri != receipt.shard_manifest_uri:
+            issues.append("shard manifest URI differs from its pool-relative path")
+        if reader.sha256(receipt.shard_manifest_uri) != receipt.shard_manifest_sha256:
+            issues.append("shard manifest content hash does not match receipt")
+    except (OSError, TypeError, ValueError) as error:
+        issues.append(f"shard manifest could not be verified: {type(error).__name__}")
+    return issues
+
+
+def _exclusion_sidecar_issues(
+    exclusions: dict[str, object],
+    receipt: StreamingExportReceipt,
+    reader: PoolArtifactReader,
+    expected_root: str,
+) -> list[str]:
+    issues: list[str] = []
+    try:
+        exclusion_uri = reader.resolve_uri(receipt.manifest_uri, str(exclusions.get("path")))
+        if reader.sha256(exclusion_uri) != exclusions.get("sha256"):
+            issues.append("exclusion sidecar content hash does not match manifest")
+        if exclusions.get("path") != f"{expected_root}/exclusions.jsonl":
+            issues.append("exclusion sidecar path differs from pool layout")
+        exclusion_lines = sum(1 for _ in reader.iter_lines(exclusion_uri))
+        if exclusion_lines != exclusions.get("group_count"):
+            issues.append("exclusion sidecar record count differs from manifest")
+    except (OSError, TypeError, ValueError) as error:
+        issues.append(f"exclusion sidecar could not be verified: {type(error).__name__}")
+    return issues
+
+
+def _verify_shard_inventory(
+    receipt: StreamingExportReceipt,
+    reader: PoolArtifactReader,
+    expected_root: str,
+) -> tuple[dict[str, int], dict[str, int], list[str]]:
+    issues: list[str] = []
+    shard_counts = dict.fromkeys(_TABLE_FIELDS, 0)
+    row_counts = dict.fromkeys(_TABLE_FIELDS, 0)
+    table_order = {name: index for index, name in enumerate(sorted(_TABLE_FIELDS))}
+    previous_rank = -1
+    previous_index = -1
+    try:
+        for line in reader.iter_lines(receipt.shard_manifest_uri):
+            table, index, row_count = _verify_shard_entry(
+                line, receipt, reader, expected_root, table_order
+            )
+            rank = table_order[table]
+            _validate_shard_order(rank, index, previous_rank, previous_index)
+            previous_rank, previous_index = rank, index
+            shard_counts[table] += 1
+            row_counts[table] += row_count
+    except (OSError, TypeError, ValueError) as error:
+        issues.append(f"shard inventory could not be verified: {type(error).__name__}: {error}")
+    return shard_counts, row_counts, issues
+
+
+def _validate_shard_order(rank: int, index: int, previous_rank: int, previous_index: int) -> None:
+    if rank < previous_rank or (rank == previous_rank and index != previous_index + 1):
+        raise ValueError("shard manifest ordering or numbering is not deterministic")
+    if rank > previous_rank and index != _FIRST_SHARD_INDEX:
+        raise ValueError("first shard for a table must have index zero")
+
+
+def _verify_shard_entry(
+    line: bytes,
+    receipt: StreamingExportReceipt,
+    reader: PoolArtifactReader,
+    expected_root: str,
+    table_order: dict[str, int],
+) -> tuple[str, int, int]:
+    record = json.loads(line)
+    if not isinstance(record, dict):
+        raise TypeError("shard manifest row is not an object")
+    table = record.get("table")
+    if not isinstance(table, str) or table not in table_order:
+        raise ValueError("shard manifest contains an unknown table")
+    index = record.get("shard_index")
+    if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+        raise ValueError("shard index must be a non-negative integer")
+    relative_path = f"{expected_root}/shards/{table}/part-{index:08d}.parquet"
+    digest = record.get("sha256")
+    if record.get("path") != relative_path or not _valid_sha256(digest):
+        raise ValueError("shard path or hash is invalid")
+    row_count = record.get("row_count")
+    if not isinstance(row_count, int) or isinstance(row_count, bool) or row_count <= 0:
+        raise ValueError("shard row count must be positive")
+    uri = reader.resolve_uri(receipt.manifest_uri, relative_path)
+    if reader.sha256(uri) != digest:
+        raise ValueError(f"shard content hash mismatch at {relative_path}")
+    return table, index, row_count
+
+
+def _table_inventory_issues(
+    tables: dict[str, object],
+    shard_counts: dict[str, int],
+    row_counts: dict[str, int],
+    manifest: dict[str, object],
+    receipt: StreamingExportReceipt,
+    shard_manifest: dict[str, object],
+) -> list[str]:
+    issues: list[str] = []
+    total_shards = sum(shard_counts.values())
+    manifest_shard_count = shard_manifest.get("shard_count")
+    if (
+        not _is_nonnegative_count(manifest_shard_count)
+        or total_shards != receipt.shard_count
+        or total_shards != manifest_shard_count
+    ):
+        issues.append("shard count differs between receipt and shard inventory")
+    required_tables = set(_TABLE_FIELDS)
+    if set(tables) != required_tables:
+        issues.append("completion manifest table inventory differs from contract schema")
+    for table in _TABLE_FIELDS:
+        info = tables.get(table)
+        if not isinstance(info, dict):
+            issues.append(f"completion manifest has no count for table {table}")
+            continue
+        manifest_rows = info.get("row_count")
+        manifest_shards = info.get("shard_count")
+        if not _is_nonnegative_count(manifest_rows) or not _is_nonnegative_count(manifest_shards):
+            issues.append(f"completion manifest has invalid counts for table {table}")
+            continue
+        if manifest_rows != row_counts[table] or manifest_shards != shard_counts[table]:
+            issues.append(f"shard inventory differs from table counts for {table}")
+    inventory_table = tables.get("polygon_inventory")
+    if isinstance(inventory_table, dict) and inventory_table.get("row_count") != manifest.get(
+        "total_source_keys"
+    ):
+        issues.append("exported polygon inventory count differs from completion manifest")
+    attempt_table = tables.get("polygon_attempts")
+    if isinstance(attempt_table, dict) and attempt_table.get("row_count") != manifest.get(
+        "total_source_keys"
+    ):
+        issues.append("exported attempt receipt count differs from raw inventory")
+    support_evidence_table = tables.get("label_support_evidence")
+    candidates_table = tables.get("label_candidates")
+    if (
+        isinstance(support_evidence_table, dict)
+        and isinstance(candidates_table, dict)
+        and support_evidence_table.get("row_count") != candidates_table.get("row_count")
+    ):
+        issues.append("support evidence rows differ from candidate measurement rows")
+    return issues
+
+
+def _is_nonnegative_count(value: object) -> TypeGuard[int]:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 class PoolStreamError(ValueError):
@@ -317,7 +969,10 @@ _TABLE_REGISTRY = tuple(
         ("polygon_snapshots", ("polygon_snapshot_id",)),
         ("label_candidates", ("inventory_row_id", "level", "code")),
         ("label_outcomes", ("inventory_row_id", "level")),
+        ("polygon_attempts", ("inventory_row_id",)),
+        ("label_support_evidence", ("inventory_row_id", "level", "code")),
         ("source_documents", ("document_id",)),
+        ("document_relevance", ("document_id", "release_id")),
         ("text_polygon_links", ("document_id", "native_link_key_json")),
         (
             "entity_links",
@@ -424,7 +1079,10 @@ def _estimated_batch_bytes(batch: PoolBatch) -> int:
             batch.polygons,
             batch.label_candidates,
             batch.label_outcomes,
+            batch.attempt_receipts,
+            batch.support_evidence,
             batch.documents,
+            batch.relevance_assessments,
             batch.text_polygon_links,
             batch.entity_links,
             batch.eligibility,
@@ -592,12 +1250,47 @@ def _initialize_index(connection: sqlite3.Connection) -> None:
             ambiguity_basis TEXT,
             PRIMARY KEY (inventory_row_id, level)
         );
+        CREATE TABLE polygon_attempts (
+            inventory_row_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            reference_id_namespace TEXT NOT NULL,
+            attempted_reference_ids_json TEXT NOT NULL,
+            missing_reference_ids_json TEXT NOT NULL,
+            measurement_sidecar_uri TEXT,
+            measurement_sidecar_sha256 TEXT,
+            measurement_record_count INTEGER,
+            reason TEXT
+        );
+        CREATE TABLE support_evidence (
+            inventory_row_id TEXT NOT NULL,
+            level TEXT NOT NULL,
+            code TEXT NOT NULL,
+            reference_id_namespace TEXT NOT NULL,
+            reference_ids_json TEXT NOT NULL,
+            measurement_sidecar_uri TEXT,
+            measurement_sidecar_sha256 TEXT,
+            measurement_record_count INTEGER,
+            PRIMARY KEY (inventory_row_id, level, code)
+        );
         CREATE TABLE source_documents (
             document_id TEXT PRIMARY KEY,
             native_key_json TEXT NOT NULL,
             source_revision TEXT NOT NULL,
             content_sha256 TEXT,
             body_status TEXT NOT NULL
+        );
+        CREATE TABLE document_relevance (
+            document_id TEXT NOT NULL,
+            release_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            source_repository TEXT NOT NULL,
+            source_revision TEXT NOT NULL,
+            mapping_rule_version TEXT NOT NULL,
+            evidence TEXT NOT NULL,
+            raw_value TEXT,
+            evidence_sha256 TEXT,
+            reason TEXT,
+            PRIMARY KEY (document_id, release_id)
         );
         CREATE TABLE text_links (
             link_id INTEGER PRIMARY KEY,
@@ -759,6 +1452,37 @@ def _batch_table_rows(
             }
             for row in batch.label_outcomes
         ),
+        "polygon_attempts": (
+            {
+                "inventory_row_id": row.inventory_row_id,
+                "status": row.status.value,
+                "reference_id_namespace": row.reference_id_namespace,
+                "attempted_reference_ids_json": json.dumps(
+                    sorted(row.attempted_reference_ids), separators=(",", ":")
+                ),
+                "missing_reference_ids_json": json.dumps(
+                    sorted(row.missing_reference_ids), separators=(",", ":")
+                ),
+                "measurement_sidecar_uri": row.measurement_sidecar_uri,
+                "measurement_sidecar_sha256": row.measurement_sidecar_sha256,
+                "measurement_record_count": row.measurement_record_count,
+                "reason": row.reason,
+            }
+            for row in batch.attempt_receipts
+        ),
+        "label_support_evidence": (
+            {
+                "inventory_row_id": row.inventory_row_id,
+                "level": row.level,
+                "code": row.code,
+                "reference_id_namespace": row.reference_id_namespace,
+                "reference_ids_json": json.dumps(sorted(row.reference_ids), separators=(",", ":")),
+                "measurement_sidecar_uri": row.measurement_sidecar_uri,
+                "measurement_sidecar_sha256": row.measurement_sidecar_sha256,
+                "measurement_record_count": row.measurement_record_count,
+            }
+            for row in batch.support_evidence
+        ),
         "source_documents": (
             {
                 "document_id": row.document_id,
@@ -768,6 +1492,21 @@ def _batch_table_rows(
                 "body_status": row.body_status.value,
             }
             for row in batch.documents
+        ),
+        "document_relevance": (
+            {
+                "document_id": row.document_id,
+                "release_id": row.release_id,
+                "status": row.status.value,
+                "source_repository": row.source_repository,
+                "source_revision": row.source_revision,
+                "mapping_rule_version": row.mapping_rule_version,
+                "evidence": row.evidence,
+                "raw_value": row.raw_value,
+                "evidence_sha256": row.evidence_sha256,
+                "reason": row.reason,
+            }
+            for row in batch.relevance_assessments
         ),
         "text_polygon_links": (
             {
@@ -815,7 +1554,10 @@ def _row_count_for_batch_table(batch: PoolBatch, table_name: str) -> int:
         "polygon_snapshots": batch.polygons,
         "label_candidates": batch.label_candidates,
         "label_outcomes": batch.label_outcomes,
+        "polygon_attempts": batch.attempt_receipts,
+        "label_support_evidence": batch.support_evidence,
         "source_documents": batch.documents,
+        "document_relevance": batch.relevance_assessments,
         "text_polygon_links": batch.text_polygon_links,
         "entity_links": batch.entity_links,
         "pool_eligibility": batch.eligibility,
@@ -941,6 +1683,7 @@ def _index_batch(
                 row.ambiguity_basis.value if row.ambiguity_basis else None,
             ),
         )
+    _index_evidence_rows(batch, connection)
     for row in batch.documents:
         connection.execute(
             "INSERT INTO source_documents VALUES (?, ?, ?, ?, ?)",
@@ -993,6 +1736,54 @@ def _index_batch(
                 row.reason,
                 row.replaced_by_inventory_row_id,
                 row.evidence,
+            ),
+        )
+
+
+def _index_evidence_rows(batch: PoolBatch, connection: sqlite3.Connection) -> None:
+    for row in batch.attempt_receipts:
+        connection.execute(
+            "INSERT INTO polygon_attempts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                row.inventory_row_id,
+                row.status.value,
+                row.reference_id_namespace,
+                json.dumps(sorted(row.attempted_reference_ids), separators=(",", ":")),
+                json.dumps(sorted(row.missing_reference_ids), separators=(",", ":")),
+                row.measurement_sidecar_uri,
+                row.measurement_sidecar_sha256,
+                row.measurement_record_count,
+                row.reason,
+            ),
+        )
+    for row in batch.support_evidence:
+        connection.execute(
+            "INSERT INTO support_evidence VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                row.inventory_row_id,
+                row.level,
+                row.code,
+                row.reference_id_namespace,
+                json.dumps(sorted(row.reference_ids), separators=(",", ":")),
+                row.measurement_sidecar_uri,
+                row.measurement_sidecar_sha256,
+                row.measurement_record_count,
+            ),
+        )
+    for row in batch.relevance_assessments:
+        connection.execute(
+            "INSERT INTO document_relevance VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                row.document_id,
+                row.release_id,
+                row.status.value,
+                row.source_repository,
+                row.source_revision,
+                row.mapping_rule_version,
+                row.evidence,
+                row.raw_value,
+                row.evidence_sha256,
+                row.reason,
             ),
         )
 
@@ -1069,7 +1860,10 @@ def _iter_global_issues(spec: PoolStreamSpec, connection: sqlite3.Connection) ->
     yield from _iter_polygon_issues(spec, connection)
     yield from _iter_candidate_issues(spec, connection)
     yield from _iter_outcome_issues(spec, connection, total_keys)
+    yield from _iter_attempt_receipt_issues(connection, total_keys)
+    yield from _iter_support_evidence_issues(connection)
     yield from _iter_document_issues(connection)
+    yield from _iter_document_relevance_issues(connection)
     yield from _iter_text_link_issues(connection)
     yield from _iter_entity_link_issues(connection)
     yield from _iter_eligibility_issues(connection)
@@ -1178,7 +1972,8 @@ def _iter_candidate_issues(spec: PoolStreamSpec, connection: sqlite3.Connection)
         "c.label_release, c.numerator, c.denominator, c.ratio, c.threshold, "
         "c.assignment_rule_version, c.assignment_kind, c.support_semantics, "
         "c.support_unit, c.source_revision, c.taxonomy_revision, "
-        "i.polygon_snapshot_id AS inventory_polygon, p.geometry_status, p.original_area "
+        "i.polygon_snapshot_id AS inventory_polygon, p.geometry_status, p.original_area, "
+        "p.area_unit AS polygon_area_unit "
         "FROM candidates c LEFT JOIN inventory i ON i.inventory_row_id=c.inventory_row_id "
         "LEFT JOIN polygons p ON p.polygon_snapshot_id=c.polygon_snapshot_id "
         "ORDER BY c.inventory_row_id, c.level, c.code"
@@ -1206,6 +2001,7 @@ def _candidate_row_issues(spec: PoolStreamSpec, row: tuple[object, ...]) -> Iter
         inventory_polygon_id,
         geometry_status,
         original_area,
+        polygon_area_unit,
     ) = row
     if inventory_polygon_id is None or geometry_status is None:
         yield f"label candidate {code} references an unknown polygon"
@@ -1221,6 +2017,8 @@ def _candidate_row_issues(spec: PoolStreamSpec, row: tuple[object, ...]) -> Iter
     yield from _candidate_measurement_issues(
         (code, numerator, denominator, ratio, threshold, original_area)
     )
+    if row[12] != polygon_area_unit:
+        yield f"label candidate {code} does not use polygon support units"
     yield from _candidate_pin_issues(spec, row)
 
 
@@ -1431,6 +2229,169 @@ def _ambiguous_outcome_issues(outcome: _OutcomeStatusCheck) -> Iterator[str]:
         and outcome.ambiguity_basis != AmbiguityBasis.MULTIPLE_QUALIFIERS.value
     ):
         yield f"competing qualifying codes at {outcome.key} require multiple-qualifier ambiguity"
+
+
+def _iter_attempt_receipt_issues(
+    connection: sqlite3.Connection,
+    total_keys: int,
+) -> Iterator[str]:
+    attempt_count = connection.execute("SELECT COUNT(*) FROM polygon_attempts").fetchone()[0]
+    if attempt_count != total_keys:
+        yield "polygon attempt receipt count does not match raw inventory"
+    unknown_inventory = connection.execute(
+        "SELECT COUNT(*) FROM polygon_attempts a LEFT JOIN inventory i "
+        "ON i.inventory_row_id=a.inventory_row_id WHERE i.inventory_row_id IS NULL"
+    ).fetchone()[0]
+    if unknown_inventory:
+        yield "polygon attempt receipt references unknown inventory"
+    for (
+        row_id,
+        status,
+        namespace,
+        attempted_json,
+        missing_json,
+        uri,
+        digest,
+        count,
+        reason,
+    ) in connection.execute(
+        "SELECT inventory_row_id, status, reference_id_namespace, "
+        "attempted_reference_ids_json, missing_reference_ids_json, "
+        "measurement_sidecar_uri, measurement_sidecar_sha256, measurement_record_count, reason "
+        "FROM polygon_attempts ORDER BY inventory_row_id"
+    ):
+        if status not in {item.value for item in AttemptStatus}:
+            yield f"polygon attempt receipt for {row_id} has an unknown status"
+        if not _present(namespace):
+            yield f"polygon attempt receipt for {row_id} needs a reference ID namespace"
+        yield from _json_id_array_issues(attempted_json, f"attempted references for {row_id}")
+        yield from _json_id_array_issues(missing_json, f"missing references for {row_id}")
+        if status in {
+            AttemptStatus.PARTIAL.value,
+            AttemptStatus.FAILED.value,
+            AttemptStatus.EXCLUDED.value,
+        } and not _present(reason):
+            yield f"non-complete polygon attempt {row_id} needs a reason"
+        yield from _sidecar_issues(uri, digest, count, f"polygon attempt {row_id}")
+
+
+def _iter_support_evidence_issues(connection: sqlite3.Connection) -> Iterator[str]:
+    missing = connection.execute(
+        "SELECT COUNT(*) FROM candidates c LEFT JOIN support_evidence e "
+        "ON e.inventory_row_id=c.inventory_row_id AND e.level=c.level AND e.code=c.code "
+        "WHERE e.inventory_row_id IS NULL"
+    ).fetchone()[0]
+    extra = connection.execute(
+        "SELECT COUNT(*) FROM support_evidence e LEFT JOIN candidates c "
+        "ON c.inventory_row_id=e.inventory_row_id AND c.level=e.level AND c.code=e.code "
+        "WHERE c.inventory_row_id IS NULL"
+    ).fetchone()[0]
+    if missing or extra:
+        yield "candidate support evidence coverage mismatch"
+    for row_id, level, code, namespace, ids_json, uri, digest, count in connection.execute(
+        "SELECT e.inventory_row_id, e.level, e.code, e.reference_id_namespace, "
+        "e.reference_ids_json, e.measurement_sidecar_uri, e.measurement_sidecar_sha256, "
+        "e.measurement_record_count FROM support_evidence e "
+        "ORDER BY e.inventory_row_id, e.level, e.code"
+    ):
+        key = f"({row_id}, {level}, {code})"
+        if not _present(namespace):
+            yield f"label support evidence {key} needs a reference ID namespace"
+        parsed_ids = _parse_json_id_array(ids_json)
+        if parsed_ids is None:
+            yield f"label support evidence {key} has invalid reference IDs"
+            parsed_ids = ()
+        has_ids = bool(parsed_ids)
+        has_sidecar = uri is not None
+        if has_ids == has_sidecar:
+            yield (
+                f"label support evidence {key} needs either reference IDs or a measurement sidecar"
+            )
+        yield from _sidecar_issues(uri, digest, count, f"label support evidence {key}")
+
+
+def _iter_document_relevance_issues(connection: sqlite3.Connection) -> Iterator[str]:
+    unknown_documents = connection.execute(
+        "SELECT COUNT(*) FROM document_relevance r LEFT JOIN source_documents d "
+        "ON d.document_id=r.document_id WHERE d.document_id IS NULL"
+    ).fetchone()[0]
+    if unknown_documents:
+        yield "relevance assessment references unknown source document"
+    for row in connection.execute(
+        "SELECT document_id, release_id, status, source_repository, source_revision, "
+        "mapping_rule_version, evidence, raw_value, evidence_sha256, reason "
+        "FROM document_relevance ORDER BY document_id, release_id"
+    ):
+        (
+            document_id,
+            release_id,
+            status,
+            repository,
+            revision,
+            rule,
+            evidence,
+            raw,
+            digest,
+            reason,
+        ) = row
+        key = f"({document_id}, {release_id})"
+        if status not in {item.value for item in RelevanceStatus}:
+            yield f"relevance assessment {key} has an unknown status"
+            continue
+        if not all(
+            _present(value)
+            for value in (document_id, release_id, repository, revision, rule, evidence)
+        ):
+            yield f"relevance assessment {key} lacks provenance"
+        if status in {RelevanceStatus.YES.value, RelevanceStatus.NO.value} and not _present(raw):
+            yield f"yes/no relevance assessment {key} must preserve its source value"
+        if status == RelevanceStatus.UNKNOWN.value and not _present(reason):
+            yield f"unknown relevance assessment {key} needs a reason"
+        if status == RelevanceStatus.MISSING.value and (raw is not None or not _present(reason)):
+            yield f"missing relevance assessment {key} needs an absence reason only"
+        if digest is not None and not _valid_sha256(digest):
+            yield f"relevance assessment {key} has an invalid evidence SHA-256"
+
+
+def _json_id_array_issues(value: object, name: str) -> Iterator[str]:
+    parsed = _parse_json_id_array(value)
+    if parsed is None:
+        yield f"{name} are not a canonical unique string array"
+
+
+def _parse_json_id_array(value: object) -> tuple[str, ...] | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(decoded, list) or any(not _present(item) for item in decoded):
+        return None
+    values = tuple(decoded)
+    if len(values) != len(set(values)) or tuple(sorted(values)) != values:
+        return None
+    if json.dumps(list(values), ensure_ascii=False, separators=(",", ":")) != value:
+        return None
+    return values
+
+
+def _sidecar_issues(
+    uri: object,
+    digest: object,
+    count: object,
+    name: str,
+) -> Iterator[str]:
+    present = (uri is not None, digest is not None, count is not None)
+    if any(present) and not all(present):
+        yield f"{name} sidecar fields must be supplied together"
+    elif all(present):
+        if not _valid_resolvable_uri(uri):
+            yield f"{name} sidecar URI is invalid"
+        if not _valid_sha256(digest):
+            yield f"{name} sidecar SHA-256 is invalid"
+        if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+            yield f"{name} sidecar record count must be positive"
 
 
 def _iter_document_issues(connection: sqlite3.Connection) -> Iterator[str]:

@@ -12,13 +12,16 @@ from .models import (
     LabelCandidate,
     LabelLevel,
     LabelOutcome,
+    LabelSupportEvidence,
     LevelAccounting,
     NativeKey,
+    PolygonAttemptReceipt,
     PolygonInventoryRow,
     PoolBuildInput,
     PoolBundle,
     PoolEligibility,
     PoolManifest,
+    RelevanceAssessment,
     TextPolygonLink,
 )
 
@@ -70,7 +73,7 @@ def native_keyset_sha256(keys: Iterable[NativeKey]) -> str:
 def build_full_pool(
     source: PoolBuildInput,
     *,
-    contract_version: str = "1.0.0",
+    contract_version: str = "1.1.0",
     pool_version: str = "1.0.0",
 ) -> PoolBundle:
     """Assemble and canonically order pool tables without filtering inventory.
@@ -90,6 +93,9 @@ def build_full_pool(
     link_rows = tuple(sorted(source.text_polygon_links, key=_text_link_sort_key))
     entity_rows = tuple(sorted(source.entity_links, key=_entity_link_sort_key))
     eligibility_rows = tuple(sorted(source.eligibility, key=_eligibility_sort_key))
+    attempt_rows = tuple(sorted(source.attempt_receipts, key=_attempt_sort_key))
+    support_evidence_rows = tuple(sorted(source.support_evidence, key=_support_evidence_sort_key))
+    relevance_rows = tuple(sorted(source.relevance_assessments, key=_relevance_sort_key))
     accounting = _build_level_accounting(inventory_rows, level_rows, candidate_rows, outcome_rows)
     manifest = PoolManifest(
         contract_version=contract_version,
@@ -115,6 +121,9 @@ def build_full_pool(
         text_polygon_links=link_rows,
         entity_links=entity_rows,
         eligibility=eligibility_rows,
+        attempt_receipts=attempt_rows,
+        support_evidence=support_evidence_rows,
+        relevance_assessments=relevance_rows,
     )
 
 
@@ -184,3 +193,21 @@ def _eligibility_sort_key(
         eligibility.cohort_policy_version,
         eligibility.status.value,
     )
+
+
+def _attempt_sort_key(
+    receipt: PolygonAttemptReceipt,
+) -> tuple[str]:
+    return (receipt.inventory_row_id,)
+
+
+def _support_evidence_sort_key(
+    evidence: LabelSupportEvidence,
+) -> tuple[str, str, str]:
+    return evidence.inventory_row_id, evidence.level, evidence.code
+
+
+def _relevance_sort_key(
+    assessment: RelevanceAssessment,
+) -> tuple[str, str]:
+    return assessment.document_id, assessment.release_id
