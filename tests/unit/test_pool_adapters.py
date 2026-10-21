@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 import struct
 from dataclasses import dataclass
@@ -11,7 +12,9 @@ import shapely
 from shapely.geometry import box
 
 from osm_polygon_eunis.pool_adapters import (
+    WORLDCOVER_AREA_MEASUREMENT,
     WORLDCOVER_LEVELS,
+    AdapterStreamingOptions,
     LucasCode,
     LucasFeatureQuery,
     LucasFootprint,
@@ -22,8 +25,11 @@ from osm_polygon_eunis.pool_adapters import (
     PoolPolygonInput,
     WorldCoverEvidence,
     build_raw_inventory_evidence,
+    export_labeled_polygons,
     iter_lucas_attempts,
+    iter_polygon_batches,
     iter_worldcover_attempts,
+    iter_worldcover_rows,
     iter_worldcover_source_attempts,
     measure_lucas_supports,
     verify_lucas_taxonomy_file,
@@ -32,26 +38,27 @@ from osm_polygon_eunis.pool_adapters import (
 from osm_polygon_eunis.pool_contract import (
     AssignmentKind,
     BodyStatus,
+    FilesystemStreamingSink,
     GeometryStatus,
     OutcomeStatus,
     PolygonInventoryRow,
     PolygonSnapshot,
+    PoolBatch,
     PoolBuildInput,
     PoolKey,
     ReferencePin,
     ReferenceSystem,
     SourceDocument,
     SourceSnapshot,
+    StreamingLimits,
     SupportSemantics,
     TextLinkStatus,
     TextPolygonLink,
     TextSource,
-    build_full_pool,
     canonical_native_key,
     inventory_row_identifier,
     native_keyset_sha256,
     polygon_snapshot_identifier,
-    validate_full_pool,
 )
 
 _SHA_A = "a" * 64
@@ -64,7 +71,7 @@ class SamplePolygon:
     snapshot: PolygonSnapshot
 
 
-def _polygon(index: int, *, area_unit: str = "degree^2") -> SamplePolygon:
+def _polygon(index: int, *, area_unit: str = "m^2", crs: str = "EPSG:4326") -> SamplePolygon:
     source = SourceSnapshot(
         snapshot_id="raw-description",
         repository="NoeFlandre/source-polygons",
@@ -92,7 +99,7 @@ def _polygon(index: int, *, area_unit: str = "degree^2") -> SamplePolygon:
         geometry_uri=f"https://artifacts.example/geometries/{index}.wkb",
         geometry_sha256=geometry_hash,
         geometry_format="WKB",
-        crs="EPSG:4326" if area_unit == "degree^2" else "EPSG:3035",
+        crs=crs,
         coordinate_transform="identity",
         geometry_status=GeometryStatus.USABLE,
         original_area=100.0,
@@ -102,7 +109,7 @@ def _polygon(index: int, *, area_unit: str = "degree^2") -> SamplePolygon:
 
 
 def _reference_pin(reference: ReferenceSystem) -> ReferencePin:
-    unit = "degree^2" if reference is ReferenceSystem.WORLDCOVER else "m^2"
+    unit = "m^2"
     semantics = (
         SupportSemantics.MAPPED_COVER
         if reference is ReferenceSystem.WORLDCOVER
@@ -138,8 +145,10 @@ def test_worldcover_keeps_nodata_and_missing_tiles_in_full_area_denominator() ->
     result = worldcover_supports(
         polygon.pool_polygon,
         WorldCoverEvidence(
-            "way/1",
-            ((10, 0.8), (0, 0.2)),
+            source_polygon_id="way/1",
+            polygon_area_m2=100.0,
+            class_areas_m2=((10, 80.0),),
+            area_measurement=WORLDCOVER_AREA_MEASUREMENT,
             attempted_tiles=("N00E000", "N00E003"),
             missing_tiles=("N00E003",),
         ),
@@ -159,12 +168,17 @@ def test_worldcover_keeps_nodata_and_missing_tiles_in_full_area_denominator() ->
 
 def test_worldcover_attempts_every_raw_polygon_without_text_filters() -> None:
     polygons = (_polygon(1), _polygon(2), _polygon(3))
-    fractions = {"way/1": ((10, 0.8),), "way/2": ((10, 0.79),), "way/3": ((0, 1.0),)}
+    areas = {"way/1": ((10, 80.0),), "way/2": ((10, 79.0),), "way/3": ()}
     attempted: list[str] = []
 
     def evidence_for(polygon: PoolPolygonInput) -> WorldCoverEvidence:
         attempted.append(polygon.source_polygon_id)
-        return WorldCoverEvidence(polygon.source_polygon_id, fractions[polygon.source_polygon_id])
+        return WorldCoverEvidence(
+            polygon.source_polygon_id,
+            100.0,
+            areas[polygon.source_polygon_id],
+            WORLDCOVER_AREA_MEASUREMENT,
+        )
 
     results = tuple(
         iter_worldcover_attempts(
@@ -198,8 +212,20 @@ def test_worldcover_attempts_every_raw_polygon_without_text_filters() -> None:
 def test_worldcover_source_evidence_is_joined_one_to_one_in_raw_order() -> None:
     polygons = (_polygon(1), _polygon(2))
     evidence = (
-        WorldCoverEvidence("way/1", ((10, 0.8),), attempted_tiles=("N00E000",)),
-        WorldCoverEvidence("way/2", ((20, 0.8),), attempted_tiles=("N00E003",)),
+        WorldCoverEvidence(
+            "way/1",
+            100.0,
+            ((10, 80.0),),
+            WORLDCOVER_AREA_MEASUREMENT,
+            attempted_tiles=("N00E000",),
+        ),
+        WorldCoverEvidence(
+            "way/2",
+            100.0,
+            ((20, 80.0),),
+            WORLDCOVER_AREA_MEASUREMENT,
+            attempted_tiles=("N00E003",),
+        ),
     )
 
     results = tuple(
@@ -221,8 +247,29 @@ def test_worldcover_source_evidence_is_joined_one_to_one_in_raw_order() -> None:
         )
 
 
+def test_pool_adapter_batches_are_bounded_and_consecutive() -> None:
+    polygons = tuple(_polygon(index) for index in (1, 2, 3))
+    attempts = iter_worldcover_attempts(
+        (row.pool_polygon for row in polygons),
+        lambda row: WorldCoverEvidence(
+            row.source_polygon_id,
+            100.0,
+            ((10, 80.0),),
+            WORLDCOVER_AREA_MEASUREMENT,
+        ),
+        _reference_pin(ReferenceSystem.WORLDCOVER),
+    )
+
+    batches = tuple(
+        iter_polygon_batches((row.pool_polygon for row in polygons), attempts, max_batch_rows=4)
+    )
+
+    assert [batch.batch_index for batch in batches] == [0, 1, 2]
+    assert all(batch.row_count == 4 for batch in batches)
+
+
 def test_lucas_unions_same_class_before_full_area_threshold() -> None:
-    polygon = _polygon(0, area_unit="m^2")
+    polygon = _polygon(0, crs="EPSG:3035")
     taxonomy = _lucas_taxonomy()
     query = LucasFeatureQuery(
         footprints=(
@@ -256,7 +303,7 @@ def test_lucas_unions_same_class_before_full_area_threshold() -> None:
 
 
 def test_lucas_ambiguous_no_coverage_and_missing_geometry_are_explicit() -> None:
-    polygon = _polygon(0, area_unit="m^2")
+    polygon = _polygon(0, crs="EPSG:3035")
     taxonomy = _lucas_taxonomy()
     ambiguous = measure_lucas_supports(
         polygon.pool_polygon,
@@ -357,8 +404,8 @@ def test_lucas_reader_uses_exact_file_pins_and_records_feature_ids(tmp_path: Pat
         attempts = tuple(
             iter_lucas_attempts(
                 (
-                    _polygon(0, area_unit="m^2").pool_polygon,
-                    _polygon(1, area_unit="m^2").pool_polygon,
+                    _polygon(0, crs="EPSG:3035").pool_polygon,
+                    _polygon(1, crs="EPSG:3035").pool_polygon,
                 ),
                 reader,
                 taxonomy,
@@ -387,13 +434,9 @@ def test_lucas_reader_uses_exact_file_pins_and_records_feature_ids(tmp_path: Pat
         pass
 
 
-def test_shared_pool_core_accepts_adapter_output_and_preserves_unmatched_text_link() -> None:
+def test_bounded_export_preserves_adapter_rows_and_unmatched_text_link(tmp_path: Path) -> None:
     sample = _polygon(1)
-    result = worldcover_supports(
-        sample.pool_polygon,
-        WorldCoverEvidence("way/1", ((10, 0.8),)),
-        _reference_pin(ReferenceSystem.WORLDCOVER),
-    )
+    evidence = WorldCoverEvidence("way/1", 100.0, ((10, 80.0),), WORLDCOVER_AREA_MEASUREMENT)
     source = SourceSnapshot(
         snapshot_id="raw-description",
         repository="NoeFlandre/source-polygons",
@@ -417,33 +460,55 @@ def test_shared_pool_core_accepts_adapter_output_and_preserves_unmatched_text_li
         status=TextLinkStatus.UNMATCHED,
         evidence="source-native link key has no polygon target",
     )
-    pool = build_full_pool(
-        PoolBuildInput(
-            pool_key=PoolKey(TextSource.DESCRIPTION, ReferenceSystem.WORLDCOVER),
-            source_snapshot=source,
-            raw_inventory_evidence=build_raw_inventory_evidence(
-                enumeration_rule="all polygons before text/relevance/evaluation joins",
-                scan_report_uri="https://artifacts.example/raw-scan.json",
-                scan_report=b"complete one-row raw scan",
-                expected_key_count=1,
-                expected_keyset_sha256=native_keyset_sha256(row.native_key for row in inventory),
+    metadata = PoolBuildInput(
+        pool_key=PoolKey(TextSource.DESCRIPTION, ReferenceSystem.WORLDCOVER),
+        source_snapshot=source,
+        raw_inventory_evidence=build_raw_inventory_evidence(
+            enumeration_rule="all polygons before text/relevance/evaluation joins",
+            scan_report_uri="https://artifacts.example/raw-scan.json",
+            scan_report=b"complete one-row raw scan",
+            expected_key_count=1,
+            expected_keyset_sha256=native_keyset_sha256(row.native_key for row in inventory),
+        ),
+        reference_pin=_reference_pin(ReferenceSystem.WORLDCOVER),
+        adapter_id="worldcover-source-wide-adapter",
+        adapter_revision="adapter-commit-1",
+        builder_revision="26a6ce9bf934530e2bb9a5ca51eb5147d2adb9a7",
+        inventory=(),
+        polygons=(),
+        levels=WORLDCOVER_LEVELS,
+        label_candidates=(),
+        label_outcomes=(),
+        documents=(),
+        text_polygon_links=(),
+    )
+    receipt = export_labeled_polygons(
+        metadata,
+        iter_worldcover_rows(
+            iter((sample.pool_polygon,)),
+            lambda _polygon: evidence,
+            _reference_pin(ReferenceSystem.WORLDCOVER),
+        ),
+        FilesystemStreamingSink(tmp_path),
+        options=AdapterStreamingOptions(
+            limits=StreamingLimits(max_batch_rows=4),
+            staging_directory=tmp_path,
+            supplemental_batches=(
+                PoolBatch(
+                    batch_index=77,
+                    documents=(document,),
+                    text_polygon_links=(link,),
+                ),
             ),
-            reference_pin=_reference_pin(ReferenceSystem.WORLDCOVER),
-            adapter_id="worldcover-source-wide-adapter",
-            adapter_revision="adapter-commit-1",
-            builder_revision="f199bfd681f401e70c5d2965769f320f3db8f96f",
-            inventory=inventory,
-            polygons=(sample.snapshot,),
-            levels=WORLDCOVER_LEVELS,
-            label_candidates=result.label_candidates,
-            label_outcomes=result.label_outcomes,
-            documents=(document,),
-            text_polygon_links=(link,),
-        )
+        ),
     )
 
-    report = validate_full_pool(pool)
-    assert report.ok, report.issues
-    assert len(pool.inventory) == 1
-    assert pool.text_polygon_links[0].status is TextLinkStatus.UNMATCHED
-    assert pool.manifest.raw_inventory_evidence.expected_key_count == 1
+    assert receipt.total_source_keys == 1
+    assert receipt.inventory_keyset_sha256 == native_keyset_sha256(
+        row.native_key for row in inventory
+    )
+    manifests = list(tmp_path.rglob("manifest.json"))
+    assert len(manifests) == 1
+    exported = json.loads(manifests[0].read_text())
+    assert exported["storage_layout"]["tables"]["source_documents"]["row_count"] == 1
+    assert exported["storage_layout"]["tables"]["text_polygon_links"]["row_count"] == 1
