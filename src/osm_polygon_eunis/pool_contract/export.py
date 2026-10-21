@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import tempfile
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -305,11 +306,11 @@ def _table_rows(bundle: PoolBundle) -> dict[str, list[dict[str, object]]]:
                 "inventory_row_id": row.inventory_row_id,
                 "status": row.status.value,
                 "reference_id_namespace": row.reference_id_namespace,
-                "attempted_reference_ids_json": json.dumps(
-                    sorted(row.attempted_reference_ids), separators=(",", ":")
+                "attempted_reference_ids_json": _canonical_json_string_array(
+                    row.attempted_reference_ids
                 ),
-                "missing_reference_ids_json": json.dumps(
-                    sorted(row.missing_reference_ids), separators=(",", ":")
+                "missing_reference_ids_json": _canonical_json_string_array(
+                    row.missing_reference_ids
                 ),
                 "measurement_sidecar_uri": row.measurement_sidecar_uri,
                 "measurement_sidecar_sha256": row.measurement_sidecar_sha256,
@@ -324,7 +325,7 @@ def _table_rows(bundle: PoolBundle) -> dict[str, list[dict[str, object]]]:
                 "level": row.level,
                 "code": row.code,
                 "reference_id_namespace": row.reference_id_namespace,
-                "reference_ids_json": json.dumps(sorted(row.reference_ids), separators=(",", ":")),
+                "reference_ids_json": _canonical_json_string_array(row.reference_ids),
                 "measurement_sidecar_uri": row.measurement_sidecar_uri,
                 "measurement_sidecar_sha256": row.measurement_sidecar_sha256,
                 "measurement_record_count": row.measurement_record_count,
@@ -364,8 +365,8 @@ def _table_rows(bundle: PoolBundle) -> dict[str, list[dict[str, object]]]:
                 "source_revision": row.source_revision,
                 "status": row.status.value,
                 "evidence": row.evidence,
-                "candidate_inventory_row_ids_json": json.dumps(
-                    sorted(row.candidate_inventory_row_ids), separators=(",", ":")
+                "candidate_inventory_row_ids_json": _canonical_json_string_array(
+                    row.candidate_inventory_row_ids
                 ),
             }
             for row in bundle.text_polygon_links
@@ -508,6 +509,12 @@ def _canonical_json_bytes(value: object) -> bytes:
     return (
         json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
     ).encode("utf-8")
+
+
+def _canonical_json_string_array(values: Iterable[str]) -> str:
+    """Encode sorted string IDs consistently in fixture and streaming tables."""
+
+    return json.dumps(sorted(values), ensure_ascii=False, separators=(",", ":"))
 
 
 def _sha256(value: bytes) -> str:

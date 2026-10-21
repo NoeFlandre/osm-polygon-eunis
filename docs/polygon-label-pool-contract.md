@@ -221,9 +221,18 @@ shared-builder revisions, and the hash and row count of every shard. Use
 `validate_nine_streamed_pool_gate(receipts, reader)` to verify streamed
 completion manifests, scan receipts, shard inventories, shard hashes, per-level
 accounting, and all nine distinct combinations without reconstructing pools in
-RAM. A cloud `PoolArtifactReader` streams JSONL and artifact hashes and resolves
-sink-relative paths; `FilesystemArtifactReader` supports controlled staging
-and tests. Evaluation sampling must wait for that gate to pass.
+RAM. The gate reads each Parquet footer and compares its schema and row count
+with the table contract and shard manifest. A cloud `PoolArtifactReader` streams
+JSONL and artifact hashes, reads Parquet footer metadata without loading row
+groups, and resolves sink-relative paths. Its `parquet_metadata()` method
+returns `ParquetArtifactMetadata`. `FilesystemArtifactReader` supports
+controlled staging and tests. Evaluation sampling must wait for that gate to
+pass.
+
+These checks bind shard contents to the supplied manifests and receipts. They
+do not authenticate who produced those records or verify the underlying
+scientific measurements. A trusted signature or external trust anchor remains
+outside this contract.
 
 ## Splits and migration
 
