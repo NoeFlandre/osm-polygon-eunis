@@ -30,6 +30,7 @@ from .builder import (
 from .export import (
     _TABLE_FIELDS,
     _canonical_json_bytes,
+    _canonical_json_string_array,
     table_schemas,
 )
 from .models import (
@@ -235,7 +236,7 @@ class FileArtifactSink(Protocol):
 
 
 class PoolArtifactReader(Protocol):
-    """Read small manifests and stream hashes/lines for exported pool artifacts."""
+    """Read manifests, stream artifacts, and inspect Parquet footers."""
 
     def read_bytes(self, uri: str) -> bytes:
         """Read a small completion manifest from its URI."""
@@ -246,8 +247,19 @@ class PoolArtifactReader(Protocol):
     def sha256(self, uri: str) -> str:
         """Return the content SHA-256, streaming large artifacts when needed."""
 
+    def parquet_metadata(self, uri: str) -> ParquetArtifactMetadata:
+        """Read one Parquet footer without materializing row-group contents."""
+
     def resolve_uri(self, manifest_uri: str, relative_path: str) -> str:
         """Resolve a sink-relative artifact path beside the given pool manifest."""
+
+
+@dataclass(frozen=True, slots=True)
+class ParquetArtifactMetadata:
+    """Footer metadata needed to check one shard's schema and row count."""
+
+    row_count: int
+    schema: pa.Schema
 
 
 @dataclass(frozen=True, slots=True)
@@ -316,6 +328,15 @@ class FilesystemArtifactReader:
         """Hash a local artifact in bounded chunks."""
 
         return _sha256_file(self._path(uri))
+
+    def parquet_metadata(self, uri: str) -> ParquetArtifactMetadata:
+        """Inspect the footer of one local Parquet shard."""
+
+        parquet_file = pq.ParquetFile(self._path(uri))
+        return ParquetArtifactMetadata(
+            row_count=parquet_file.metadata.num_rows,
+            schema=parquet_file.schema_arrow,
+        )
 
     def resolve_uri(self, manifest_uri: str, relative_path: str) -> str:
         """Resolve a pool-relative path under the local artifact root."""
@@ -410,12 +431,14 @@ def _read_streamed_manifest(
     return manifest, pool_key, actual_sha
 
 
-def _pool_key_from_id(pool_id: str) -> PoolKey | None:
+def _pool_key_from_id(pool_id: object) -> PoolKey | None:
+    if not isinstance(pool_id, str):
+        return None
     parts = pool_id.split("/")
     if len(parts) != _POOL_ID_PARTS:
         return None
-    text_source, reference_system = parts[1].split("-", 1)
     try:
+        text_source, reference_system = parts[1].split("-", 1)
         return PoolKey(TextSource(text_source), ReferenceSystem(reference_system))
     except (ValueError, IndexError):
         return None
@@ -722,7 +745,10 @@ def _stream_artifact_issues(
     issues = _shard_manifest_reference_issues(shard_manifest, receipt, reader, expected_root)
     issues.extend(_exclusion_sidecar_issues(exclusions, receipt, reader, expected_root))
     shard_counts, row_counts, inventory_issues = _verify_shard_inventory(
-        receipt, reader, expected_root
+        receipt,
+        reader,
+        expected_root,
+        table_schemas(str(manifest.get("contract_version", ""))),
     )
     issues.extend(inventory_issues)
     issues.extend(
@@ -799,6 +825,7 @@ def _verify_shard_inventory(
     receipt: StreamingExportReceipt,
     reader: PoolArtifactReader,
     expected_root: str,
+    expected_schemas: dict[str, pa.Schema],
 ) -> tuple[dict[str, int], dict[str, int], list[str]]:
     issues: list[str] = []
     shard_counts = dict.fromkeys(_TABLE_FIELDS, 0)
@@ -809,7 +836,7 @@ def _verify_shard_inventory(
     try:
         for line in reader.iter_lines(receipt.shard_manifest_uri):
             table, index, row_count = _verify_shard_entry(
-                line, receipt, reader, expected_root, table_order
+                line, receipt, reader, expected_root, table_order, expected_schemas
             )
             rank = table_order[table]
             _validate_shard_order(rank, index, previous_rank, previous_index)
@@ -834,6 +861,7 @@ def _verify_shard_entry(
     reader: PoolArtifactReader,
     expected_root: str,
     table_order: dict[str, int],
+    expected_schemas: dict[str, pa.Schema],
 ) -> tuple[str, int, int]:
     record = json.loads(line)
     if not isinstance(record, dict):
@@ -854,6 +882,11 @@ def _verify_shard_entry(
     uri = reader.resolve_uri(receipt.manifest_uri, relative_path)
     if reader.sha256(uri) != digest:
         raise ValueError(f"shard content hash mismatch at {relative_path}")
+    metadata = reader.parquet_metadata(uri)
+    if metadata.row_count != row_count:
+        raise ValueError(f"Parquet footer row count differs from shard manifest at {relative_path}")
+    if not metadata.schema.equals(expected_schemas[table], check_metadata=True):
+        raise ValueError(f"Parquet footer schema differs from contract at {relative_path}")
     return table, index, row_count
 
 
@@ -1457,11 +1490,11 @@ def _batch_table_rows(
                 "inventory_row_id": row.inventory_row_id,
                 "status": row.status.value,
                 "reference_id_namespace": row.reference_id_namespace,
-                "attempted_reference_ids_json": json.dumps(
-                    sorted(row.attempted_reference_ids), separators=(",", ":")
+                "attempted_reference_ids_json": _canonical_json_string_array(
+                    row.attempted_reference_ids
                 ),
-                "missing_reference_ids_json": json.dumps(
-                    sorted(row.missing_reference_ids), separators=(",", ":")
+                "missing_reference_ids_json": _canonical_json_string_array(
+                    row.missing_reference_ids
                 ),
                 "measurement_sidecar_uri": row.measurement_sidecar_uri,
                 "measurement_sidecar_sha256": row.measurement_sidecar_sha256,
@@ -1476,7 +1509,7 @@ def _batch_table_rows(
                 "level": row.level,
                 "code": row.code,
                 "reference_id_namespace": row.reference_id_namespace,
-                "reference_ids_json": json.dumps(sorted(row.reference_ids), separators=(",", ":")),
+                "reference_ids_json": _canonical_json_string_array(row.reference_ids),
                 "measurement_sidecar_uri": row.measurement_sidecar_uri,
                 "measurement_sidecar_sha256": row.measurement_sidecar_sha256,
                 "measurement_record_count": row.measurement_record_count,
@@ -1516,8 +1549,8 @@ def _batch_table_rows(
                 "source_revision": row.source_revision,
                 "status": row.status.value,
                 "evidence": row.evidence,
-                "candidate_inventory_row_ids_json": json.dumps(
-                    sorted(row.candidate_inventory_row_ids), separators=(",", ":")
+                "candidate_inventory_row_ids_json": _canonical_json_string_array(
+                    row.candidate_inventory_row_ids
                 ),
             }
             for row in batch.text_polygon_links
@@ -1748,8 +1781,8 @@ def _index_evidence_rows(batch: PoolBatch, connection: sqlite3.Connection) -> No
                 row.inventory_row_id,
                 row.status.value,
                 row.reference_id_namespace,
-                json.dumps(sorted(row.attempted_reference_ids), separators=(",", ":")),
-                json.dumps(sorted(row.missing_reference_ids), separators=(",", ":")),
+                _canonical_json_string_array(row.attempted_reference_ids),
+                _canonical_json_string_array(row.missing_reference_ids),
                 row.measurement_sidecar_uri,
                 row.measurement_sidecar_sha256,
                 row.measurement_record_count,
@@ -1764,7 +1797,7 @@ def _index_evidence_rows(batch: PoolBatch, connection: sqlite3.Connection) -> No
                 row.level,
                 row.code,
                 row.reference_id_namespace,
-                json.dumps(sorted(row.reference_ids), separators=(",", ":")),
+                _canonical_json_string_array(row.reference_ids),
                 row.measurement_sidecar_uri,
                 row.measurement_sidecar_sha256,
                 row.measurement_record_count,
@@ -2366,12 +2399,14 @@ def _parse_json_id_array(value: object) -> tuple[str, ...] | None:
         decoded = json.loads(value)
     except json.JSONDecodeError:
         return None
-    if not isinstance(decoded, list) or any(not _present(item) for item in decoded):
+    if not isinstance(decoded, list) or any(
+        not isinstance(item, str) or not _present(item) for item in decoded
+    ):
         return None
     values = tuple(decoded)
     if len(values) != len(set(values)) or tuple(sorted(values)) != values:
         return None
-    if json.dumps(list(values), ensure_ascii=False, separators=(",", ":")) != value:
+    if _canonical_json_string_array(values) != value:
         return None
     return values
 

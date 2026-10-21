@@ -28,6 +28,7 @@ from osm_polygon_eunis.pool_contract import (
     EvaluationCase,
     EvaluationPayload,
     EvaluationTrace,
+    ExportReceipt,
     FilesystemArtifactReader,
     FilesystemSink,
     FilesystemStreamingSink,
@@ -396,6 +397,24 @@ def _build(input_data: PoolBuildInput):
     return build_full_pool(input_data)
 
 
+def _with_unicode_reference_ids(source: PoolBuildInput) -> PoolBuildInput:
+    return replace(
+        source,
+        attempt_receipts=(
+            replace(
+                source.attempt_receipts[0],
+                attempted_reference_ids=("feature-Å/東京", "feature-A1"),
+                missing_reference_ids=("missing-ñ",),
+            ),
+            *source.attempt_receipts[1:],
+        ),
+        support_evidence=(
+            replace(source.support_evidence[0], reference_ids=("reference-é/東京",)),
+            *source.support_evidence[1:],
+        ),
+    )
+
+
 def _file_uri_path(uri: str) -> Path:
     return Path(unquote(urlparse(uri).path))
 
@@ -578,34 +597,38 @@ def test_nine_pool_gate_requires_all_three_by_three_combinations():
     assert gate.missing_pools
 
 
+def _stream_fixture_pool(
+    tmp_path: Path,
+    text_source: TextSource = TextSource.DESCRIPTION,
+    reference_system: ReferenceSystem = ReferenceSystem.WORLDCOVER,
+):
+    source = _pool_input(text_source, reference_system)
+    scan_bytes = f"fixture scan {text_source.value}/{reference_system.value}\n".encode()
+    scan_path = tmp_path / "scan-reports" / f"{text_source.value}-{reference_system.value}.json"
+    scan_path.parent.mkdir(parents=True, exist_ok=True)
+    scan_path.write_bytes(scan_bytes)
+    evidence = replace(
+        source.raw_inventory_evidence,
+        scan_report_uri=scan_path.as_uri(),
+        scan_report_sha256=hashlib.sha256(scan_bytes).hexdigest(),
+    )
+    source = replace(source, raw_inventory_evidence=evidence)
+    sink = FilesystemStreamingSink(
+        tmp_path / "streamed" / f"{text_source.value}-{reference_system.value}"
+    )
+    return export_pool_batches(
+        PoolStreamSpec.from_build_input(source),
+        _single_batch(source),
+        sink,
+    )
+
+
 def _stream_nine_fixture_pools(tmp_path: Path):
-    receipts = []
-    for text_source in TextSource:
-        for reference_system in ReferenceSystem:
-            source = _pool_input(text_source, reference_system)
-            scan_bytes = f"fixture scan {text_source.value}/{reference_system.value}\n".encode()
-            scan_path = (
-                tmp_path / "scan-reports" / f"{text_source.value}-{reference_system.value}.json"
-            )
-            scan_path.parent.mkdir(parents=True, exist_ok=True)
-            scan_path.write_bytes(scan_bytes)
-            evidence = replace(
-                source.raw_inventory_evidence,
-                scan_report_uri=scan_path.as_uri(),
-                scan_report_sha256=hashlib.sha256(scan_bytes).hexdigest(),
-            )
-            source = replace(source, raw_inventory_evidence=evidence)
-            sink = FilesystemStreamingSink(
-                tmp_path / "streamed" / f"{text_source.value}-{reference_system.value}"
-            )
-            receipts.append(
-                export_pool_batches(
-                    PoolStreamSpec.from_build_input(source),
-                    _single_batch(source),
-                    sink,
-                )
-            )
-    return tuple(receipts)
+    return tuple(
+        _stream_fixture_pool(tmp_path, text_source, reference_system)
+        for text_source in TextSource
+        for reference_system in ReferenceSystem
+    )
 
 
 def test_streamed_nine_pool_gate_verifies_manifests_shards_and_inventory(tmp_path: Path):
@@ -631,16 +654,16 @@ def test_streamed_nine_pool_gate_verifies_manifests_shards_and_inventory(tmp_pat
 
 
 def test_streamed_gate_rejects_tampered_shard(tmp_path: Path):
-    receipts = _stream_nine_fixture_pools(tmp_path)
-    manifest = json.loads(_file_uri_path(receipts[0].manifest_uri).read_text())
-    shard_manifest = _file_uri_path(receipts[0].shard_manifest_uri)
+    receipt = _stream_fixture_pool(tmp_path)
+    manifest = json.loads(_file_uri_path(receipt.manifest_uri).read_text())
+    shard_manifest = _file_uri_path(receipt.shard_manifest_uri)
     first_shard = json.loads(shard_manifest.read_text().splitlines()[0])
     shard_path = _file_uri_path(
-        FilesystemArtifactReader().resolve_uri(receipts[0].manifest_uri, first_shard["path"])
+        FilesystemArtifactReader().resolve_uri(receipt.manifest_uri, first_shard["path"])
     )
     shard_path.write_bytes(shard_path.read_bytes() + b"tamper")
 
-    gate = validate_nine_streamed_pool_gate(receipts, FilesystemArtifactReader())
+    gate = validate_nine_streamed_pool_gate((receipt,), FilesystemArtifactReader())
 
     assert not gate.ok
     assert any(
@@ -650,6 +673,102 @@ def test_streamed_gate_rejects_tampered_shard(tmp_path: Path):
         for issue in issues
     )
     assert manifest["pool_complete"] is True
+
+
+def _rewrite_streamed_receipt(
+    receipt: streaming_module.StreamingExportReceipt,
+    manifest: dict,
+    shard_rows: list[dict],
+) -> streaming_module.StreamingExportReceipt:
+    shard_manifest_bytes = b"".join(
+        streaming_module._canonical_json_bytes(row) for row in shard_rows
+    )
+    shard_manifest_path = _file_uri_path(receipt.shard_manifest_uri)
+    shard_manifest_path.write_bytes(shard_manifest_bytes)
+    shard_manifest_sha256 = hashlib.sha256(shard_manifest_bytes).hexdigest()
+    manifest["storage_layout"]["shard_manifest"]["sha256"] = shard_manifest_sha256
+    manifest_bytes = streaming_module._canonical_json_bytes(manifest)
+    _file_uri_path(receipt.manifest_uri).write_bytes(manifest_bytes)
+    return replace(
+        receipt,
+        manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+        shard_manifest_sha256=shard_manifest_sha256,
+    )
+
+
+def test_streamed_gate_checks_parquet_footer_row_count_against_manifests(tmp_path: Path):
+    receipt = _stream_fixture_pool(tmp_path)
+    manifest = json.loads(_file_uri_path(receipt.manifest_uri).read_text())
+    shard_rows = [
+        json.loads(line)
+        for line in _file_uri_path(receipt.shard_manifest_uri).read_text().splitlines()
+    ]
+    document_shard = next(row for row in shard_rows if row["table"] == "document_relevance")
+    document_shard["row_count"] += 1
+    manifest["storage_layout"]["tables"]["document_relevance"]["row_count"] += 1
+    forged_receipt = _rewrite_streamed_receipt(receipt, manifest, shard_rows)
+
+    gate = validate_nine_streamed_pool_gate((forged_receipt,), FilesystemArtifactReader())
+
+    assert not gate.ok
+    assert any(
+        "Parquet footer row count differs from shard manifest" in issue
+        for pool, issues in gate.invalid_pools
+        if pool == "description-worldcover"
+        for issue in issues
+    )
+
+
+def test_streamed_gate_checks_parquet_footer_schema_against_contract(tmp_path: Path):
+    receipt = _stream_fixture_pool(tmp_path)
+    manifest = json.loads(_file_uri_path(receipt.manifest_uri).read_text())
+    shard_rows = [
+        json.loads(line)
+        for line in _file_uri_path(receipt.shard_manifest_uri).read_text().splitlines()
+    ]
+    document_shard = next(row for row in shard_rows if row["table"] == "document_relevance")
+    shard_path = _file_uri_path(
+        FilesystemArtifactReader().resolve_uri(receipt.manifest_uri, document_shard["path"])
+    )
+    table = pq.read_table(shard_path)
+    original_field = table.schema.field(0)
+    altered_schema = table.schema.set(
+        0,
+        pa.field(
+            "unexpected_document_column",
+            original_field.type,
+            nullable=original_field.nullable,
+        ),
+    )
+    pq.write_table(pa.Table.from_arrays(table.columns, schema=altered_schema), shard_path)
+    document_shard["sha256"] = hashlib.sha256(shard_path.read_bytes()).hexdigest()
+    forged_receipt = _rewrite_streamed_receipt(receipt, manifest, shard_rows)
+
+    gate = validate_nine_streamed_pool_gate((forged_receipt,), FilesystemArtifactReader())
+
+    assert not gate.ok
+    assert any(
+        "Parquet footer schema differs from contract" in issue
+        for pool, issues in gate.invalid_pools
+        if pool == "description-worldcover"
+        for issue in issues
+    )
+
+
+def test_streamed_gate_reports_malformed_receipt_pool_id_after_read_failure(tmp_path: Path):
+    receipt = _stream_fixture_pool(tmp_path)
+    broken_uri = _file_uri_path(receipt.manifest_uri).with_suffix(".missing").as_uri()
+    malformed = replace(
+        receipt,
+        pool_id="1.0.0/invalid/raw",
+        manifest_uri=broken_uri,
+    )
+
+    gate = validate_nine_streamed_pool_gate((malformed,), FilesystemArtifactReader())
+
+    assert not gate.ok
+    assert any(pool == "1.0.0/invalid/raw" for pool, _issues in gate.invalid_pools)
+    assert len(gate.missing_pools) == 9
 
 
 def test_filesystem_sink_concurrent_writers_never_overwrite_immutable_artifact(tmp_path: Path):
@@ -908,8 +1027,33 @@ def _canonical_table_rows(table: pa.Table) -> list[str]:
     return sorted(json.dumps(row, sort_keys=True) for row in table.to_pylist())
 
 
+def _assert_unicode_reference_ids_are_literal(
+    receipt: ExportReceipt,
+    source: PoolBuildInput,
+) -> None:
+    attempts = pq.read_table(
+        _file_uri_path(dict(receipt.table_uris)["polygon_attempts"])
+    ).to_pylist()
+    first_attempt = next(
+        row for row in attempts if row["inventory_row_id"] == source.inventory[0].inventory_row_id
+    )
+    assert "feature-Å/東京" in first_attempt["attempted_reference_ids_json"]
+    assert "missing-ñ" in first_attempt["missing_reference_ids_json"]
+    evidence = pq.read_table(
+        _file_uri_path(dict(receipt.table_uris)["label_support_evidence"])
+    ).to_pylist()
+    first_evidence = next(
+        row
+        for row in evidence
+        if row["inventory_row_id"] == source.inventory[0].inventory_row_id
+        and row["level"] == source.support_evidence[0].level
+        and row["code"] == source.support_evidence[0].code
+    )
+    assert "reference-é/東京" in first_evidence["reference_ids_json"]
+
+
 def test_stream_export_matches_fixture_tables_and_reports_completeness(tmp_path: Path) -> None:
-    source = _pool_input()
+    source = _with_unicode_reference_ids(_pool_input())
     bundle = _build(source)
     legacy = export_full_pool(bundle, FilesystemSink(tmp_path / "legacy"))
     stream_sink = FilesystemStreamingSink(tmp_path / "stream")
@@ -973,6 +1117,7 @@ def test_stream_export_matches_fixture_tables_and_reports_completeness(tmp_path:
         new_table = pa.concat_tables([pq.read_table(path) for path in shards_by_table[table_name]])
         assert new_table.schema == old_table.schema
         assert _canonical_table_rows(new_table) == _canonical_table_rows(old_table)
+    _assert_unicode_reference_ids_are_literal(legacy, source)
 
     rerun = export_pool_batches(
         spec,
