@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -15,8 +15,13 @@ from osm_polygon_eunis.pool_adapter import (
     EUNIS_POOL_SOURCE_LAYOUTS,
     EunisTaxonomy,
     EunisTaxonomyPath,
+    SourceTreeFile,
+    SourceTreeGroupPin,
+    source_tree_inventory_sha256,
+    validate_source_tree_group,
 )
 from osm_polygon_eunis.pool_contract import (
+    FilesystemArtifactReader,
     FilesystemStreamingSink,
     ReferencePin,
     SourceSnapshot,
@@ -112,19 +117,47 @@ def _write_source_shard(path: Path, rows: list[dict]) -> PinnedPolygonShard:
     pq.write_table(table, path)
     content = path.read_bytes()
     relative_path = f"polygons/{path.name}"
+    blob_id = hashlib.sha1(
+        f"blob {len(content)}\0".encode() + content,
+        usedforsecurity=False,
+    ).hexdigest()
     return PinnedPolygonShard(
         path_in_repo=relative_path,
         revision=_source_snapshot().revision,
         sha256=hashlib.sha256(content).hexdigest(),
         size_bytes=len(content),
+        blob_id=blob_id,
+        lfs_oid=None,
+        lfs_size=len(content),
         local_path=path,
     )
+
+
+def _fixture_layout(shard: PinnedPolygonShard):
+    base = EUNIS_POOL_SOURCE_LAYOUTS[TextSource.WEBSITE]
+    file = SourceTreeFile(
+        path=shard.path_in_repo,
+        size_bytes=shard.size_bytes,
+        blob_id=shard.blob_id,
+        lfs_oid=shard.lfs_oid,
+        lfs_size=shard.lfs_size,
+    )
+    pin = SourceTreeGroupPin(
+        repository=base.repository,
+        revision=base.raw_revision,
+        role="raw_geometry",
+        path_prefix="polygons/",
+        file_count=1,
+        total_size_bytes=shard.size_bytes,
+        inventory_sha256=source_tree_inventory_sha256((file,)),
+    )
+    return replace(base, raw_polygon_tree_pin=pin)
 
 
 def _frozen_source(tmp_path: Path, rows: list[dict]) -> FrozenPolygonSource:
     shard = _write_source_shard(tmp_path / "staged" / "region-a.parquet", rows)
     return FrozenPolygonSource(
-        layout=EUNIS_POOL_SOURCE_LAYOUTS[TextSource.WEBSITE],
+        layout=_fixture_layout(shard),
         source_snapshot=_source_snapshot(),
         manifest_uri="https://source.example/raw-source-manifest.json",
         manifest_sha256="b" * 64,
@@ -208,6 +241,64 @@ def test_raw_scan_resumes_verified_shards_without_reopening_source(
     assert second.shards == first.shards
 
 
+def test_handoff_source_tree_inventory_pins_match_checked_in_provenance() -> None:
+    manifest_path = (
+        Path(__file__).resolve().parents[2] / "config/eunis-source-provenance-20261021.json"
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["schema"]["metadata_handoff_sha256"] == (
+        "eef1267cca7cbf455f09d4df9d41cff592cf841b313ea0d9c71262d24ad5f107"
+    )
+    assert manifest["schema"]["raw_native_key_counts"] is None
+    assert "/srv/storage/" not in manifest_path.read_text(encoding="utf-8")
+
+    groups = {
+        (tree["repository"], tree["revision"], group["path_prefix"]): group
+        for section in ("raw_source_file_trees", "relevance_label_file_trees")
+        for tree in manifest[section]
+        for group in tree["groups"]
+    }
+    pins = [
+        pin
+        for layout in EUNIS_POOL_SOURCE_LAYOUTS.values()
+        for pin in (layout.raw_polygon_tree_pin, *layout.additional_tree_pins)
+    ]
+    assert len(groups) == len(pins) == 10
+    for pin in pins:
+        group = groups[(pin.repository, pin.revision, pin.path_prefix)]
+        files = tuple(
+            SourceTreeFile(
+                path=file["path"],
+                size_bytes=file["size"],
+                blob_id=file["blob_id"],
+                lfs_oid=file["lfs_oid"],
+                lfs_size=file["lfs_size"],
+            )
+            for file in group["files"]
+        )
+        assert group["file_count"] == pin.file_count
+        assert group["total_size_bytes"] == pin.total_size_bytes
+        assert group["inventory_sha256"] == pin.inventory_sha256
+        validate_source_tree_group(pin, files)
+        altered_first = replace(files[0], blob_id="0" * 40)
+        if altered_first.blob_id == files[0].blob_id:
+            altered_first = replace(files[0], blob_id="1" * 40)
+        with pytest.raises(ValueError, match="inventory digest differs"):
+            validate_source_tree_group(pin, (altered_first, *files[1:]))
+
+    reference = manifest["reference"]
+    assert reference["native_manifest_sha256"] == (
+        "4a91e553b2e0271e7ca935e542dd092fe45288c5f9bb4a09f40f6b74da4eae22"
+    )
+    assert reference["native_asset_count"] == len(reference["native_assets"]) == 136
+    assert (
+        sum(row["size_bytes"] for row in reference["native_assets"])
+        == (reference["native_asset_total_bytes"])
+    )
+    assert reference["taxonomy"]["workbook_direct_url"] is None
+    assert reference["taxonomy"]["crosswalk_rows"] is None
+
+
 def test_manifest_pin_must_cover_every_polygon_shard(tmp_path: Path) -> None:
     shard = _write_source_shard(tmp_path / "staged" / "region-a.parquet", [_source_row(1, None)])
 
@@ -260,6 +351,9 @@ def test_source_snapshot_revision_must_match_its_pinned_eunis_layout(tmp_path: P
         revision=unexpected_revision,
         sha256=shard.sha256,
         size_bytes=shard.size_bytes,
+        blob_id=shard.blob_id,
+        lfs_oid=shard.lfs_oid,
+        lfs_size=shard.lfs_size,
         local_path=shard.local_path,
     )
 
@@ -425,11 +519,20 @@ def test_eunis_attempts_export_through_bounded_shared_streaming_contract(
     attempt_shard = next(row for row in shard_rows if row["table"] == "polygon_attempts")
     attempt_table = pq.read_table(sink_root / attempt_shard["path"])
     assert attempt_table.num_rows == raw_scan.evidence.expected_key_count
+    attempt_metadata = FilesystemArtifactReader().parquet_metadata(
+        (sink_root / attempt_shard["path"]).as_uri()
+    )
+    assert attempt_metadata.row_count == raw_scan.evidence.expected_key_count
+    assert attempt_metadata.schema == attempt_table.schema
     support_shard = next(row for row in shard_rows if row["table"] == "label_support_evidence")
     support_table = pq.read_table(sink_root / support_shard["path"])
-    assert support_table.num_rows == sum(
+    support_metadata = FilesystemArtifactReader().parquet_metadata(
+        (sink_root / support_shard["path"]).as_uri()
+    )
+    assert support_metadata.row_count == sum(
         count for _level, count in attempts.shards[0].candidate_counts
     )
+    assert support_metadata.schema == support_table.schema
 
 
 def test_invalid_attempt_signature_is_recomputed_from_cached_raw_inventory(
@@ -476,12 +579,29 @@ def test_source_manifest_does_not_allow_an_unpinned_local_shard(tmp_path: Path) 
                 revision=shard.revision,
                 sha256=shard.sha256,
                 size_bytes=shard.size_bytes,
+                blob_id=shard.blob_id,
+                lfs_oid=shard.lfs_oid,
+                lfs_size=shard.lfs_size,
                 local_path=changed,
             ),
         ),
     )
 
     with pytest.raises(ValueError, match="size differs from its manifest"):
+        scan_raw_inventory(changed_source, tmp_path / "new-checkpoints", _code_pin())
+
+
+def test_raw_shard_content_must_match_its_git_tree_blob_id(tmp_path: Path) -> None:
+    source = _frozen_source(tmp_path, [_source_row(11, _geojson_polygon())])
+    shard = source.polygon_shards[0]
+    content = shard.local_path.read_bytes()
+    changed = shard.local_path.with_name("same-size-changed.parquet")
+    changed.write_bytes(bytes([content[0] ^ 1]) + content[1:])
+    changed_shard = replace(shard, sha256=hashlib.sha256(changed.read_bytes()).hexdigest())
+    changed_shard = replace(changed_shard, local_path=changed)
+    changed_source = replace(source, polygon_shards=(changed_shard,))
+
+    with pytest.raises(ValueError, match="Git blob id differs"):
         scan_raw_inventory(changed_source, tmp_path / "new-checkpoints", _code_pin())
 
 

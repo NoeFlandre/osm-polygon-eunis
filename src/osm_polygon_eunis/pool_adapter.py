@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
@@ -48,6 +50,8 @@ EEA_2021_NATIVE_MANIFEST_SHA256 = "4a91e553b2e0271e7ca935e542dd092fe45288c5f9bb4
 EEA_2021_ASSET_COUNT = 136
 EEA_2021_ASSET_BYTES = 5_007_209_626
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_GIT_SHA1_LENGTH = 40
+_SHA256_LENGTH = 64
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,9 +132,113 @@ class EunisPoolSourceLayout:
     relevance_repository: str
     relevance_revision: str
     relevance_path_globs: tuple[tuple[str, str], ...]
+    raw_polygon_tree_pin: SourceTreeGroupPin
+    additional_tree_pins: tuple[SourceTreeGroupPin, ...] = ()
     document_link_glob: str | None = None
     document_glob: str | None = None
     sentence_glob: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SourceTreeFile:
+    """One file entry from an immutable Hugging Face repository tree."""
+
+    path: str
+    size_bytes: int
+    blob_id: str
+    lfs_oid: str | None
+    lfs_size: int
+
+    def __post_init__(self) -> None:
+        """Reject incomplete or malformed immutable tree entries."""
+
+        if not self.path.strip() or self.size_bytes < 0 or self.lfs_size < 0:
+            raise ValueError("source tree file path and sizes must be valid")
+        if len(self.blob_id) != _GIT_SHA1_LENGTH or any(
+            c not in "0123456789abcdef" for c in self.blob_id
+        ):
+            raise ValueError("source tree blob id must be a full lowercase Git SHA-1")
+        if self.lfs_oid is not None and (
+            len(self.lfs_oid) != _SHA256_LENGTH
+            or any(c not in "0123456789abcdef" for c in self.lfs_oid)
+        ):
+            raise ValueError("source tree LFS oid must be a lowercase SHA-256")
+
+
+@dataclass(frozen=True, slots=True)
+class SourceTreeGroupPin:
+    """Expected immutable inventory for one path group in a pinned repository tree."""
+
+    repository: str
+    revision: str
+    role: str
+    path_prefix: str
+    file_count: int
+    total_size_bytes: int
+    inventory_sha256: str
+
+    def __post_init__(self) -> None:
+        """Validate group identity and inventory digest fields."""
+
+        if not self.repository.strip() or not self.role.strip() or not self.path_prefix:
+            raise ValueError("source tree pin requires repository, role, and path prefix")
+        if len(self.revision) not in {40, 64} or any(
+            c not in "0123456789abcdef" for c in self.revision
+        ):
+            raise ValueError("source tree revision must be a full lowercase Git SHA")
+        if self.file_count <= 0 or self.total_size_bytes < 0:
+            raise ValueError("source tree file count and byte total must be valid")
+        if len(self.inventory_sha256) != _SHA256_LENGTH or any(
+            c not in "0123456789abcdef" for c in self.inventory_sha256
+        ):
+            raise ValueError("source tree inventory SHA-256 must be lowercase hexadecimal")
+
+
+def source_tree_inventory_sha256(files: Iterable[SourceTreeFile]) -> str:
+    """Hash source tree metadata using the handoff's canonical JSON encoding."""
+
+    ordered = sorted(files, key=lambda row: row.path)
+    if len({row.path for row in ordered}) != len(ordered):
+        raise ValueError("source tree inventory contains duplicate paths")
+    entries = [
+        {
+            "path": row.path,
+            "size": row.size_bytes,
+            "blob_id": row.blob_id,
+            "lfs_oid": row.lfs_oid,
+            "lfs_size": row.lfs_size,
+        }
+        for row in ordered
+    ]
+    canonical = json.dumps(entries, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def validate_source_tree_group(
+    pin: SourceTreeGroupPin,
+    files: Iterable[SourceTreeFile],
+) -> None:
+    """Require exact file paths, count, size, and metadata digest for one tree group."""
+
+    entries = tuple(files)
+    if any(not row.path.startswith(pin.path_prefix) for row in entries):
+        raise ValueError(f"source tree entries fall outside pinned prefix {pin.path_prefix!r}")
+    if len(entries) != pin.file_count:
+        raise ValueError(
+            f"source tree file count differs for {pin.repository}:{pin.path_prefix}: "
+            f"{len(entries)} != {pin.file_count}"
+        )
+    total_bytes = sum(row.size_bytes for row in entries)
+    if total_bytes != pin.total_size_bytes:
+        raise ValueError(
+            f"source tree byte total differs for {pin.repository}:{pin.path_prefix}: "
+            f"{total_bytes} != {pin.total_size_bytes}"
+        )
+    digest = source_tree_inventory_sha256(entries)
+    if digest != pin.inventory_sha256:
+        raise ValueError(
+            f"source tree inventory digest differs for {pin.repository}:{pin.path_prefix}"
+        )
 
 
 EUNIS_POOL_SOURCE_LAYOUTS: Mapping[TextSource, EunisPoolSourceLayout] = {
@@ -142,6 +250,35 @@ EUNIS_POOL_SOURCE_LAYOUTS: Mapping[TextSource, EunisPoolSourceLayout] = {
         relevance_repository="NoeFlandre/osm-polygon-description-tag-landuse",
         relevance_revision="ce98b328f3c6543800a3d931877b51eb3f0cf768",
         relevance_path_globs=(("description", "labels/language-v1/data/*.parquet"),),
+        raw_polygon_tree_pin=SourceTreeGroupPin(
+            "NoeFlandre/osm-polygon-description-tag",
+            "b4706eb315c66a8a57135289e7612dca8e03caf8",
+            "raw_geometry",
+            "data/",
+            386,
+            746_727_545,
+            "cfedbc2235eecda19e52527dc45efee043af5909ac483976db8b844dd4a0f599",
+        ),
+        additional_tree_pins=(
+            SourceTreeGroupPin(
+                "NoeFlandre/osm-polygon-description-tag",
+                "b4706eb315c66a8a57135289e7612dca8e03caf8",
+                "raw_text",
+                "language-v1/data/",
+                386,
+                103_449_770,
+                "d76a3a42708307d1932c55c24499f39c2fd48c5fec712d15f0b65b0cb6c60f53",
+            ),
+            SourceTreeGroupPin(
+                "NoeFlandre/osm-polygon-description-tag-landuse",
+                "ce98b328f3c6543800a3d931877b51eb3f0cf768",
+                "relevance_labels",
+                "labels/language-v1/data/",
+                386,
+                100_444_539,
+                "79ef71e658e6ac666a2a23ccdd3746220b525e0bb9ef6294ab8ceda9767a7768",
+            ),
+        ),
     ),
     TextSource.WEBSITE: EunisPoolSourceLayout(
         text_source=TextSource.WEBSITE,
@@ -151,6 +288,26 @@ EUNIS_POOL_SOURCE_LAYOUTS: Mapping[TextSource, EunisPoolSourceLayout] = {
         relevance_repository="NoeFlandre/osm-polygon-website-tag-landuse",
         relevance_revision="e6524c711ee0033c3cd5990e5fdbbe4b89992dfb",
         relevance_path_globs=(("website", "labels/polygons/*.parquet"),),
+        raw_polygon_tree_pin=SourceTreeGroupPin(
+            "NoeFlandre/osm-polygon-website-tag",
+            "4cbddf95ce614e68d5ada8b94ca21bf9e48d39dd",
+            "raw_geometry",
+            "polygons/",
+            386,
+            3_943_775_497,
+            "5ef66bc56532914428d800a1671bd1fd1b33cf54966617197e6e1c548788ca9d",
+        ),
+        additional_tree_pins=(
+            SourceTreeGroupPin(
+                "NoeFlandre/osm-polygon-website-tag-landuse",
+                "e6524c711ee0033c3cd5990e5fdbbe4b89992dfb",
+                "relevance_labels",
+                "labels/polygons/",
+                386,
+                3_299_123_482,
+                "0a2c112b0d4198fddaf0c20153f0f1fc8f0f661c265446f741da787fa867ee96",
+            ),
+        ),
     ),
     TextSource.WIKI: EunisPoolSourceLayout(
         text_source=TextSource.WIKI,
@@ -162,6 +319,53 @@ EUNIS_POOL_SOURCE_LAYOUTS: Mapping[TextSource, EunisPoolSourceLayout] = {
         relevance_path_globs=(
             ("wikipedia", "labels/wikipedia/sentences/*.parquet"),
             ("wikivoyage", "labels/wikivoyage/sentences/*.parquet"),
+        ),
+        raw_polygon_tree_pin=SourceTreeGroupPin(
+            "NoeFlandre/osm-polygon-wikidata-and-wikipedia",
+            "d6fc058ccf4643bc5fe5bfd5c1c0bc403d3da801",
+            "raw_geometry",
+            "polygons/",
+            386,
+            2_203_317_876,
+            "1628f43bf1d42041d0e41b18156abbb1f52420fd7f138027ad4b96fcfa0c9dd6",
+        ),
+        additional_tree_pins=(
+            SourceTreeGroupPin(
+                "NoeFlandre/osm-polygon-wikidata-and-wikipedia",
+                "d6fc058ccf4643bc5fe5bfd5c1c0bc403d3da801",
+                "wikipedia_text",
+                "wikipedia/sentences/",
+                386,
+                18_075_023_818,
+                "79f54e06708b5755f3cf09c59890c6504669095c3529b690016c09aef04df6c8",
+            ),
+            SourceTreeGroupPin(
+                "NoeFlandre/osm-polygon-wikidata-and-wikipedia",
+                "d6fc058ccf4643bc5fe5bfd5c1c0bc403d3da801",
+                "wikivoyage_text",
+                "wikivoyage/sentences/",
+                375,
+                373_112_864,
+                "c407eb5b70cada37fde70a2b92882ddad301e954f9c2a28713443663ab9fefa7",
+            ),
+            SourceTreeGroupPin(
+                "NoeFlandre/osm-polygon-wikidata-and-wikipedia-landuse",
+                "49307aeb05b6dcc8a5d393f77f59a1e6d13a967a",
+                "wikipedia_relevance_labels",
+                "labels/wikipedia/sentences/",
+                386,
+                8_191_284_820,
+                "310214740d4c0d10b4228583992c0e0842df680ef68996f8cc019f9cdcb4268f",
+            ),
+            SourceTreeGroupPin(
+                "NoeFlandre/osm-polygon-wikidata-and-wikipedia-landuse",
+                "49307aeb05b6dcc8a5d393f77f59a1e6d13a967a",
+                "wikivoyage_relevance_labels",
+                "labels/wikivoyage/sentences/",
+                375,
+                189_959_172,
+                "3cdd0e4f0fa8b6588e578ff077467a3e4516e676d7a4abd30cb622477cf8245d",
+            ),
         ),
         document_link_glob="polygon_document_links/*.parquet",
         document_glob="wikipedia/documents/*.parquet",

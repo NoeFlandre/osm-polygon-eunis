@@ -11,15 +11,19 @@ select the rows in either stage.
 
 | Pool source | Raw polygon snapshot | Downstream relevance snapshot | Downstream text evidence |
 | --- | --- | --- | --- |
-| Description | `NoeFlandre/osm-polygon-description-tag` at `b4706eb315c66a8a57135289e7612dca8e03caf8`, `data/*.parquet` (386 shards; 746,727,545 bytes) | `NoeFlandre/osm-polygon-description-tag-landuse` at `ce98b328f3c6543800a3d931877b51eb3f0cf768`, `labels/language-v1/data/*.parquet` | Description fields remain attached to raw rows. |
-| Website | `NoeFlandre/osm-polygon-website-tag` at `4cbddf95ce614e68d5ada8b94ca21bf9e48d39dd`, `polygons/*.parquet` (386 shards; 3,943,775,497 bytes) | `NoeFlandre/osm-polygon-website-tag-landuse` at `e6524c711ee0033c3cd5990e5fdbbe4b89992dfb`, `labels/polygons/*.parquet` | Website fields remain attached to raw rows. |
-| Wiki | `NoeFlandre/osm-polygon-wikidata-and-wikipedia` at `d6fc058ccf4643bc5fe5bfd5c1c0bc403d3da801`, `polygons/*.parquet` (386 shards; 2,203,317,876 bytes) | `NoeFlandre/osm-polygon-wikidata-and-wikipedia-landuse` at `49307aeb05b6dcc8a5d393f77f59a1e6d13a967a`, `labels/wikipedia/sentences/*.parquet` and `labels/wikivoyage/sentences/*.parquet` | `wikipedia/documents/*.parquet`, `polygon_document_links/*.parquet`, and `wikivoyage/sentences/*.parquet`. |
+| Description | `NoeFlandre/osm-polygon-description-tag` at `b4706eb315c66a8a57135289e7612dca8e03caf8`, `data/*.parquet` (386 files; 746,727,545 bytes) | `NoeFlandre/osm-polygon-description-tag-landuse` at `ce98b328f3c6543800a3d931877b51eb3f0cf768`, `labels/language-v1/data/*.parquet` (386 files; 100,444,539 bytes) | Raw `language-v1/data/*.parquet` (386 files; 103,449,770 bytes); description fields remain attached to raw rows. |
+| Website | `NoeFlandre/osm-polygon-website-tag` at `4cbddf95ce614e68d5ada8b94ca21bf9e48d39dd`, `polygons/*.parquet` (386 files; 3,943,775,497 bytes) | `NoeFlandre/osm-polygon-website-tag-landuse` at `e6524c711ee0033c3cd5990e5fdbbe4b89992dfb`, `labels/polygons/*.parquet` (386 files; 3,299,123,482 bytes) | Website fields remain attached to raw rows. |
+| Wiki | `NoeFlandre/osm-polygon-wikidata-and-wikipedia` at `d6fc058ccf4643bc5fe5bfd5c1c0bc403d3da801`, `polygons/*.parquet` (386 files; 2,203,317,876 bytes) | `NoeFlandre/osm-polygon-wikidata-and-wikipedia-landuse` at `49307aeb05b6dcc8a5d393f77f59a1e6d13a967a`, Wikipedia labels (386 files; 8,191,284,820 bytes) and Wikivoyage labels (375 files; 189,959,172 bytes) | Raw `wikipedia/sentences/*.parquet` (386 files; 18,075,023,818 bytes) and `wikivoyage/sentences/*.parquet` (375 files; 373,112,864 bytes). |
 
-The [frozen source config at PR #159's reviewed commit](https://github.com/NoeFlandre/osm-polygon-eunis/blob/d96e0651f4d3ac97de4d73f6a6fee1e1294a7fe3/scripts/eunis_geometry_census_sources.py)
-records these repository IDs, revisions, and path globs. This is configuration
-provenance. It does not verify the raw Hub manifests or shard contents at those
-revisions. The label snapshots are separate inputs and never select the raw
-polygons to enumerate.
+[`config/eunis-source-provenance-20261021.json`](../config/eunis-source-provenance-20261021.json)
+records the frozen tree entries, Git blob IDs, byte sizes, and canonical inventory
+hashes for these raw, text, and relevance groups. Its metadata handoff SHA-256 is
+`eef1267cca7cbf455f09d4df9d41cff592cf841b313ea0d9c71262d24ad5f107`. The
+metadata confirms the pinned Hub revisions and complete file inventories; it
+does not provide Parquet row counts, native-key counts, or proof that all rows
+have been scanned. `wikipedia/documents/*.parquet` and
+`polygon_document_links/*.parquet` still lack verified file-tree pins. The label
+snapshots are separate inputs and never select the raw polygons to enumerate.
 
 The Wiki repository is explicitly mapped to `TextSource.WIKI`; the older
 `DatasetSpec("wikidata", ...)` remains unchanged for legacy consumers. The raw
@@ -27,13 +31,14 @@ identity is the complete `(source_pbf, osm_type, osm_id)` key. Its source-row
 locator and original geometry payload are retained in the raw checkpoint.
 
 The runner accepts only a frozen repository file inventory whose polygon paths
-exactly equal all paths matching the source layout. Each local polygon shard is
-checked against the pinned revision, byte count, and SHA-256 before scanning.
-The source snapshot must also pin the PBF manifest URI and digest. The scan
-report records the source manifest URI/hash, all shard hashes, row counts, the
-canonical composite-key-set hash, and the adapter/shared-core revisions. It
-uses a disk-backed merge sort to calculate the digest in bounded memory. A
-duplicate composite key fails the scan rather than being dropped or merged.
+exactly equal all paths matching the source layout and the pinned tree-group
+count, total size, and inventory digest. Each staged non-LFS shard is checked
+against its Git blob ID, byte count, and SHA-256 before scanning. The source
+snapshot must also pin the PBF manifest URI and digest. The scan report records
+the source manifest URI/hash, all shard hashes, row counts, the canonical
+composite-key-set hash, and the adapter/shared-core revisions. It uses a
+disk-backed merge sort to calculate the digest in bounded memory. A duplicate
+composite key fails the scan rather than being dropped or merged.
 
 Per-shard checkpoints are content-hashed and resumable. A resume is accepted
 only when the complete source manifest, source revision, shard hash, and code
@@ -76,13 +81,13 @@ workbook digest, and workbook-derived level/parent mapping. After validation,
 `make_eunis_taxonomy_from_classification()` creates explicit paths for direct
 L3 map codes and requires an L1 and L2 ancestor for every code. This uses the
 hierarchy only; no external habitat crosswalk is needed for L3-to-L2-to-L1
-rollups. The verified metadata pins are taxonomy cache SHA-256
+rollups. The metadata handoff records taxonomy cache SHA-256
 `223aa3fb89ac48cb5095e443433412c085e66fc54602e2c29253537455a2424f`, EEA
 classification record `bfe4c237-e378-4a83-ab21-b3807f96c2e2`, and workbook
 SHA-256 `1427d22db8d77d1053ab1683aa60713bdec3d810605dd6b7bc16683b4ca14665`.
-The cache does not retain the direct workbook URL or crosswalk values; the
-lineage validator requires the workbook bytes and checks their digest before
-accepting the cached hierarchy.
+The handoff has neither original cache nor workbook bytes, the direct workbook
+URL, nor crosswalk values. The lineage validator has not run against those
+bytes; production remains gated on that validation.
 
 Text link resolution is a separate helper. It retains linked, ambiguous,
 unmatched, and geometry-missing links without removing source inventory rows.
@@ -116,13 +121,9 @@ raw-first census and EUNIS label attempts do not use relevance to select keys.
 ## Verification limits
 
 The implementation tests use deterministic local fixtures and do not download
-the 5 GB EEA raster set or source shards. Pinned raw Hub trees contain 386
-polygon shards each; their metadata totals are 746,727,545 bytes for Description,
-3,943,775,497 bytes for Website, and 2,203,317,876 bytes for Wiki. These tree
-totals do not provide unique raw row counts or key-set hashes. The source
-manifest and individual shard hashes still need verification at the pinned
-revisions. The taxonomy lineage validator is implemented but the cached
-hierarchy and workbook bytes have not yet been transferred into this workspace
-for a production check. Production attempts and exports remain gated until raw
-manifests, the taxonomy lineage, and downstream text/relevance manifests and
-schemas are verified.
+the 5 GB EEA raster set or source shards. The complete Hub tree metadata is
+pinned, but unique raw row counts and key-set hashes are still unknown. The raw
+data blobs have not been staged or enumerated, so content and row-level
+integrity remain unverified. Production attempts and exports remain gated until
+the raw snapshot manifests are verified, the taxonomy lineage is checked
+against workbook bytes, and text and relevance schemas and joins are confirmed.

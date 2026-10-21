@@ -44,6 +44,7 @@ packages = ["src/osm_polygon_eunis"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "config/eea-2021-reference.json" = "osm_polygon_eunis/eea-2021-reference.json"
+"config/eunis-source-provenance-20261021.json" = "osm_polygon_eunis/eunis-source-provenance-20261021.json"
 
 [tool.pytest.ini_options]
 addopts = "--strict-config --strict-markers -m 'not slow'"

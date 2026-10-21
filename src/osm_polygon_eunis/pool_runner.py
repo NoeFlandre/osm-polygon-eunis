@@ -36,8 +36,10 @@ from .pool_adapter import (
     EunisLabelAttempt,
     EunisPoolSourceLayout,
     EunisTaxonomy,
+    SourceTreeFile,
     hierarchy_support_groups,
     resolve_eunis_labels,
+    validate_source_tree_group,
 )
 from .pool_contract import (
     AmbiguityBasis,
@@ -105,6 +107,9 @@ class PinnedPolygonShard:
     revision: str
     sha256: str
     size_bytes: int
+    blob_id: str
+    lfs_oid: str | None
+    lfs_size: int
     local_path: Path
 
 
@@ -1573,6 +1578,15 @@ def _verify_local_shard(shard: PinnedPolygonShard) -> None:
         raise ValueError(
             f"staged raw shard checksum differs from its manifest: {shard.path_in_repo}"
         )
+    if shard.lfs_oid is not None:
+        if shard.sha256 != shard.lfs_oid or shard.size_bytes != shard.lfs_size:
+            raise ValueError(
+                f"staged raw LFS shard differs from its tree pin: {shard.path_in_repo}"
+            )
+    elif _git_blob_sha1(shard.local_path) != shard.blob_id:
+        raise ValueError(
+            f"staged raw shard Git blob id differs from its tree pin: {shard.path_in_repo}"
+        )
 
 
 def _local_file_uri_path(uri: str) -> Path:
@@ -1603,6 +1617,18 @@ def _write_atomic(path: Path, content: bytes) -> None:
 
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _git_blob_sha1(path: Path) -> str:
+    """Return the Git blob SHA-1 for a file without loading it into memory."""
+
+    size = path.stat().st_size
+    digest = hashlib.sha1(usedforsecurity=False)
+    digest.update(f"blob {size}\0".encode())
     with path.open("rb") as source:
         while chunk := source.read(1024 * 1024):
             digest.update(chunk)
@@ -1676,12 +1702,26 @@ def _validate_manifest_paths(source: FrozenPolygonSource) -> None:
 
 
 def _validate_shard_pins(source: FrozenPolygonSource) -> None:
+    pin = source.layout.raw_polygon_tree_pin
+    if pin.repository != source.layout.repository or pin.revision != source.layout.raw_revision:
+        raise ValueError("raw polygon tree pin does not match its EUNIS source layout")
+    pinned_files = []
     for shard in source.polygon_shards:
         if shard.revision != source.source_snapshot.revision:
             raise ValueError(f"polygon shard {shard.path_in_repo} has another revision")
         _require_sha256(shard.sha256, f"polygon shard {shard.path_in_repo} SHA-256")
         if shard.size_bytes < 0:
             raise ValueError("polygon shard size cannot be negative")
+        pinned_files.append(
+            SourceTreeFile(
+                path=shard.path_in_repo,
+                size_bytes=shard.size_bytes,
+                blob_id=shard.blob_id,
+                lfs_oid=shard.lfs_oid,
+                lfs_size=shard.lfs_size,
+            )
+        )
+    validate_source_tree_group(pin, pinned_files)
 
 
 def _ensure_required_raw_columns(shard_path: str, schema_names: set[str]) -> None:
