@@ -1,8 +1,8 @@
-"""Bounded, resumable raw-first staging for EUNIS source-wide pools.
+"""Bounded, resumable raw-first staging and streaming export for EUNIS pools.
 
-This module writes per-shard JSONL checkpoints. It intentionally does not call
-the in-memory shared-core builder/exporter; the shared streaming finalizer is a
-separate dependency before these checkpoints can become production pools.
+This module writes per-shard JSONL checkpoints and passes bounded batches to
+the shared core's SQLite-backed exporter. It does not materialize full pools
+or Parquet bytes in memory.
 """
 
 from __future__ import annotations
@@ -15,7 +15,8 @@ import os
 import tempfile
 from collections import Counter
 from collections.abc import Iterator
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
+from dataclasses import field as dataclass_field
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import IO, Any
@@ -39,20 +40,33 @@ from .pool_adapter import (
     resolve_eunis_labels,
 )
 from .pool_contract import (
+    AmbiguityBasis,
+    AssignmentKind,
+    FileArtifactSink,
     GeometryStatus,
     LabelCandidate,
     LabelOutcome,
+    OutcomeStatus,
     PolygonInventoryRow,
     PolygonSnapshot,
+    PoolBatch,
+    PoolBuildInput,
+    PoolKey,
+    PoolStreamSpec,
     RawInventoryEvidence,
     ReferencePin,
+    ReferenceSystem,
     SourceSnapshot,
+    StreamingExportReceipt,
+    StreamingLimits,
+    SupportSemantics,
     canonical_native_key,
+    export_pool_batches,
     inventory_row_identifier,
     native_key_json,
     polygon_snapshot_identifier,
 )
-from .pool_contract.models import NativeKey, SupportSemantics
+from .pool_contract.models import NativeKey
 from .raster_reference import RasterReference
 
 _KEY_FIELDS = ("source_pbf", "osm_type", "osm_id")
@@ -154,6 +168,82 @@ class EunisAttemptRun:
     report_uri: str
     report_sha256: str
     shards: tuple[AttemptShardReceipt, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class EunisPoolExport:
+    """Streaming pool receipt plus durable adapter evidence locations."""
+
+    receipt: StreamingExportReceipt
+    raw_inventory_report_uri: str
+    label_attempt_report_uri: str
+    attempt_checkpoint_uris: tuple[tuple[str, str], ...]
+
+
+@dataclass(slots=True)
+class _PoolBatchAccumulator:
+    """Build consecutive batches bounded by rows and the number of polygons."""
+
+    limits: StreamingLimits
+    max_polygons_per_batch: int
+    batch_index: int = 0
+    inventory: list[PolygonInventoryRow] = dataclass_field(default_factory=list)
+    polygons: list[PolygonSnapshot] = dataclass_field(default_factory=list)
+    candidates: list[LabelCandidate] = dataclass_field(default_factory=list)
+    outcomes: list[LabelOutcome] = dataclass_field(default_factory=list)
+    current_rows: int = 0
+    current_polygons: int = 0
+
+    def add(
+        self,
+        inventory: PolygonInventoryRow,
+        polygon: PolygonSnapshot | None,
+        candidates: tuple[LabelCandidate, ...],
+        outcomes: tuple[LabelOutcome, ...],
+    ) -> PoolBatch | None:
+        """Append one raw polygon attempt, flushing a full batch first."""
+
+        row_count = 1 + int(polygon is not None) + len(candidates) + len(outcomes)
+        if row_count > self.limits.max_batch_rows:
+            raise ValueError(
+                f"one polygon attempt has {row_count} rows, exceeding the configured "
+                f"max_batch_rows={self.limits.max_batch_rows}"
+            )
+        previous = None
+        if self.inventory and (
+            self.current_rows + row_count > self.limits.max_batch_rows
+            or self.current_polygons >= self.max_polygons_per_batch
+        ):
+            previous = self.flush()
+        self.inventory.append(inventory)
+        if polygon is not None:
+            self.polygons.append(polygon)
+        self.candidates.extend(candidates)
+        self.outcomes.extend(outcomes)
+        self.current_rows += row_count
+        self.current_polygons += 1
+        return previous
+
+    def flush(self) -> PoolBatch | None:
+        """Return the buffered batch and release its row references."""
+
+        if not self.inventory:
+            return None
+        batch = PoolBatch(
+            batch_index=self.batch_index,
+            inventory=tuple(self.inventory),
+            polygons=tuple(self.polygons),
+            label_candidates=tuple(self.candidates),
+            label_outcomes=tuple(self.outcomes),
+        )
+        self.batch_index += 1
+        self.inventory.clear()
+        self.polygons.clear()
+        self.candidates.clear()
+        self.outcomes.clear()
+        self.current_rows = 0
+        self.current_polygons = 0
+        return batch
 
 
 @dataclass(frozen=True, slots=True)
@@ -355,6 +445,116 @@ def run_eunis_label_attempts(
     )
 
 
+def export_eunis_pool(
+    attempts: EunisAttemptRun,
+    sink: FileArtifactSink,
+    *,
+    limits: StreamingLimits | None = None,
+    staging_directory: Path | None = None,
+    contract_version: str = "1.0.0",
+    pool_version: str = "1.0.0",
+) -> EunisPoolExport:
+    """Finalize one EUNIS source pool from bounded per-shard attempt records.
+
+    The adapter copies the small raw-census receipt and each attempt checkpoint
+    through the streaming sink, then emits bounded ``PoolBatch`` instances.
+    It never collects the full pool or Parquet payloads in memory. This does
+    not perform text/relevance joins or evaluation sampling.
+    """
+
+    selected_limits = limits or StreamingLimits()
+    raw_report_path = _verified_report_path(
+        attempts.raw_scan.evidence.scan_report_uri,
+        attempts.raw_scan.evidence.scan_report_sha256,
+        "raw inventory scan report",
+    )
+    raw_report_bytes = raw_report_path.read_bytes()
+    raw_report = _json_object(raw_report_bytes, "raw inventory scan report")
+    _validate_raw_scan_report(attempts.raw_scan, raw_report)
+
+    attempt_report_path = _verified_report_path(
+        attempts.report_uri,
+        attempts.report_sha256,
+        "EUNIS label-attempt report",
+    )
+    attempt_report_bytes = attempt_report_path.read_bytes()
+    attempt_report = _json_object(attempt_report_bytes, "EUNIS label-attempt report")
+    _validate_attempt_report(attempts, attempt_report)
+
+    checkpoint_paths = {
+        shard.path_in_repo: _verified_report_path(
+            shard.checkpoint_uri,
+            shard.checkpoint_sha256,
+            f"label-attempt checkpoint for {shard.path_in_repo}",
+        )
+        for shard in attempts.shards
+    }
+    artifact_root = _pool_artifact_root(
+        text_source=attempts.raw_scan.source.layout.text_source.value,
+        snapshot_id=attempts.raw_scan.source.source_snapshot.snapshot_id,
+        contract_version=contract_version,
+        pool_version=pool_version,
+    )
+    evidence_root = f"{artifact_root}/adapter-evidence"
+    raw_report_uri = sink.put(
+        f"{evidence_root}/raw-inventory-scan.json",
+        raw_report_bytes,
+    )
+    _require_resolvable_uri(raw_report_uri, "stored raw inventory report")
+
+    checkpoint_uris = []
+    checkpoint_uri_by_path: dict[str, str] = {}
+    for shard in attempts.shards:
+        uri = sink.put_file(
+            f"{evidence_root}/label-attempts/{_safe_token(shard.path_in_repo)}.jsonl",
+            checkpoint_paths[shard.path_in_repo],
+        )
+        _require_resolvable_uri(uri, f"stored label-attempt checkpoint {shard.path_in_repo}")
+        if urlparse(uri).fragment:
+            raise ValueError("streaming sink file URIs cannot already contain a fragment")
+        checkpoint_uris.append((shard.path_in_repo, uri))
+        checkpoint_uri_by_path[shard.path_in_repo] = uri
+
+    portable_attempt_report = dict(attempt_report)
+    portable_attempt_report["raw_inventory_scan_report_uri"] = raw_report_uri
+    portable_attempt_report["shards"] = [
+        {
+            **record,
+            "checkpoint_uri": checkpoint_uri_by_path[str(record["path_in_repo"])],
+        }
+        for record in attempt_report["shards"]
+    ]
+    portable_attempt_bytes = _canonical_json_bytes(portable_attempt_report)
+    portable_attempt_uri = sink.put(
+        f"{evidence_root}/label-attempts-report.json",
+        portable_attempt_bytes,
+    )
+    _require_resolvable_uri(portable_attempt_uri, "stored EUNIS label-attempt report")
+
+    spec = _eunis_pool_stream_spec(
+        attempts,
+        raw_inventory_evidence=replace(
+            attempts.raw_scan.evidence,
+            scan_report_uri=raw_report_uri,
+        ),
+        contract_version=contract_version,
+        pool_version=pool_version,
+    )
+    receipt = export_pool_batches(
+        spec,
+        _iter_eunis_pool_batches(attempts, checkpoint_uri_by_path, selected_limits),
+        sink,
+        limits=selected_limits,
+        staging_directory=staging_directory,
+    )
+    return EunisPoolExport(
+        receipt=receipt,
+        raw_inventory_report_uri=raw_report_uri,
+        label_attempt_report_uri=portable_attempt_uri,
+        attempt_checkpoint_uris=tuple(checkpoint_uris),
+    )
+
+
 def iter_attempt_checkpoint(uri: str) -> Iterator[dict[str, Any]]:
     """Stream one local JSONL label checkpoint for a future core batch loader."""
 
@@ -378,6 +578,258 @@ def read_raw_geometry(uri: str) -> Any:
 
     row = _read_checkpoint_fragment(uri, "geometry_payload")
     return _decode_geometry_payload(row["geometry_payload"])
+
+
+def _eunis_pool_stream_spec(
+    attempts: EunisAttemptRun,
+    *,
+    raw_inventory_evidence: RawInventoryEvidence,
+    contract_version: str,
+    pool_version: str,
+) -> PoolStreamSpec:
+    metadata_input = PoolBuildInput(
+        pool_key=PoolKey(
+            text_source=attempts.raw_scan.source.layout.text_source,
+            reference_system=ReferenceSystem.EUNIS,
+        ),
+        source_snapshot=attempts.raw_scan.source.source_snapshot,
+        raw_inventory_evidence=raw_inventory_evidence,
+        reference_pin=attempts.reference_pin,
+        adapter_id="osm-polygon-eunis/eunis-sourcewide-pool-adapter",
+        adapter_revision=attempts.code_pin.adapter_revision,
+        builder_revision=attempts.code_pin.builder_revision,
+        inventory=(),
+        polygons=(),
+        levels=EUNIS_POOL_LEVELS,
+        label_candidates=(),
+        label_outcomes=(),
+    )
+    return PoolStreamSpec.from_build_input(
+        metadata_input,
+        contract_version=contract_version,
+        pool_version=pool_version,
+    )
+
+
+def _validate_raw_scan_report(
+    raw_scan: RawInventoryScan,
+    report: dict[str, Any],
+) -> None:
+    evidence = raw_scan.evidence
+    expected = {
+        "enumeration_rule": evidence.enumeration_rule,
+        "source_snapshot": asdict(raw_scan.source.source_snapshot),
+        "source_fingerprint": raw_scan.source_fingerprint,
+        "adapter_revision": raw_scan.code_pin.adapter_revision,
+        "builder_revision": raw_scan.code_pin.builder_revision,
+        "raw_row_count": evidence.expected_key_count,
+        "unique_native_key_count": evidence.expected_key_count,
+        "native_keyset_sha256": evidence.expected_keyset_sha256,
+    }
+    if any(report.get(key) != value for key, value in expected.items()):
+        raise ValueError("raw inventory report does not match its source evidence receipt")
+    report_shards = report.get("polygon_shards")
+    if not isinstance(report_shards, list):
+        raise TypeError("raw inventory report must include its polygon shard receipts")
+    observed = {str(row.get("path_in_repo")): row for row in report_shards if isinstance(row, dict)}
+    if set(observed) != {shard.path_in_repo for shard in raw_scan.shards}:
+        raise ValueError("raw inventory report shard set differs from the source census")
+    for shard in raw_scan.shards:
+        row = observed[shard.path_in_repo]
+        if (
+            row.get("source_sha256") != shard.source_sha256
+            or row.get("source_size_bytes") != shard.source_size_bytes
+            or row.get("row_count") != shard.row_count
+            or row.get("checkpoint_sha256") != shard.checkpoint_sha256
+        ):
+            raise ValueError(f"raw inventory report receipt changed for {shard.path_in_repo}")
+
+
+def _validate_attempt_report(
+    attempts: EunisAttemptRun,
+    report: dict[str, Any],
+) -> None:
+    evidence = attempts.raw_scan.evidence
+    expected = {
+        "raw_inventory_scan_report_sha256": evidence.scan_report_sha256,
+        "raw_inventory_key_count": evidence.expected_key_count,
+        "raw_inventory_keyset_sha256": evidence.expected_keyset_sha256,
+        "reference_pin": asdict(attempts.reference_pin),
+        "taxonomy_id": attempts.taxonomy.taxonomy_id,
+        "taxonomy_revision": attempts.taxonomy.taxonomy_revision,
+        "taxonomy_sha256": attempts.taxonomy.taxonomy_sha256,
+        "adapter_revision": attempts.code_pin.adapter_revision,
+        "builder_revision": attempts.code_pin.builder_revision,
+        "signature": attempts.signature,
+        "total_attempted_polygons": evidence.expected_key_count,
+    }
+    if any(report.get(key) != value for key, value in expected.items()):
+        raise ValueError("label-attempt report does not match its source or reference pins")
+    report_shards = report.get("shards")
+    if not isinstance(report_shards, list):
+        raise TypeError("label-attempt report must include its shard receipts")
+    observed = {str(row.get("path_in_repo")): row for row in report_shards if isinstance(row, dict)}
+    if set(observed) != {shard.path_in_repo for shard in attempts.shards}:
+        raise ValueError("label-attempt report shard set differs from its checkpoints")
+    for shard in attempts.shards:
+        row = observed[shard.path_in_repo]
+        if (
+            row.get("row_count") != shard.row_count
+            or row.get("checkpoint_sha256") != shard.checkpoint_sha256
+            or tuple((str(key), int(value)) for key, value in row["outcome_counts"])
+            != shard.outcome_counts
+            or tuple((str(key), int(value)) for key, value in row["candidate_counts"])
+            != shard.candidate_counts
+        ):
+            raise ValueError(f"label-attempt report receipt changed for {shard.path_in_repo}")
+    if sum(shard.row_count for shard in attempts.shards) != evidence.expected_key_count:
+        raise ValueError("label-attempt checkpoint rows differ from the raw inventory count")
+
+
+def _iter_eunis_pool_batches(
+    attempts: EunisAttemptRun,
+    checkpoint_uris: dict[str, str],
+    limits: StreamingLimits,
+) -> Iterator[PoolBatch]:
+    code_count = len(attempts.taxonomy.paths_by_direct_code)
+    max_rows_per_polygon = 5 + 3 * code_count
+    polygons_per_batch = max(1, limits.max_batch_rows // max_rows_per_polygon)
+    if limits.max_batch_bytes < StreamingLimits().max_batch_bytes:
+        polygons_per_batch = 1
+    accumulator = _PoolBatchAccumulator(limits, polygons_per_batch)
+    total_rows = 0
+    for shard in attempts.shards:
+        durable_uri = checkpoint_uris.get(shard.path_in_repo)
+        if durable_uri is None:
+            raise ValueError(f"no durable attempt checkpoint for {shard.path_in_repo}")
+        source_path = _local_file_uri_path(shard.checkpoint_uri)
+        shard_rows = 0
+        for row_number, record in enumerate(_read_jsonl(source_path)):
+            inventory, polygon, candidates, outcomes = _pool_batch_row(
+                record,
+                durable_uri,
+                row_number,
+            )
+            completed = accumulator.add(inventory, polygon, candidates, outcomes)
+            if completed is not None:
+                yield completed
+            shard_rows += 1
+            total_rows += 1
+        if shard_rows != shard.row_count:
+            raise ValueError(
+                f"attempt checkpoint {shard.path_in_repo} has {shard_rows} rows, "
+                f"expected {shard.row_count}"
+            )
+    final_batch = accumulator.flush()
+    if final_batch is not None:
+        yield final_batch
+    if total_rows != attempts.raw_scan.evidence.expected_key_count:
+        raise ValueError("streamed EUNIS attempts do not account for every raw source key")
+
+
+def _pool_batch_row(
+    record: dict[str, Any],
+    checkpoint_uri: str,
+    row_number: int,
+) -> tuple[
+    PolygonInventoryRow,
+    PolygonSnapshot | None,
+    tuple[LabelCandidate, ...],
+    tuple[LabelOutcome, ...],
+]:
+    inventory = _inventory_from_json(record["inventory"])
+    geometry_uri = f"{checkpoint_uri}#row={row_number}/projected_geometry_wkb"
+    polygon = _polygon_from_json(record["polygon"], geometry_uri)
+    candidates = tuple(_candidate_from_json(item) for item in record["candidates"])
+    outcomes = tuple(_outcome_from_json(item) for item in record["outcomes"])
+    _verify_projected_geometry(record, polygon)
+    return inventory, polygon, candidates, outcomes
+
+
+def _inventory_from_json(value: dict[str, Any]) -> PolygonInventoryRow:
+    return PolygonInventoryRow(
+        inventory_row_id=str(value["inventory_row_id"]),
+        native_key=_native_key_from_json(str(value["native_key_json"])),
+        source_row_locator=str(value["source_row_locator"]),
+        polygon_snapshot_id=(
+            str(value["polygon_snapshot_id"]) if value["polygon_snapshot_id"] else None
+        ),
+        exclusion_reason=(str(value["exclusion_reason"]) if value["exclusion_reason"] else None),
+    )
+
+
+def _polygon_from_json(
+    value: dict[str, Any] | None,
+    durable_geometry_uri: str,
+) -> PolygonSnapshot | None:
+    if value is None:
+        return None
+    return PolygonSnapshot(
+        polygon_snapshot_id=str(value["polygon_snapshot_id"]),
+        inventory_row_id=str(value["inventory_row_id"]),
+        native_key=_native_key_from_json(str(value["native_key_json"])),
+        geometry_uri=durable_geometry_uri,
+        geometry_sha256=str(value["geometry_sha256"]),
+        geometry_format=str(value["geometry_format"]),
+        crs=str(value["crs"]),
+        coordinate_transform=str(value["coordinate_transform"]),
+        geometry_status=GeometryStatus(str(value["geometry_status"])),
+        original_area=(
+            float(value["original_area"]) if value["original_area"] is not None else None
+        ),
+        area_unit=str(value["area_unit"]),
+    )
+
+
+def _candidate_from_json(value: dict[str, Any]) -> LabelCandidate:
+    return LabelCandidate(
+        inventory_row_id=str(value["inventory_row_id"]),
+        polygon_snapshot_id=str(value["polygon_snapshot_id"]),
+        level=str(value["level"]),
+        code=str(value["code"]),
+        numerator=float(value["numerator"]),
+        denominator=float(value["denominator"]),
+        ratio=float(value["ratio"]),
+        threshold=float(value["threshold"]),
+        assignment_rule_version=str(value["assignment_rule_version"]),
+        assignment_kind=AssignmentKind(str(value["assignment_kind"])),
+        support_semantics=SupportSemantics(str(value["support_semantics"])),
+        support_unit=str(value["support_unit"]),
+        source_revision=str(value["source_revision"]),
+        taxonomy_revision=str(value["taxonomy_revision"]),
+    )
+
+
+def _outcome_from_json(value: dict[str, Any]) -> LabelOutcome:
+    return LabelOutcome(
+        inventory_row_id=str(value["inventory_row_id"]),
+        polygon_snapshot_id=(
+            str(value["polygon_snapshot_id"]) if value["polygon_snapshot_id"] else None
+        ),
+        level=str(value["level"]),
+        status=OutcomeStatus(str(value["status"])),
+        assigned_code=str(value["assigned_code"]) if value["assigned_code"] else None,
+        reason=str(value["reason"]) if value["reason"] else None,
+        ambiguity_basis=(
+            AmbiguityBasis(str(value["ambiguity_basis"])) if value["ambiguity_basis"] else None
+        ),
+    )
+
+
+def _verify_projected_geometry(
+    record: dict[str, Any],
+    polygon: PolygonSnapshot | None,
+) -> None:
+    payload = record.get("projected_geometry_wkb_base64")
+    if polygon is None:
+        if payload is not None:
+            raise ValueError("attempt has projected WKB without a polygon snapshot")
+        return
+    if not isinstance(payload, str):
+        raise TypeError("usable polygon attempt has no projected WKB")
+    geometry = base64.b64decode(payload, validate=True)
+    if hashlib.sha256(geometry).hexdigest() != polygon.geometry_sha256:
+        raise ValueError("projected WKB hash differs from the polygon snapshot pin")
 
 
 def _read_checkpoint_fragment(uri: str, expected_field: str) -> dict[str, Any]:
@@ -669,6 +1121,40 @@ def _attempt_summary(
         "candidate_counts_by_level": dict(sorted(candidates.items())),
         "shards": [asdict(receipt) for receipt in receipts],
     }
+
+
+def _verified_report_path(uri: str, expected_sha256: str, description: str) -> Path:
+    path = _local_file_uri_path(uri)
+    if not path.is_file():
+        raise FileNotFoundError(f"{description} is not available at {uri}")
+    if _sha256_file(path) != expected_sha256:
+        raise ValueError(f"{description} checksum differs from its receipt")
+    return path
+
+
+def _json_object(payload: bytes, description: str) -> dict[str, Any]:
+    try:
+        value = json.loads(payload)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"{description} is not valid JSON") from error
+    if not isinstance(value, dict):
+        raise TypeError(f"{description} must be a JSON object")
+    return value
+
+
+def _pool_artifact_root(
+    *,
+    text_source: str,
+    snapshot_id: str,
+    contract_version: str,
+    pool_version: str,
+) -> str:
+    return f"pools/{contract_version}/{text_source}/eunis/{snapshot_id}/{pool_version}"
+
+
+def _require_resolvable_uri(uri: str, description: str) -> None:
+    if not _has_uri(uri):
+        raise ValueError(f"{description} did not return a resolvable URI")
 
 
 class _ExternalKeyDigest:

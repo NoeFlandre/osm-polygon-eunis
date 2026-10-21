@@ -69,13 +69,19 @@ evaluation draws.
 
 `scan_raw_inventory()` emits `RawInventoryEvidence` and resumable raw shard
 checkpoints. `run_eunis_label_attempts()` emits per-shard attempts, counts, and
-a pinned run report. `iter_attempt_checkpoint()` streams rows for a later
-bounded core loader. The checkpoints are adapter staging artifacts; they are
-not nine completed pools and are not a public dataset. The shared-core builder
-and exporter on the base branch still materialize complete pools and Parquet
-bytes. Production finalization therefore depends on the shared core owner's
-bounded batching change. This adapter does not duplicate that serialization or
-validation work.
+a pinned run report. `export_eunis_pool()` verifies those receipts, copies the
+scan report and attempt shards through the core file-artifact sink, constructs a
+`PoolStreamSpec` with `PoolStreamSpec.from_build_input()`, and yields bounded
+`PoolBatch` rows to `export_pool_batches()`. The core performs disk-backed
+global validation and writes the completion manifest last. Polygon geometry
+URIs point to the durable attempt-shard copy in the sink.
+
+This uses PR #165's streaming API added at `26a6ce9`; this branch is stacked on
+that open PR. The filesystem sink and deterministic source fixtures exercise
+the path locally. No source-wide production export or Hub publication was run.
+Text documents and YES/NO relevance remain downstream; the shared contract has
+no typed YES/NO relevance record yet, so this adapter does not encode that label
+as pool eligibility or a reference outcome.
 
 ## Verification limits
 
@@ -88,4 +94,4 @@ The local EEA parser exposes code/name labels but no hierarchy mapping. The
 adapter therefore requires an explicit L3-to-L1/L2/L3 path mapping and never
 guesses ancestry from code prefixes. The native taxonomy artifact's hierarchy
 mapping must be provided and verified against the pinned taxonomy digest before
-any production attempt.
+any production attempt or pool export.

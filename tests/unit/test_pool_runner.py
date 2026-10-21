@@ -17,8 +17,10 @@ from osm_polygon_eunis.pool_adapter import (
     EunisTaxonomyPath,
 )
 from osm_polygon_eunis.pool_contract import (
+    FilesystemStreamingSink,
     ReferencePin,
     SourceSnapshot,
+    StreamingLimits,
     SupportSemantics,
     TextSource,
     native_keyset_sha256,
@@ -29,6 +31,7 @@ from osm_polygon_eunis.pool_runner import (
     FrozenPolygonSource,
     PinnedPolygonShard,
     PoolAdapterCodePin,
+    export_eunis_pool,
     iter_attempt_checkpoint,
     read_projected_geometry_wkb,
     read_raw_geometry,
@@ -317,6 +320,66 @@ def test_query_error_is_excluded_with_reason_at_every_supported_level(tmp_path: 
 
     assert [item["status"] for item in row["outcomes"]] == ["excluded"] * 3
     assert {item["reason"] for item in row["outcomes"]} == {"reference_query_error:RuntimeError"}
+
+
+def test_eunis_attempts_export_through_bounded_shared_streaming_contract(
+    tmp_path: Path,
+) -> None:
+    source = _frozen_source(
+        tmp_path,
+        [_source_row(11, _geojson_polygon()), _source_row(12, None)],
+    )
+    checkpoint_root = tmp_path / "checkpoints"
+    raw_scan = scan_raw_inventory(source, checkpoint_root, _code_pin())
+    attempts = run_eunis_label_attempts(
+        raw_scan,
+        FakeReference(),  # type: ignore[arg-type]
+        _reference_pin(),
+        _TAXONOMY,
+        checkpoint_root,
+    )
+    sink_root = tmp_path / "streamed-pool"
+
+    exported = export_eunis_pool(
+        attempts,
+        FilesystemStreamingSink(sink_root),
+        limits=StreamingLimits(max_batch_rows=8),
+        staging_directory=tmp_path,
+    )
+
+    receipt = exported.receipt
+    assert receipt.total_source_keys == raw_scan.evidence.expected_key_count == 2
+    assert receipt.inventory_keyset_sha256 == raw_scan.evidence.expected_keyset_sha256
+    accounting = {item.level: item for item in receipt.level_accounting}
+    for level in ("L1", "L2", "L3"):
+        assert accounting[level].supported
+        assert accounting[level].processed_decisions == 2
+        assert accounting[level].assigned == 1
+        assert accounting[level].excluded == 1
+    for level in ("L4", "L5", "L6", "L7", "L8"):
+        assert not accounting[level].supported
+        assert accounting[level].processed_decisions == 0
+
+    manifest_path = Path(receipt.manifest_uri.removeprefix("file://"))
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["pool_complete"] is True
+    assert manifest["raw_inventory_evidence"]["scan_report_uri"] == (
+        exported.raw_inventory_report_uri
+    )
+    assert Path(exported.raw_inventory_report_uri.removeprefix("file://")).is_file()
+    assert Path(exported.label_attempt_report_uri.removeprefix("file://")).is_file()
+    assert len(exported.attempt_checkpoint_uris) == 1
+
+    shard_manifest_path = Path(receipt.shard_manifest_uri.removeprefix("file://"))
+    shard_rows = [
+        json.loads(line) for line in shard_manifest_path.read_text(encoding="utf-8").splitlines()
+    ]
+    polygon_shard = next(row for row in shard_rows if row["table"] == "polygon_snapshots")
+    polygon_table = pq.read_table(sink_root / polygon_shard["path"])
+    geometry_uri = polygon_table["geometry_uri"][0].as_py()
+    assert geometry_uri.startswith(exported.attempt_checkpoint_uris[0][1] + "#row=")
+    projected_wkb = read_projected_geometry_wkb(geometry_uri)
+    assert hashlib.sha256(projected_wkb).hexdigest() == polygon_table["geometry_sha256"][0].as_py()
 
 
 def test_invalid_attempt_signature_is_recomputed_from_cached_raw_inventory(
