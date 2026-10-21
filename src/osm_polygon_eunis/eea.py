@@ -12,8 +12,10 @@ import time
 import xml.etree.ElementTree as ET  # types only; parsing goes through defusedxml
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from importlib.metadata import version
 from pathlib import Path
+from types import MappingProxyType
 from typing import cast
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 from zipfile import BadZipFile, ZipFile
@@ -66,12 +68,14 @@ __all__ = [
     "ClassificationTaxonomyLineagePin",
     "EeaGroup",
     "RemoteAsset",
+    "VerifiedClassificationTaxonomy",
     "WebDavEntry",
     "parse_classification_taxonomy_rows",
     "parse_classification_taxonomy_workbook",
     "resolve_config",
     "resolve_config_data",
     "validate_classification_taxonomy_lineage",
+    "verify_classification_taxonomy_lineage",
 ]
 
 
@@ -127,6 +131,9 @@ class ClassificationTaxonomy:
         _validate_classification_labels(self.labels, self.levels, self.parents)
         _validate_classification_levels(self.levels)
         _validate_classification_parent_edges(self.parents, self.levels)
+        object.__setattr__(self, "labels", MappingProxyType(dict(self.labels)))
+        object.__setattr__(self, "levels", MappingProxyType(dict(self.levels)))
+        object.__setattr__(self, "parents", MappingProxyType(dict(self.parents)))
 
     def ancestors_including_self(self, code: str) -> tuple[str, ...]:
         """Return a code followed by its parsed parents, from specific to root."""
@@ -165,6 +172,36 @@ class ClassificationTaxonomyLineagePin:
     workbook_sha256: str
 
 
+_VERIFIED_TAXONOMY_TOKEN = object()
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class VerifiedClassificationTaxonomy:
+    """Taxonomy with byte-validated workbook/cache lineage and a stable digest."""
+
+    taxonomy: ClassificationTaxonomy
+    lineage_pin: ClassificationTaxonomyLineagePin
+    taxonomy_mapping_sha256: str
+    _token: object = dataclass_field(repr=False, compare=False)
+
+    def __init__(
+        self,
+        taxonomy: ClassificationTaxonomy,
+        lineage_pin: ClassificationTaxonomyLineagePin,
+        taxonomy_mapping_sha256: str,
+        *,
+        _token: object,
+    ) -> None:
+        """Accept only the private token held by the byte-checking verifier."""
+
+        if _token is not _VERIFIED_TAXONOMY_TOKEN:
+            raise TypeError("verified taxonomy evidence must be created by the lineage verifier")
+        object.__setattr__(self, "taxonomy", taxonomy)
+        object.__setattr__(self, "lineage_pin", lineage_pin)
+        object.__setattr__(self, "taxonomy_mapping_sha256", taxonomy_mapping_sha256)
+        object.__setattr__(self, "_token", _token)
+
+
 EEA_2021_CLASSIFICATION_LINEAGE_PIN = ClassificationTaxonomyLineagePin(
     cache_sha256=EEA_2021_TAXONOMY_CACHE_SHA256,
     classification_record_id=EEA_2021_CLASSIFICATION_RECORD_ID,
@@ -188,6 +225,27 @@ def validate_classification_taxonomy_lineage(
     checksum-pinned workbook; supplemental cache labels may be retained.
     """
 
+    return verify_classification_taxonomy_lineage(
+        cached_taxonomy,
+        cache_payload,
+        workbook_payload,
+        cache_lineage,
+        expected,
+        supplemental_labels=supplemental_labels,
+    ).taxonomy
+
+
+def verify_classification_taxonomy_lineage(
+    cached_taxonomy: ClassificationTaxonomy,
+    cache_payload: bytes,
+    workbook_payload: bytes,
+    cache_lineage: ClassificationTaxonomyCacheLineage,
+    expected: ClassificationTaxonomyLineagePin = EEA_2021_CLASSIFICATION_LINEAGE_PIN,
+    *,
+    supplemental_labels: Mapping[str, str] | None = None,
+) -> VerifiedClassificationTaxonomy:
+    """Return immutable proof after validating actual pinned cache/workbook bytes."""
+
     _validate_taxonomy_lineage_pins(
         cache_payload,
         workbook_payload,
@@ -200,7 +258,26 @@ def validate_classification_taxonomy_lineage(
         supplemental_labels=supplemental_labels,
     )
     _require_matching_classification_taxonomy(cached_taxonomy, workbook_taxonomy)
-    return cached_taxonomy
+    return VerifiedClassificationTaxonomy(
+        taxonomy=cached_taxonomy,
+        lineage_pin=expected,
+        taxonomy_mapping_sha256=_classification_taxonomy_mapping_sha256(cached_taxonomy),
+        _token=_VERIFIED_TAXONOMY_TOKEN,
+    )
+
+
+def _classification_taxonomy_mapping_sha256(taxonomy: ClassificationTaxonomy) -> str:
+    payload = json.dumps(
+        {
+            "labels": dict(taxonomy.labels),
+            "levels": dict(taxonomy.levels),
+            "parents": dict(taxonomy.parents),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _validate_taxonomy_lineage_pins(

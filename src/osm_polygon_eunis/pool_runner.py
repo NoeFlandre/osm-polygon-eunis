@@ -29,6 +29,7 @@ from shapely import to_wkb
 from shapely.errors import GEOSException
 from shapely.geometry.base import BaseGeometry
 
+from .eea import EEA_2021_CLASSIFICATION_LINEAGE_PIN
 from .geometry import is_usable, parse_geometry, to_equal_area
 from .pool_adapter import (
     EUNIS_ASSIGNMENT_RULE_VERSION,
@@ -75,7 +76,9 @@ from .pool_contract import (
 from .pool_contract.models import NativeKey
 from .raster_reference import RasterReference
 from .text_join import (
+    BoundedJoinedTextRecords,
     EunisPinnedTable,
+    JoinAllocationBounds,
     JoinedTextRecord,
     iter_eunis_join_batches,
     iter_pinned_eunis_join_records,
@@ -84,7 +87,7 @@ from .text_join import (
 _KEY_FIELDS = ("source_pbf", "osm_type", "osm_id")
 _GEOMETRY_FIELD = "geometry"
 _RAW_CHECKPOINT_VERSION = 1
-_ATTEMPT_CHECKPOINT_VERSION = 2
+_ATTEMPT_CHECKPOINT_VERSION = 3
 _EEA_REFERENCE_ID_NAMESPACE = "eea-eunis-2021-probability-map-l3-code"
 _ENUMERATION_RULE = (
     "enumerate every geometry row from every pinned polygon shard before any text, "
@@ -541,6 +544,7 @@ def _validate_attempt_taxonomy_inputs(
     code_pin: PoolAdapterCodePin,
     reference: RasterReference,
 ) -> None:
+    taxonomy.require_production_lineage(EEA_2021_CLASSIFICATION_LINEAGE_PIN)
     taxonomy.validate_direct_codes(reference.layer_codes)
     if raw_scan.source_fingerprint != _source_fingerprint(raw_scan.source, code_pin):
         raise ValueError("raw inventory source fingerprint no longer matches its pins")
@@ -732,10 +736,11 @@ def iter_eunis_downstream_records(  # noqa: PLR0913
     website_field_to_column: dict[str, str] | None = None,
     batch_size: int = 4096,
     staging_directory: Path | None = None,
-) -> Iterator[JoinedTextRecord]:
+    allocation_bounds: JoinAllocationBounds | None = None,
+) -> BoundedJoinedTextRecords:
     """Join pinned downstream text and YES/NO rows against the full inventory."""
 
-    yield from iter_pinned_eunis_join_records(
+    return iter_pinned_eunis_join_records(
         attempts.raw_scan.source.layout.text_source,
         text_table,
         relevance_table,
@@ -747,6 +752,7 @@ def iter_eunis_downstream_records(  # noqa: PLR0913
         layout=attempts.raw_scan.source.layout,
         batch_size=batch_size,
         staging_directory=staging_directory,
+        allocation_bounds=allocation_bounds,
     )
 
 
@@ -762,10 +768,12 @@ def iter_eunis_wiki_downstream_records(  # noqa: PLR0913
     wikivoyage_document_tables: tuple[EunisPinnedTable, ...] = (),
     batch_size: int = 4096,
     staging_directory: Path | None = None,
-) -> Iterator[JoinedTextRecord]:
+    allocation_bounds: JoinAllocationBounds | None = None,
+) -> BoundedJoinedTextRecords:
     """Join both pinned Wiki corpora against the same full raw inventory."""
 
-    yield from iter_eunis_downstream_records(
+    bounds = allocation_bounds or JoinAllocationBounds()
+    wikipedia = iter_eunis_downstream_records(
         attempts,
         wikipedia_text_table,
         wikipedia_relevance_table,
@@ -774,8 +782,9 @@ def iter_eunis_wiki_downstream_records(  # noqa: PLR0913
         wiki_corpus="wikipedia",
         batch_size=batch_size,
         staging_directory=staging_directory,
+        allocation_bounds=bounds,
     )
-    yield from iter_eunis_downstream_records(
+    wikivoyage = iter_eunis_downstream_records(
         attempts,
         wikivoyage_text_table,
         wikivoyage_relevance_table,
@@ -784,7 +793,9 @@ def iter_eunis_wiki_downstream_records(  # noqa: PLR0913
         wiki_corpus="wikivoyage",
         batch_size=batch_size,
         staging_directory=staging_directory,
+        allocation_bounds=bounds,
     )
+    return BoundedJoinedTextRecords.combine(wikipedia, wikivoyage)
 
 
 def iter_eunis_attempt_inventory_rows(
@@ -812,7 +823,7 @@ def iter_eunis_attempt_inventory_rows(
 
 def export_eunis_full_pool(  # noqa: PLR0913
     attempts: EunisAttemptRun,
-    downstream_records: Iterable[JoinedTextRecord],
+    downstream_records: BoundedJoinedTextRecords,
     sink: FileArtifactSink,
     *,
     limits: StreamingLimits | None = None,
@@ -822,6 +833,13 @@ def export_eunis_full_pool(  # noqa: PLR0913
 ) -> EunisPoolExport:
     """Finalize a source-wide label pool together with its verified text joins."""
 
+    attempts.taxonomy.require_production_lineage(EEA_2021_CLASSIFICATION_LINEAGE_PIN)
+    if not isinstance(downstream_records, BoundedJoinedTextRecords):
+        raise TypeError("full EUNIS export requires a bounds-checked pinned join stream")
+    selected_limits = limits or StreamingLimits()
+    expected_bounds = JoinAllocationBounds.from_streaming_limits(selected_limits)
+    if downstream_records.allocation_bounds != expected_bounds:
+        raise ValueError("join allocation bounds must match the selected streaming export limits")
     return export_eunis_pool(
         attempts,
         sink,
@@ -976,6 +994,7 @@ def _validate_attempt_report(
         "taxonomy_id": attempts.taxonomy.taxonomy_id,
         "taxonomy_revision": attempts.taxonomy.taxonomy_revision,
         "taxonomy_sha256": attempts.taxonomy.taxonomy_sha256,
+        **_taxonomy_lineage_report_fields(attempts.taxonomy),
         "adapter_revision": attempts.code_pin.adapter_revision,
         "builder_revision": attempts.code_pin.builder_revision,
         "signature": attempts.signature,
@@ -1680,6 +1699,7 @@ def _attempt_summary_payload(data: _AttemptSummaryData) -> dict[str, Any]:
         "taxonomy_id": data.taxonomy.taxonomy_id,
         "taxonomy_revision": data.taxonomy.taxonomy_revision,
         "taxonomy_sha256": data.taxonomy.taxonomy_sha256,
+        **_taxonomy_lineage_report_fields(data.taxonomy),
         "assignment_rule_version": EUNIS_ASSIGNMENT_RULE_VERSION,
         "adapter_revision": data.code_pin.adapter_revision,
         "builder_revision": data.code_pin.builder_revision,
@@ -1961,6 +1981,7 @@ def _attempt_signature(
                 "taxonomy_id": taxonomy.taxonomy_id,
                 "taxonomy_revision": taxonomy.taxonomy_revision,
                 "taxonomy_sha256": taxonomy.taxonomy_sha256,
+                **_taxonomy_lineage_report_fields(taxonomy),
                 "direct_codes": sorted(direct_codes),
                 "assignment_rule_version": EUNIS_ASSIGNMENT_RULE_VERSION,
                 "adapter_revision": code_pin.adapter_revision,
@@ -1969,6 +1990,18 @@ def _attempt_signature(
             }
         )
     ).hexdigest()
+
+
+def _taxonomy_lineage_report_fields(taxonomy: EunisTaxonomy) -> dict[str, Any]:
+    proof = taxonomy.classification_lineage
+    return {
+        "classification_lineage_pin": asdict(proof.lineage_pin) if proof is not None else None,
+        "classification_taxonomy_mapping_sha256": (
+            proof.taxonomy_mapping_sha256 if proof is not None else None
+        ),
+        "classification_paths_sha256": taxonomy.classification_paths_sha256,
+        "classification_lineage_sha256": taxonomy.classification_lineage_sha256,
+    }
 
 
 def _validate_eunis_reference_pin(reference_pin: ReferencePin) -> None:

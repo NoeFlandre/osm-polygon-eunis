@@ -39,6 +39,7 @@ from osm_polygon_eunis.eea import (
     resolve_classification_labels,
     resolve_group,
     validate_classification_taxonomy_lineage,
+    verify_classification_taxonomy_lineage,
 )
 
 
@@ -216,6 +217,47 @@ def test_cached_classification_hierarchy_must_match_pinned_workbook_lineage(
     )
 
     assert verified == workbook_taxonomy
+
+
+def test_lineage_verifier_returns_token_gated_immutable_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    taxonomy = parse_classification_taxonomy_rows(
+        [
+            ["Level", "Code", "Name"],
+            [1, "A", "Root A"],
+            [2, "A1", "Branch A1"],
+            [3, "A11", "Class A11"],
+        ]
+    )
+    cache_payload = b"cache bytes"
+    workbook_payload = b"workbook bytes"
+    pin = ClassificationTaxonomyLineagePin(
+        hashlib.sha256(cache_payload).hexdigest(),
+        "fixture-record",
+        hashlib.sha256(workbook_payload).hexdigest(),
+    )
+    monkeypatch.setattr(
+        eea,
+        "parse_classification_taxonomy_workbook",
+        lambda _payload, *, supplemental_labels=None: taxonomy,
+    )
+
+    verified = verify_classification_taxonomy_lineage(
+        taxonomy,
+        cache_payload,
+        workbook_payload,
+        ClassificationTaxonomyCacheLineage("fixture-record", pin.workbook_sha256),
+        pin,
+    )
+
+    assert verified.taxonomy is taxonomy
+    assert verified.lineage_pin == pin
+    assert len(verified.taxonomy_mapping_sha256) == 64
+    with pytest.raises(TypeError, match="created by the lineage verifier"):
+        eea.VerifiedClassificationTaxonomy(taxonomy, pin, "0" * 64, _token=object())
+    with pytest.raises(TypeError):
+        cast(dict[str, int], taxonomy.levels)["A11"] = 2
 
 
 def test_cached_classification_hierarchy_rejects_changed_parent_edges(

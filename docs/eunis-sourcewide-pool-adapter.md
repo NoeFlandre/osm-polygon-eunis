@@ -82,13 +82,24 @@ through row-addressed checkpoint URIs.
 `Name` rows. It links a code only to the longest proper code prefix present at
 a strictly lower level, following the hierarchy rule reviewed in PR #159. The
 parser is tested with repeated headers, multiple sheets, same-level prefixes,
-and conflicting or incomplete rows. `validate_classification_taxonomy_lineage()`
-checks a taxonomy cache against the pinned cache digest, classification record,
-workbook digest, and workbook-derived level/parent mapping. After validation,
-`make_eunis_taxonomy_from_classification()` creates explicit paths for direct
-L3 map codes and requires an L1 and L2 ancestor for every code. This uses the
-hierarchy only; no external habitat crosswalk is needed for L3-to-L2-to-L1
-rollups. The separately transferred original taxonomy cache
+and conflicting or incomplete rows. `verify_classification_taxonomy_lineage()`
+checks the actual cache and workbook bytes against the pinned cache digest,
+classification record, workbook digest, and workbook-derived level/parent
+mapping, then returns immutable, token-gated lineage evidence. The older
+`validate_classification_taxonomy_lineage()` keeps its `ClassificationTaxonomy`
+return type for compatibility; callers preparing production work must use the
+new verifier and pass its result to `make_eunis_taxonomy_from_classification()`.
+The caller must decode the supplied `ClassificationTaxonomy` from the cache
+payload; the verifier independently checks both payload hashes and compares
+that decoded hierarchy with a fresh workbook parse.
+That builder creates explicit paths for direct L3 map codes and requires an L1
+and L2 ancestor for every code. `EunisTaxonomy.production_eligible` reports
+whether fixed-pin byte evidence covers the exact emitted path mapping, while
+`run_eunis_label_attempts()` and `make_eunis_2021_reference_pin()` fail closed
+without it. The production runner and full-pool exporter record and verify the
+lineage pin plus digests of both the classification mapping and derived paths.
+This uses the hierarchy only; no external habitat crosswalk is needed for
+L3-to-L2-to-L1 rollups. The separately transferred original taxonomy cache
 `classification-taxonomy-original-20261021.json` is 284,146 bytes and matches SHA-256
 `223aa3fb89ac48cb5095e443433412c085e66fc54602e2c29253537455a2424f`. Its
 classification record ID, declared workbook digest, labels, levels, and parent
@@ -98,8 +109,9 @@ links. The cache records EEA classification
 `1427d22db8d77d1053ab1683aa60713bdec3d810605dd6b7bc16683b4ca14665`.
 Original workbook bytes, its direct URL, and external crosswalk values remain
 unavailable, so the workbook digest has not been freshly rehashed and the
-cache-to-workbook comparison has not run. Production remains gated on that
-lineage check.
+cache-to-workbook comparison has not run. No production-eligible taxonomy was
+created during this recovery; production remains gated until the original
+workbook bytes pass the pinned check.
 
 The source-specific text adapter joins downstream text and relevance rows only
 after the complete raw inventory and geometry attempts. It validates pinned
@@ -108,6 +120,13 @@ disk-backed SQLite index, and emits bounded batches of body-free
 `SourceDocument`, `TextPolygonLink`, and `RelevanceAssessment` rows. Text bodies
 are read only to verify or calculate UTF-8 SHA-256 values; the staging database
 and pool artifacts contain hashes, IDs, and provenance, never sentence bodies.
+Duplicate document keys are indexed in SQLite. Relevance-label and Wiki-link
+evidence is read in stable row order into a spooled builder, and the join
+rejects a record before returning it if its evidence, link rows, or serialized
+size exceeds the declared allocation bounds. It preserves all evidence and
+does not truncate oversized groups. `export_eunis_full_pool()` requires a
+bounds-carrying join stream whose per-record limits match the selected
+`StreamingLimits`, and checks lineage before it writes through the sink.
 
 Join keys follow the pinned source conventions. Description uses
 `description_identity`, tag key, language, sentence index, and the source
@@ -155,7 +174,9 @@ link table before joining it to the attempt inventory. For Wiki, use
 `iter_eunis_wiki_downstream_records()` to include both Wikipedia and Wikivoyage
 sentence/label groups in the same streamed export. Pass those records to
 `export_eunis_full_pool()`; it appends them after the raw polygon attempts and
-still performs no evaluation sampling.
+still performs no evaluation sampling. If export limits are customized, pass
+matching `JoinAllocationBounds.from_streaming_limits(limits)` when building the
+downstream stream, so an oversized record fails before any sink write.
 
 This uses PR #165's streaming API at contract 1.1.0, including one attempt
 receipt per raw key, support evidence for every label candidate, disk-backed

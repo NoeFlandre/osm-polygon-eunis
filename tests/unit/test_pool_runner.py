@@ -12,13 +12,20 @@ import pyarrow.parquet as pq
 import pytest
 from shapely.geometry import box, mapping
 
-from osm_polygon_eunis import pool_runner
+from osm_polygon_eunis import eea, pool_runner
+from osm_polygon_eunis.eea import (
+    ClassificationTaxonomyCacheLineage,
+    ClassificationTaxonomyLineagePin,
+    parse_classification_taxonomy_rows,
+    verify_classification_taxonomy_lineage,
+)
 from osm_polygon_eunis.pool_adapter import (
     EUNIS_POOL_SOURCE_LAYOUTS,
     EunisTaxonomy,
     EunisTaxonomyPath,
     SourceTreeFile,
     SourceTreeGroupPin,
+    make_eunis_taxonomy_from_classification,
     source_tree_inventory_sha256,
     validate_source_tree_group,
 )
@@ -51,7 +58,12 @@ from osm_polygon_eunis.pool_runner import (
     scan_raw_inventory,
 )
 from osm_polygon_eunis.raster_reference import RasterReference
-from osm_polygon_eunis.text_join import PinnedSourceRow, iter_eunis_join_records
+from osm_polygon_eunis.text_join import (
+    BoundedJoinedTextRecords,
+    JoinAllocationBounds,
+    PinnedSourceRow,
+    iter_eunis_join_records,
+)
 
 _TAXONOMY = EunisTaxonomy(
     taxonomy_id="fixture-taxonomy",
@@ -59,6 +71,49 @@ _TAXONOMY = EunisTaxonomy(
     taxonomy_sha256="c" * 64,
     paths_by_direct_code={"C1": EunisTaxonomyPath("A", "A1", "C1")},
 )
+
+
+@pytest.fixture(autouse=True)
+def _verified_fixture_taxonomy(monkeypatch: pytest.MonkeyPatch) -> None:
+    classification = parse_classification_taxonomy_rows(
+        [
+            ["Level", "Code", "Name"],
+            [1, "A", "Root A"],
+            [2, "A1", "Branch A1"],
+            [3, "A11", "Class A11"],
+        ]
+    )
+    cache_payload = b"fixture taxonomy cache bytes"
+    workbook_payload = b"fixture workbook bytes"
+    lineage_pin = ClassificationTaxonomyLineagePin(
+        hashlib.sha256(cache_payload).hexdigest(),
+        "fixture-classification-record",
+        hashlib.sha256(workbook_payload).hexdigest(),
+    )
+    monkeypatch.setattr(
+        eea,
+        "parse_classification_taxonomy_workbook",
+        lambda _payload, *, supplemental_labels=None: classification,
+    )
+    verified = verify_classification_taxonomy_lineage(
+        classification,
+        cache_payload,
+        workbook_payload,
+        ClassificationTaxonomyCacheLineage(
+            lineage_pin.classification_record_id,
+            lineage_pin.workbook_sha256,
+        ),
+        lineage_pin,
+    )
+    fixture_taxonomy = make_eunis_taxonomy_from_classification(
+        verified,
+        ("A11",),
+        taxonomy_id="fixture-taxonomy",
+        taxonomy_revision="fixture-taxonomy-v1",
+        taxonomy_sha256=lineage_pin.cache_sha256,
+    )
+    monkeypatch.setattr(pool_runner, "EEA_2021_CLASSIFICATION_LINEAGE_PIN", lineage_pin)
+    monkeypatch.setitem(globals(), "_TAXONOMY", fixture_taxonomy)
 
 
 @dataclass
@@ -72,7 +127,7 @@ class FakeReference:
 
     @property
     def layer_codes(self) -> tuple[str, ...]:
-        return ("C1",)
+        return ("A11",)
 
     def support_areas(
         self,
@@ -83,7 +138,7 @@ class FakeReference:
         if self.fail:
             raise RuntimeError("fixture query error")
         support = float(polygon.area) * 0.8
-        return {("L1", "A"): support, ("L2", "A1"): support, ("L3", "C1"): support}
+        return {("L1", "A"): support, ("L2", "A1"): support, ("L3", "A11"): support}
 
 
 def _source_row(osm_id: int, geometry: str | None, *, source_pbf: str = "region.osm.pbf") -> dict:
@@ -186,6 +241,31 @@ def _reference_pin() -> ReferencePin:
         threshold=0.8,
         support_union_policy="union_by_class",
     )
+
+
+def test_label_runner_fails_closed_without_byte_verified_taxonomy_lineage(
+    tmp_path: Path,
+) -> None:
+    source = _frozen_source(tmp_path, [_source_row(11, _geojson_polygon())])
+    raw_scan = scan_raw_inventory(source, tmp_path / "raw-checkpoints", _code_pin())
+    unverified = EunisTaxonomy(
+        taxonomy_id=_TAXONOMY.taxonomy_id,
+        taxonomy_revision=_TAXONOMY.taxonomy_revision,
+        taxonomy_sha256=_TAXONOMY.taxonomy_sha256,
+        paths_by_direct_code=dict(_TAXONOMY.paths_by_direct_code),
+    )
+    attempts_root = tmp_path / "attempts-not-created"
+
+    with pytest.raises(ValueError, match="requires verified workbook lineage"):
+        run_eunis_label_attempts(
+            raw_scan,
+            cast(RasterReference, FakeReference()),
+            _reference_pin(),
+            unverified,
+            attempts_root,
+        )
+
+    assert not attempts_root.exists()
 
 
 def _code_pin() -> PoolAdapterCodePin:
@@ -557,9 +637,9 @@ def test_label_attempts_follow_raw_inventory_and_keep_missing_geometry_outcome(
     assert [item["status"] for item in missing["outcomes"]] == ["excluded"] * 3
     usable = next(row for row in rows if row["polygon"] is not None)
     assert usable["attempt_receipt"]["status"] == "completed"
-    assert usable["attempt_receipt"]["attempted_reference_ids"] == ["C1"]
+    assert usable["attempt_receipt"]["attempted_reference_ids"] == ["A11"]
     assert len(usable["support_evidence"]) == len(usable["candidates"]) == 3
-    assert {tuple(item["reference_ids"]) for item in usable["support_evidence"]} == {("C1",)}
+    assert {tuple(item["reference_ids"]) for item in usable["support_evidence"]} == {("A11",)}
     assert usable["polygon"]["geometry_uri"].startswith("file://")
     assert usable["projected_geometry_wkb_base64"]
     projected_wkb = read_projected_geometry_wkb(usable["polygon"]["geometry_uri"])
@@ -682,9 +762,18 @@ def test_full_pool_export_streams_downstream_text_and_relevance_rows(tmp_path: P
         _TAXONOMY,
         checkpoint_root,
     )
+    unbounded_sink = tmp_path / "unbounded-full-export"
+    with pytest.raises(TypeError, match="bounds-checked pinned join stream"):
+        export_eunis_full_pool(
+            attempts,
+            cast(BoundedJoinedTextRecords, iter(())),
+            FilesystemStreamingSink(unbounded_sink),
+        )
+    assert not unbounded_sink.exists()
     inventory = list(iter_eunis_attempt_inventory_rows(attempts))
     text = "A useful visitor description."
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    limits = StreamingLimits(max_batch_rows=16)
     downstream = iter_eunis_join_records(
         TextSource.WEBSITE,
         [
@@ -726,6 +815,7 @@ def test_full_pool_export_streams_downstream_text_and_relevance_rows(tmp_path: P
             "website": "website_sentences",
             "contact_website": "contact_website_sentences",
         },
+        allocation_bounds=JoinAllocationBounds.from_streaming_limits(limits),
     )
     sink_root = tmp_path / "full-pool-with-text"
 
@@ -733,7 +823,7 @@ def test_full_pool_export_streams_downstream_text_and_relevance_rows(tmp_path: P
         attempts,
         downstream,
         FilesystemStreamingSink(sink_root),
-        limits=StreamingLimits(max_batch_rows=16),
+        limits=limits,
         staging_directory=tmp_path,
     )
 
@@ -760,7 +850,13 @@ def test_wiki_downstream_wrapper_streams_both_corpora(monkeypatch) -> None:
 
     def fake_join(_attempts, text_table, relevance_table, **kwargs):
         calls.append((text_table, relevance_table, kwargs))
-        yield kwargs["wiki_corpus"]
+        return iter_eunis_join_records(
+            TextSource.WIKI,
+            [],
+            [],
+            [],
+            wiki_corpus=kwargs["wiki_corpus"],
+        )
 
     monkeypatch.setattr(pool_runner, "iter_eunis_downstream_records", fake_join)
     attempts = cast(Any, None)
@@ -768,20 +864,19 @@ def test_wiki_downstream_wrapper_streams_both_corpora(monkeypatch) -> None:
     wikivoyage_text, wikivoyage_labels = cast(Any, "voyage-text"), cast(Any, "voyage-labels")
     links = cast(Any, "links")
 
-    corpora = list(
-        iter_eunis_wiki_downstream_records(
-            attempts,
-            wikipedia_text,
-            wikipedia_labels,
-            wikivoyage_text,
-            wikivoyage_labels,
-            links,
-            batch_size=17,
-        )
+    combined = iter_eunis_wiki_downstream_records(
+        attempts,
+        wikipedia_text,
+        wikipedia_labels,
+        wikivoyage_text,
+        wikivoyage_labels,
+        links,
+        batch_size=17,
     )
 
+    assert list(combined) == []
+    corpora = [call[2]["wiki_corpus"] for call in calls]
     assert corpora == ["wikipedia", "wikivoyage"]
-    assert [call[2]["wiki_corpus"] for call in calls] == corpora
     assert [call[0] for call in calls] == [wikipedia_text, wikivoyage_text]
     assert all(call[2]["wiki_link_table"] is links for call in calls)
     assert all(call[2]["batch_size"] == 17 for call in calls)

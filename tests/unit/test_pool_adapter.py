@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import replace
 from pathlib import Path
 from typing import cast
@@ -10,12 +11,18 @@ import rasterio
 from rasterio.transform import from_origin
 from shapely.geometry import box
 
-from osm_polygon_eunis.eea import ClassificationTaxonomy, parse_classification_taxonomy_rows
+from osm_polygon_eunis import eea, pool_adapter
+from osm_polygon_eunis.eea import (
+    ClassificationTaxonomy,
+    ClassificationTaxonomyCacheLineage,
+    ClassificationTaxonomyLineagePin,
+    parse_classification_taxonomy_rows,
+    verify_classification_taxonomy_lineage,
+)
 from osm_polygon_eunis.pool_adapter import (
     EEA_2021_ASSET_BYTES,
     EEA_2021_ASSET_COUNT,
     EEA_2021_NATIVE_MANIFEST_SHA256,
-    EEA_2021_TAXONOMY_SHA256,
     EUNIS_POOL_LEVELS,
     EUNIS_POOL_SOURCE_LAYOUTS,
     EunisLabelAttempt,
@@ -87,16 +94,51 @@ def _write_raster(path: Path, values: list[list[int]]) -> None:
         dataset.write(array, 1)
 
 
-def test_eea_2021_reference_pin_records_verified_manifest_metrics() -> None:
-    taxonomy = EunisTaxonomy(
+def test_eea_2021_reference_pin_records_verified_manifest_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    classification = parse_classification_taxonomy_rows(
+        [
+            ["Level", "Code", "Name"],
+            [1, "C", "Root C"],
+            [2, "C1", "Branch C1"],
+            [3, "C11", "Class C11"],
+        ]
+    )
+    cache_payload = b"fixture taxonomy cache bytes"
+    workbook_payload = b"fixture workbook bytes"
+    lineage_pin = ClassificationTaxonomyLineagePin(
+        hashlib.sha256(cache_payload).hexdigest(),
+        "fixture-classification-record",
+        hashlib.sha256(workbook_payload).hexdigest(),
+    )
+    monkeypatch.setattr(
+        eea,
+        "parse_classification_taxonomy_workbook",
+        lambda _payload, *, supplemental_labels=None: classification,
+    )
+    verified = verify_classification_taxonomy_lineage(
+        classification,
+        cache_payload,
+        workbook_payload,
+        ClassificationTaxonomyCacheLineage(
+            lineage_pin.classification_record_id,
+            lineage_pin.workbook_sha256,
+        ),
+        lineage_pin,
+    )
+    monkeypatch.setattr(pool_adapter, "EEA_2021_CLASSIFICATION_LINEAGE_PIN", lineage_pin)
+    taxonomy = make_eunis_taxonomy_from_classification(
+        verified,
+        ("C11",),
         taxonomy_id="EUNIS 2021",
         taxonomy_revision="taxonomy-2021",
-        taxonomy_sha256=EEA_2021_TAXONOMY_SHA256,
-        paths_by_direct_code={"C1": EunisTaxonomyPath("A", "A1", "C1")},
+        taxonomy_sha256=lineage_pin.cache_sha256,
     )
 
     pin = make_eunis_2021_reference_pin(taxonomy)
 
+    assert taxonomy.production_eligible
     assert pin.release_id == "EEA EUNIS habitat probability maps v1 2021"
     assert f"{EEA_2021_NATIVE_MANIFEST_SHA256}" in pin.source_revision
     assert f"asset-count:{EEA_2021_ASSET_COUNT}" in pin.source_revision
@@ -112,7 +154,7 @@ def test_eea_2021_reference_pin_rejects_an_unverified_taxonomy_digest() -> None:
         paths_by_direct_code={"C1": EunisTaxonomyPath("A", "A1", "C1")},
     )
 
-    with pytest.raises(ValueError, match="verified EEA 2021 taxonomy input"):
+    with pytest.raises(ValueError, match="requires verified workbook lineage"):
         make_eunis_2021_reference_pin(taxonomy)
 
 

@@ -13,10 +13,10 @@ from types import MappingProxyType
 from typing import cast
 
 from .eea import (
-    EEA_2021_TAXONOMY_CACHE_SHA256 as EEA_2021_TAXONOMY_SHA256,
-)
-from .eea import (
+    EEA_2021_CLASSIFICATION_LINEAGE_PIN,
     ClassificationTaxonomy,
+    ClassificationTaxonomyLineagePin,
+    VerifiedClassificationTaxonomy,
 )
 from .pool_contract import (
     AmbiguityBasis,
@@ -83,6 +83,7 @@ class EunisTaxonomy:
     taxonomy_revision: str
     taxonomy_sha256: str
     paths_by_direct_code: Mapping[str, EunisTaxonomyPath]
+    classification_lineage: VerifiedClassificationTaxonomy | None = None
 
     def __post_init__(self) -> None:
         """Validate the explicit mapping and its immutable taxonomy pin."""
@@ -92,6 +93,10 @@ class EunisTaxonomy:
             raise ValueError("EUNIS taxonomy mapping must contain direct map codes")
         for direct_code, path in self.paths_by_direct_code.items():
             _validate_taxonomy_path(direct_code, path)
+        frozen_paths = MappingProxyType(dict(self.paths_by_direct_code))
+        object.__setattr__(self, "paths_by_direct_code", frozen_paths)
+        if self.classification_lineage is not None:
+            self._validate_classification_mapping()
 
     @property
     def pinned_revision(self) -> str:
@@ -120,6 +125,84 @@ class EunisTaxonomy:
             raise ValueError(
                 "taxonomy/map direct-code mismatch: "
                 f"without taxonomy={missing}, without map={unused}"
+            )
+
+    @property
+    def classification_paths_sha256(self) -> str:
+        """Digest the exact emitted L1/L2/L3 paths used by this adapter."""
+
+        payload = json.dumps(
+            {
+                code: {
+                    "L1": path.level_1,
+                    "L2": path.level_2,
+                    "L3": path.level_3,
+                }
+                for code, path in sorted(self.paths_by_direct_code.items())
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+    @property
+    def classification_lineage_sha256(self) -> str | None:
+        """Digest the workbook proof together with the exact derived map paths."""
+
+        proof = self.classification_lineage
+        if proof is None:
+            return None
+        payload = json.dumps(
+            {
+                "cache_sha256": proof.lineage_pin.cache_sha256,
+                "classification_record_id": proof.lineage_pin.classification_record_id,
+                "workbook_sha256": proof.lineage_pin.workbook_sha256,
+                "taxonomy_mapping_sha256": proof.taxonomy_mapping_sha256,
+                "classification_paths_sha256": self.classification_paths_sha256,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+    @property
+    def production_eligible(self) -> bool:
+        """Whether fixed-pin workbook proof covers this exact EUNIS map path."""
+
+        try:
+            self.require_production_lineage()
+        except ValueError:
+            return False
+        return True
+
+    def require_production_lineage(
+        self,
+        expected: ClassificationTaxonomyLineagePin | None = None,
+    ) -> None:
+        """Fail closed unless validated workbook evidence proves this exact path map."""
+
+        proof = self.classification_lineage
+        if proof is None:
+            raise ValueError("production EUNIS taxonomy requires verified workbook lineage")
+        expected_pin = expected or EEA_2021_CLASSIFICATION_LINEAGE_PIN
+        if proof.lineage_pin != expected_pin:
+            raise ValueError("classification workbook/cache lineage does not match the EEA pin")
+        if self.taxonomy_sha256 != expected_pin.cache_sha256:
+            raise ValueError("EUNIS taxonomy digest does not match the verified EEA cache pin")
+        self._validate_classification_mapping()
+
+    def _validate_classification_mapping(self) -> None:
+        proof = self.classification_lineage
+        if proof is None:
+            return
+        expected_paths = {
+            code: _classification_map_path(proof.taxonomy, code)
+            for code in self.paths_by_direct_code
+        }
+        if expected_paths != dict(self.paths_by_direct_code):
+            raise ValueError(
+                "EUNIS L1/L2/L3 paths differ from the verified classification hierarchy"
             )
 
 
@@ -478,24 +561,31 @@ def hierarchy_support_groups(
 
 
 def make_eunis_taxonomy_from_classification(
-    classification: ClassificationTaxonomy,
+    classification: ClassificationTaxonomy | VerifiedClassificationTaxonomy,
     direct_codes: Iterable[str],
     *,
     taxonomy_id: str,
     taxonomy_revision: str,
     taxonomy_sha256: str,
 ) -> EunisTaxonomy:
-    """Build explicit map-code paths from a verified classification hierarchy."""
+    """Build explicit map paths; only byte-verified input is production eligible."""
 
+    if isinstance(classification, VerifiedClassificationTaxonomy):
+        lineage = classification
+        hierarchy = classification.taxonomy
+    else:
+        lineage = None
+        hierarchy = classification
     codes = tuple(sorted(set(direct_codes)))
     if not codes:
         raise ValueError("EEA direct map codes must be present")
-    paths = {code: _classification_map_path(classification, code) for code in codes}
+    paths = {code: _classification_map_path(hierarchy, code) for code in codes}
     return EunisTaxonomy(
         taxonomy_id=taxonomy_id,
         taxonomy_revision=taxonomy_revision,
         taxonomy_sha256=taxonomy_sha256,
         paths_by_direct_code=paths,
+        classification_lineage=lineage,
     )
 
 
@@ -546,8 +636,8 @@ def _validate_l123_map_path(code: str, ancestors_by_level: Mapping[int, str]) ->
 def make_eunis_2021_reference_pin(taxonomy: EunisTaxonomy) -> ReferencePin:
     """Build the checked EEA v1 2021 pin from verified manifest digests."""
 
-    if taxonomy.taxonomy_sha256 != EEA_2021_TAXONOMY_SHA256:
-        raise ValueError("taxonomy digest does not match the verified EEA 2021 taxonomy input")
+    if not taxonomy.production_eligible:
+        taxonomy.require_production_lineage()
     return ReferencePin(
         release_id="EEA EUNIS habitat probability maps v1 2021",
         source_repository="https://biodiversity.europa.eu/resources/search-habitat",

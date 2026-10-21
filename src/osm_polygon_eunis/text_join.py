@@ -12,10 +12,12 @@ import json
 import sqlite3
 import tempfile
 from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
+from itertools import chain
 from pathlib import Path
-from typing import Any, cast
+from typing import IO, Any, cast
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -35,6 +37,7 @@ from .pool_contract import (
     RelevanceAssessment,
     RelevanceStatus,
     SourceDocument,
+    StreamingLimits,
     TextLinkStatus,
     TextPolygonLink,
     TextSource,
@@ -42,6 +45,7 @@ from .pool_contract import (
     native_key_json,
 )
 from .pool_contract.models import NativeKey
+from .pool_contract.streaming import DEFAULT_MAX_BATCH_BYTES, DEFAULT_MAX_BATCH_ROWS, MAX_ROW_BYTES
 
 _SHA256_LENGTH = 64
 _JSON = json.dumps
@@ -81,6 +85,115 @@ class JoinedTextRecord:
     document: SourceDocument
     links: tuple[TextPolygonLink, ...]
     relevance: RelevanceAssessment
+
+
+@dataclass(frozen=True, slots=True)
+class JoinAllocationBounds:
+    """Hard per-record bounds applied before output links and evidence are materialized."""
+
+    max_record_rows: int = DEFAULT_MAX_BATCH_ROWS
+    max_record_bytes: int = DEFAULT_MAX_BATCH_BYTES
+    max_output_row_bytes: int = MAX_ROW_BYTES
+
+    def __post_init__(self) -> None:
+        """Reject nonpositive or internally inconsistent allocation limits."""
+
+        if min(self.max_record_rows, self.max_record_bytes, self.max_output_row_bytes) <= 0:
+            raise ValueError("join allocation bounds must be positive")
+        if self.max_output_row_bytes > self.max_record_bytes:
+            raise ValueError("maximum output row bytes cannot exceed maximum record bytes")
+
+    @classmethod
+    def from_streaming_limits(cls, limits: StreamingLimits) -> JoinAllocationBounds:
+        """Match the join producer bounds to the selected shared export limits."""
+
+        return cls(limits.max_batch_rows, limits.max_batch_bytes, limits.max_row_bytes)
+
+
+_BOUNDED_JOIN_STREAM_TOKEN = object()
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class BoundedJoinedTextRecords:
+    """Single-pass joined records whose producer enforced explicit allocation bounds."""
+
+    records: Iterable[JoinedTextRecord]
+    allocation_bounds: JoinAllocationBounds
+    _token: object = dataclass_field(repr=False, compare=False)
+
+    def __init__(
+        self,
+        records: Iterable[JoinedTextRecord],
+        allocation_bounds: JoinAllocationBounds,
+        *,
+        _token: object,
+    ) -> None:
+        """Accept only the private token held by a bounded join producer."""
+
+        if _token is not _BOUNDED_JOIN_STREAM_TOKEN:
+            raise TypeError("bounded join streams must be created by the bounded join producer")
+        object.__setattr__(self, "records", records)
+        object.__setattr__(self, "allocation_bounds", allocation_bounds)
+        object.__setattr__(self, "_token", _token)
+
+    def __iter__(self) -> Iterator[JoinedTextRecord]:
+        """Return the underlying single-pass record iterator."""
+
+        return iter(self.records)
+
+    @classmethod
+    def combine(cls, *streams: BoundedJoinedTextRecords) -> BoundedJoinedTextRecords:
+        """Chain compatible verified streams without discarding their bound proof."""
+
+        if not streams:
+            raise ValueError("at least one bounded join stream is required")
+        bounds = streams[0].allocation_bounds
+        if any(stream.allocation_bounds != bounds for stream in streams[1:]):
+            raise ValueError("bounded join streams must use identical allocation bounds")
+        return cls(chain(*streams), bounds, _token=_BOUNDED_JOIN_STREAM_TOKEN)
+
+
+class _BoundedTextBuilder:
+    """Spill UTF-8 output after 64 KiB and reject growth before writing past its cap."""
+
+    def __init__(self, max_bytes: int, description: str) -> None:
+        self._max_bytes = max_bytes
+        self._description = description
+        self._byte_count = 0
+        self._stack = ExitStack()
+        self._file: IO[str] | None = None
+
+    def __enter__(self) -> _BoundedTextBuilder:
+        self._file = self._stack.enter_context(
+            tempfile.SpooledTemporaryFile(
+                max_size=min(self._max_bytes, 64 * 1024),
+                mode="w+t",
+                encoding="utf-8",
+                newline="",
+            )
+        )
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self._stack.close()
+
+    def append(self, fragment: str) -> None:
+        fragment_bytes = len(fragment.encode("utf-8"))
+        if self._byte_count + fragment_bytes > self._max_bytes:
+            raise ValueError(self._description)
+        self._require_open_file().write(fragment)
+        self._byte_count += fragment_bytes
+
+    def value(self) -> str:
+        file = self._require_open_file()
+        file.flush()
+        file.seek(0)
+        return file.read()
+
+    def _require_open_file(self) -> IO[str]:
+        if self._file is None:
+            raise RuntimeError("bounded text builder is not active")
+        return self._file
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +254,14 @@ class _StagedTextDocument:
 
 
 @dataclass(frozen=True, slots=True)
+class _LinkRecordContext:
+    document: SourceDocument
+    source_revision: str
+    relevance: RelevanceAssessment
+    allocation_bounds: JoinAllocationBounds
+
+
+@dataclass(frozen=True, slots=True)
 class _JoinEmissionContext:
     text_source: TextSource
     layout: EunisPoolSourceLayout
@@ -149,7 +270,7 @@ class _JoinEmissionContext:
     release_id: str
     relevance_repository: str
     relevance_revision: str
-    duplicate_docs: set[tuple[str, str]]
+    allocation_bounds: JoinAllocationBounds
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,6 +320,7 @@ class _PinnedJoinRequest:
     layout: EunisPoolSourceLayout
     batch_size: int
     staging_directory: Path | None
+    allocation_bounds: JoinAllocationBounds
 
 
 @dataclass(slots=True)
@@ -374,7 +496,8 @@ def iter_eunis_join_records(  # noqa: PLR0913
     website_field_to_column: Mapping[str, str] | None = None,
     layout: EunisPoolSourceLayout | None = None,
     staging_directory: Path | None = None,
-) -> Iterator[JoinedTextRecord]:
+    allocation_bounds: JoinAllocationBounds | None = None,
+) -> BoundedJoinedTextRecords:
     """Join a pinned source table to relevance labels without filtering rows.
 
     ``text_rows`` are Description sentence rows, Website polygon rows, or one
@@ -383,6 +506,35 @@ def iter_eunis_join_records(  # noqa: PLR0913
     The inputs are streamed into a disk-backed index; no text body is persisted.
     """
 
+    bounds = allocation_bounds or JoinAllocationBounds()
+    records = _iter_eunis_join_records(
+        text_source,
+        text_rows,
+        relevance_rows,
+        inventory_rows,
+        wiki_link_rows=wiki_link_rows,
+        wiki_corpus=wiki_corpus,
+        website_field_to_column=website_field_to_column,
+        layout=layout,
+        staging_directory=staging_directory,
+        allocation_bounds=bounds,
+    )
+    return BoundedJoinedTextRecords(records, bounds, _token=_BOUNDED_JOIN_STREAM_TOKEN)
+
+
+def _iter_eunis_join_records(  # noqa: PLR0913
+    text_source: TextSource,
+    text_rows: Iterable[PinnedSourceRow],
+    relevance_rows: Iterable[PinnedSourceRow],
+    inventory_rows: Iterable[PolygonInventoryRow],
+    *,
+    wiki_link_rows: Iterable[PinnedSourceRow],
+    wiki_corpus: str | None,
+    website_field_to_column: Mapping[str, str] | None,
+    layout: EunisPoolSourceLayout | None,
+    staging_directory: Path | None,
+    allocation_bounds: JoinAllocationBounds,
+) -> Iterator[JoinedTextRecord]:
     selected_layout = layout or EUNIS_POOL_SOURCE_LAYOUTS[text_source]
     _validate_join_layout(selected_layout, text_source)
     _validate_join_source_options(text_source, wiki_corpus, website_field_to_column)
@@ -400,11 +552,23 @@ def iter_eunis_join_records(  # noqa: PLR0913
     with tempfile.TemporaryDirectory(dir=staging_directory, prefix="eunis-text-join-") as work:
         connection = sqlite3.connect(Path(work) / "text-join.sqlite")
         try:
+            connection.execute("PRAGMA temp_store=FILE")
             _initialize_join_index(connection)
             _stage_inventory(connection, inventory_rows)
-            _stage_relevance(connection, relevance_rows, text_source, wiki_corpus)
+            _stage_relevance(
+                connection,
+                relevance_rows,
+                text_source,
+                wiki_corpus,
+                allocation_bounds.max_output_row_bytes,
+            )
             if text_source is TextSource.WIKI:
-                _stage_wiki_links(connection, wiki_link_rows, str(wiki_corpus))
+                _stage_wiki_links(
+                    connection,
+                    wiki_link_rows,
+                    str(wiki_corpus),
+                    allocation_bounds.max_output_row_bytes,
+                )
             mapper(
                 connection,
                 text_rows,
@@ -419,6 +583,7 @@ def iter_eunis_join_records(  # noqa: PLR0913
                 selected_layout,
                 mapping_rule,
                 wiki_corpus,
+                allocation_bounds,
             )
         finally:
             connection.close()
@@ -437,7 +602,8 @@ def iter_pinned_eunis_join_records(  # noqa: PLR0913
     layout: EunisPoolSourceLayout | None = None,
     batch_size: int = 4096,
     staging_directory: Path | None = None,
-) -> Iterator[JoinedTextRecord]:
+    allocation_bounds: JoinAllocationBounds | None = None,
+) -> BoundedJoinedTextRecords:
     """Validate source group pins and schemas, then run the bounded join."""
 
     selected_layout = layout or EUNIS_POOL_SOURCE_LAYOUTS[text_source]
@@ -463,6 +629,7 @@ def iter_pinned_eunis_join_records(  # noqa: PLR0913
             selected_layout,
             batch_size,
             staging_directory,
+            allocation_bounds or JoinAllocationBounds(),
         )
     )
 
@@ -571,7 +738,7 @@ def _iter_pinned_wiki_link_rows(
     return table.iter_rows(columns, batch_size=batch_size, expected_types=types)
 
 
-def _run_pinned_join(request: _PinnedJoinRequest) -> Iterator[JoinedTextRecord]:
+def _run_pinned_join(request: _PinnedJoinRequest) -> BoundedJoinedTextRecords:
     text_source = request.text_source
     text_table = request.text_table
     relevance_table = request.relevance_table
@@ -601,6 +768,7 @@ def _run_pinned_join(request: _PinnedJoinRequest) -> Iterator[JoinedTextRecord]:
         website_field_to_column=request.website_field_to_column,
         layout=request.layout,
         staging_directory=request.staging_directory,
+        allocation_bounds=request.allocation_bounds,
     )
 
 
@@ -926,6 +1094,7 @@ def _stage_relevance(
     rows: Iterable[PinnedSourceRow],
     text_source: TextSource,
     wiki_corpus: str | None,
+    max_output_row_bytes: int,
 ) -> None:
     scope = wiki_corpus or text_source.value
     contract = _relevance_row_contract(text_source)
@@ -956,9 +1125,15 @@ def _stage_relevance(
                 "input_revision",
             )
         }
+        row_json = _canonical_json(metadata | {"_locator": source_row.locator})
+        _require_utf8_size(
+            row_json,
+            max_output_row_bytes,
+            "relevance row metadata exceeds the maximum output row size",
+        )
         connection.execute(
             "INSERT INTO relevance_rows(scope, join_key, row_json) VALUES (?, ?, ?)",
-            (scope, join_key, _canonical_json(metadata | {"_locator": source_row.locator})),
+            (scope, join_key, row_json),
         )
     connection.commit()
 
@@ -1008,9 +1183,15 @@ def _stage_wiki_links(
     connection: sqlite3.Connection,
     rows: Iterable[PinnedSourceRow],
     wiki_corpus: str,
+    max_output_row_bytes: int,
 ) -> None:
     for source_row in rows:
         link = _wiki_link_row(source_row)
+        _require_utf8_size(
+            link.evidence,
+            max_output_row_bytes,
+            "Wiki link evidence exceeds the maximum output row size",
+        )
         if link.project != wiki_corpus:
             continue
         connection.execute(
@@ -1769,11 +1950,12 @@ def _emit_join_records(
     layout: EunisPoolSourceLayout,
     mapping_rule: str,
     wiki_corpus: str | None,
+    allocation_bounds: JoinAllocationBounds,
 ) -> Iterator[JoinedTextRecord]:
     relevance_repository = layout.relevance_repository
     relevance_revision = layout.relevance_revision
     release_id = f"{relevance_repository}@{relevance_revision}"
-    duplicate_docs = _duplicate_document_relevance_keys(connection)
+    _stage_duplicate_document_relevance_keys(connection)
     context = _JoinEmissionContext(
         text_source,
         layout,
@@ -1782,21 +1964,29 @@ def _emit_join_records(
         release_id,
         relevance_repository,
         relevance_revision,
-        duplicate_docs,
+        allocation_bounds,
     )
-    yield from _emit_staged_text_documents(connection, context)
-    yield from _emit_remaining_join_records(connection, context)
+    for record in _emit_staged_text_documents(connection, context):
+        _validate_joined_record_limits(record, allocation_bounds)
+        yield record
+    for record in _emit_remaining_join_records(connection, context):
+        _validate_joined_record_limits(record, allocation_bounds)
+        yield record
 
 
-def _duplicate_document_relevance_keys(connection: sqlite3.Connection) -> set[tuple[str, str]]:
-    return {
-        (str(scope), str(join_key))
-        for scope, join_key, _count in connection.execute(
-            "SELECT label_scope, label_join_key, COUNT(*) FROM text_docs "
-            "WHERE label_join_key IS NOT NULL "
-            "GROUP BY label_scope, label_join_key HAVING COUNT(*) > 1"
-        )
-    }
+def _stage_duplicate_document_relevance_keys(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        "CREATE TEMP TABLE duplicate_text_keys ("
+        "label_scope TEXT NOT NULL, label_join_key TEXT NOT NULL, "
+        "PRIMARY KEY(label_scope, label_join_key)) WITHOUT ROWID"
+    )
+    connection.execute(
+        "INSERT INTO duplicate_text_keys(label_scope, label_join_key) "
+        "SELECT label_scope, label_join_key FROM text_docs "
+        "WHERE label_join_key IS NOT NULL "
+        "GROUP BY label_scope, label_join_key HAVING COUNT(*) > 1"
+    )
+    connection.commit()
 
 
 def _emit_staged_text_documents(
@@ -1874,7 +2064,11 @@ def _joined_record_from_staged_row(
         scope=staged.label_scope,
         duplicate_doc_key=(
             staged.label_join_key is not None
-            and (staged.label_scope, staged.label_join_key) in context.duplicate_docs
+            and _has_duplicate_document_relevance_key(
+                connection,
+                staged.label_scope,
+                staged.label_join_key,
+            )
         ),
         source_repository=context.relevance_repository,
         source_revision=context.relevance_revision,
@@ -1883,6 +2077,7 @@ def _joined_record_from_staged_row(
         evidence_sha256=staged.relevance_evidence_sha256,
         source_locator=staged.source_locator,
         missing_reason=staged.missing_reason,
+        allocation_bounds=context.allocation_bounds,
     )
     links = _resolve_links(
         connection,
@@ -1894,8 +2089,24 @@ def _joined_record_from_staged_row(
         source_revision=context.layout.raw_revision,
         source_locator=staged.source_locator,
         corpus=staged.corpus or context.wiki_corpus,
+        relevance=relevance,
+        allocation_bounds=context.allocation_bounds,
     )
     return JoinedTextRecord(staged.document, links, relevance)
+
+
+def _has_duplicate_document_relevance_key(
+    connection: sqlite3.Connection,
+    scope: str,
+    join_key: str,
+) -> bool:
+    return (
+        connection.execute(
+            "SELECT 1 FROM duplicate_text_keys WHERE label_scope=? AND label_join_key=?",
+            (scope, join_key),
+        ).fetchone()
+        is not None
+    )
 
 
 def _emit_remaining_join_records(
@@ -1937,13 +2148,20 @@ def _resolve_relevance(  # noqa: PLR0913
     mapping_rule: str,
     evidence_sha256: str | None,
     source_locator: str,
+    allocation_bounds: JoinAllocationBounds,
     missing_reason: str | None = None,
 ) -> RelevanceAssessment:
-    matches = _matching_relevance_rows(connection, scope, join_key)
-    evidence = _relevance_evidence(source_locator, join_key, matches)
-    resolution = _relevance_cardinality(matches, duplicate_doc_key, missing_reason)
+    match_count, first_decision = _matching_relevance_rows(connection, scope, join_key)
+    evidence = _relevance_evidence(
+        connection,
+        source_locator,
+        scope,
+        join_key,
+        allocation_bounds.max_output_row_bytes,
+    )
+    resolution = _relevance_cardinality(match_count, duplicate_doc_key, missing_reason)
     if resolution is None:
-        resolution = _single_relevance_decision(json.loads(matches[0][1]).get("decision"))
+        resolution = _single_relevance_decision(first_decision)
     return RelevanceAssessment(
         document_id=document_id,
         release_id=release_id,
@@ -1951,7 +2169,7 @@ def _resolve_relevance(  # noqa: PLR0913
         source_repository=source_repository,
         source_revision=source_revision,
         mapping_rule_version=mapping_rule,
-        evidence=_canonical_json(evidence),
+        evidence=evidence,
         raw_value=resolution.raw_value,
         evidence_sha256=evidence_sha256,
         reason=resolution.reason,
@@ -1962,44 +2180,68 @@ def _matching_relevance_rows(
     connection: sqlite3.Connection,
     scope: str,
     join_key: str | None,
-) -> list[tuple[Any, ...]]:
+) -> tuple[int, Any]:
     if join_key is None:
-        return []
-    matches = list(
+        return 0, None
+    count = int(
         connection.execute(
-            "SELECT sequence, row_json FROM relevance_rows "
-            "WHERE scope=? AND join_key=? ORDER BY sequence",
+            "SELECT COUNT(*) FROM relevance_rows WHERE scope=? AND join_key=?",
             (scope, join_key),
-        )
+        ).fetchone()[0]
     )
-    if matches:
-        connection.executemany(
-            "UPDATE relevance_rows SET consumed=1 WHERE sequence=?",
-            ((int(sequence),) for sequence, _payload in matches),
-        )
-    return matches
+    if count == 0:
+        return 0, None
+    first = connection.execute(
+        "SELECT row_json FROM relevance_rows "
+        "WHERE scope=? AND join_key=? ORDER BY sequence LIMIT 1",
+        (scope, join_key),
+    ).fetchone()
+    connection.execute(
+        "UPDATE relevance_rows SET consumed=1 WHERE scope=? AND join_key=?",
+        (scope, join_key),
+    )
+    return count, json.loads(str(first[0])).get("decision")
 
 
 def _relevance_evidence(
+    connection: sqlite3.Connection,
     source_locator: str,
+    scope: str,
     join_key: str | None,
-    matches: Sequence[tuple[Any, ...]],
-) -> dict[str, Any]:
-    return {
-        "text_row": source_locator,
-        "join_key_sha256": hashlib.sha256((join_key or "missing").encode()).hexdigest(),
-        "label_rows": [
-            {
-                "label_id": json.loads(payload).get("label_id"),
-                "locator": json.loads(payload).get("_locator"),
-            }
-            for _sequence, payload in matches
-        ],
-    }
+    max_output_row_bytes: int,
+) -> str:
+    digest = hashlib.sha256((join_key or "missing").encode()).hexdigest()
+    with _BoundedTextBuilder(
+        max_output_row_bytes,
+        "relevance evidence exceeds the maximum output row size",
+    ) as output:
+        output.append('{"join_key_sha256":')
+        output.append(_canonical_json(digest))
+        output.append(',"label_rows":[')
+        if join_key is not None:
+            for index, (payload,) in enumerate(
+                connection.execute(
+                    "SELECT row_json FROM relevance_rows "
+                    "WHERE scope=? AND join_key=? ORDER BY sequence",
+                    (scope, join_key),
+                )
+            ):
+                if index:
+                    output.append(",")
+                row = json.loads(str(payload))
+                output.append(
+                    _canonical_json(
+                        {"label_id": row.get("label_id"), "locator": row.get("_locator")}
+                    )
+                )
+        output.append('],"text_row":')
+        output.append(_canonical_json(source_locator))
+        output.append("}")
+        return output.value()
 
 
 def _relevance_cardinality(
-    matches: Sequence[tuple[Any, ...]],
+    match_count: int,
     duplicate_doc_key: bool,
     missing_reason: str | None,
 ) -> _RelevanceResolution | None:
@@ -2011,13 +2253,13 @@ def _relevance_cardinality(
             None,
             "multiple source text rows share one relevance key",
         )
-    if len(matches) > 1:
+    if match_count > 1:
         return _RelevanceResolution(
             RelevanceStatus.UNKNOWN,
             None,
             "multiple relevance rows match the source text key",
         )
-    if not matches:
+    if match_count == 0:
         return _RelevanceResolution(
             RelevanceStatus.MISSING,
             None,
@@ -2062,20 +2304,26 @@ def _resolve_links(  # noqa: PLR0913
     source_revision: str,
     source_locator: str,
     corpus: str | None,
+    relevance: RelevanceAssessment,
+    allocation_bounds: JoinAllocationBounds,
 ) -> tuple[TextPolygonLink, ...]:
+    record_context = _LinkRecordContext(
+        document,
+        source_revision,
+        relevance,
+        allocation_bounds,
+    )
     if text_source is TextSource.WIKI:
         return _resolve_wiki_links(
             connection,
-            document,
-            source_revision,
+            record_context,
             wiki_document_id,
             wiki_project,
             corpus,
         )
     return _resolve_direct_link(
         connection,
-        document,
-        source_revision,
+        record_context,
         direct_link_key,
         source_locator,
     )
@@ -2083,114 +2331,261 @@ def _resolve_links(  # noqa: PLR0913
 
 def _resolve_direct_link(
     connection: sqlite3.Connection,
-    document: SourceDocument,
-    source_revision: str,
+    context: _LinkRecordContext,
     direct_link_key: str | None,
     source_locator: str,
 ) -> tuple[TextPolygonLink, ...]:
+    document = context.document
+    source_revision = context.source_revision
+    allocation_bounds = context.allocation_bounds
+    links: list[TextPolygonLink] = []
+    size, rows = _record_base_size(document, context.relevance, allocation_bounds)
     if direct_link_key is None:
-        return (_missing_link(document, source_revision, "source polygon key is incomplete"),)
-    return (
-        _resolve_one_link(
+        link = _missing_link(document, source_revision, "source polygon key is incomplete")
+    else:
+        link = _resolve_one_link(
             connection,
             document.document_id,
             _native_key_from_json(direct_link_key),
             source_revision,
             f"direct source-native OSM key from {source_locator}",
             True,
-        ),
-    )
+        )
+    _append_bounded_link(links, link, size, rows, allocation_bounds)
+    return tuple(links)
 
 
 def _resolve_wiki_links(
     connection: sqlite3.Connection,
-    document: SourceDocument,
-    source_revision: str,
+    context: _LinkRecordContext,
     wiki_document_id: str | None,
     wiki_project: str | None,
     corpus: str | None,
 ) -> tuple[TextPolygonLink, ...]:
+    document = context.document
+    source_revision = context.source_revision
+    allocation_bounds = context.allocation_bounds
+    links: list[TextPolygonLink] = []
+    size, rows = _record_base_size(document, context.relevance, allocation_bounds)
     if not wiki_document_id or not wiki_project:
-        return (
-            _missing_link(
-                document,
-                source_revision,
-                "Wiki sentence has no document/project key",
-            ),
+        link = _missing_link(
+            document,
+            source_revision,
+            "Wiki sentence has no document/project key",
         )
-    rows = _wiki_link_rows(connection, wiki_document_id, wiki_project)
-    if not rows:
-        return (
-            _missing_link(
-                document,
-                source_revision,
-                f"no polygon_document_links row for {corpus}/{wiki_document_id}/{wiki_project}",
-            ),
-        )
-    combined = _combined_wiki_link_evidence(rows)
-    return _resolve_combined_wiki_links(
-        connection,
-        document,
-        source_revision,
-        combined,
-    )
-
-
-def _wiki_link_rows(
-    connection: sqlite3.Connection,
-    document_id: str,
-    project: str,
-) -> list[tuple[Any, ...]]:
-    rows = list(
+        _append_bounded_link(links, link, size, rows, allocation_bounds)
+        return tuple(links)
+    match_count = int(
         connection.execute(
-            "SELECT sequence, native_key_json, evidence_json, complete_key FROM wiki_links "
-            "WHERE document_id=? AND project=? ORDER BY sequence",
-            (document_id, project),
-        )
+            "SELECT COUNT(*) FROM wiki_links WHERE document_id=? AND project=?",
+            (wiki_document_id, wiki_project),
+        ).fetchone()[0]
     )
-    if rows:
-        connection.executemany(
-            "UPDATE wiki_links SET consumed=1 WHERE sequence=?",
-            ((int(sequence),) for sequence, _key, _evidence, _complete in rows),
+    if match_count == 0:
+        link = _missing_link(
+            document,
+            source_revision,
+            f"no polygon_document_links row for {corpus}/{wiki_document_id}/{wiki_project}",
         )
-    return rows
+        _append_bounded_link(links, link, size, rows, allocation_bounds)
+        return tuple(links)
+    connection.execute(
+        "UPDATE wiki_links SET consumed=1 WHERE document_id=? AND project=?",
+        (wiki_document_id, wiki_project),
+    )
+    groups = connection.execute(
+        "SELECT native_key_json, MIN(complete_key), COUNT(*) FROM wiki_links "
+        "WHERE document_id=? AND project=? GROUP BY native_key_json "
+        "ORDER BY native_key_json",
+        (wiki_document_id, wiki_project),
+    )
+    for native_key_payload, complete_value, evidence_count in groups:
+        evidence_payload = _combined_wiki_link_evidence(
+            connection,
+            wiki_document_id,
+            wiki_project,
+            str(native_key_payload),
+            int(evidence_count),
+            allocation_bounds.max_output_row_bytes,
+        )
+        link = _resolve_one_link(
+            connection,
+            document.document_id,
+            _native_key_from_json(str(native_key_payload)),
+            source_revision,
+            f"pinned polygon_document_links evidence {evidence_payload}",
+            bool(complete_value),
+        )
+        size, rows = _append_bounded_link(
+            links,
+            link,
+            size,
+            rows,
+            allocation_bounds,
+        )
+    return tuple(links)
 
 
 def _combined_wiki_link_evidence(
-    rows: Sequence[tuple[Any, ...]],
-) -> dict[str, tuple[str, bool]]:
-    combined: dict[str, tuple[str, bool]] = {}
-    for _sequence, native_key_payload, evidence_payload, complete in rows:
-        prior = combined.get(str(native_key_payload))
-        evidence_json = str(evidence_payload)
-        is_complete = bool(complete)
-        if prior is not None:
-            evidence_json = _canonical_json([json.loads(prior[0]), json.loads(evidence_json)])
-            is_complete = bool(prior[1]) and is_complete
-        combined[str(native_key_payload)] = (evidence_json, is_complete)
-    return combined
-
-
-def _resolve_combined_wiki_links(
     connection: sqlite3.Connection,
-    document: SourceDocument,
-    source_revision: str,
-    combined: Mapping[str, tuple[str, bool]],
-) -> tuple[TextPolygonLink, ...]:
-    resolved = []
-    for native_key_payload, (evidence_payload, complete) in sorted(combined.items()):
-        key = _native_key_from_json(native_key_payload)
-        resolved.append(
-            _resolve_one_link(
-                connection,
-                document.document_id,
-                key,
-                source_revision,
-                f"pinned polygon_document_links evidence {evidence_payload}",
-                complete,
+    document_id: str,
+    project: str,
+    native_key_payload: str,
+    evidence_count: int,
+    max_output_row_bytes: int,
+) -> str:
+    with _BoundedTextBuilder(
+        max_output_row_bytes,
+        "combined Wiki link evidence exceeds the maximum output row size",
+    ) as output:
+        output.append("[" * (evidence_count - 1))
+        for index, (evidence_payload,) in enumerate(
+            connection.execute(
+                "SELECT evidence_json FROM wiki_links "
+                "WHERE document_id=? AND project=? AND native_key_json=? ORDER BY sequence",
+                (document_id, project, native_key_payload),
             )
+        ):
+            if index:
+                output.append(",")
+            output.append(str(evidence_payload))
+            if index:
+                output.append("]")
+        return output.value()
+
+
+def _record_base_size(
+    document: SourceDocument,
+    relevance: RelevanceAssessment,
+    bounds: JoinAllocationBounds,
+) -> tuple[int, int]:
+    empty_record = JoinedTextRecord(document, (), relevance)
+    size = _record_size(empty_record)
+    rows = _BATCH_ROW_OVERHEAD
+    _require_output_row_size(
+        _source_document_row_size(document),
+        bounds,
+        "source document exceeds the maximum output row size",
+    )
+    _require_output_row_size(
+        _relevance_assessment_row_size(relevance),
+        bounds,
+        "relevance assessment exceeds the maximum output row size",
+    )
+    if rows > bounds.max_record_rows:
+        raise ValueError("joined record exceeds the maximum output row count")
+    if size > bounds.max_record_bytes:
+        raise ValueError("joined record metadata exceeds the maximum record size")
+    return size, rows
+
+
+def _append_bounded_link(
+    links: list[TextPolygonLink],
+    link: TextPolygonLink,
+    current_size: int,
+    current_rows: int,
+    bounds: JoinAllocationBounds,
+) -> tuple[int, int]:
+    link_size = _text_polygon_link_row_size(link)
+    _require_output_row_size(
+        link_size,
+        bounds,
+        "joined link exceeds the maximum output row size",
+    )
+    next_size = current_size + link_size + int(bool(links))
+    next_rows = current_rows + 1 + len(link.candidate_inventory_row_ids)
+    if next_rows > bounds.max_record_rows:
+        raise ValueError("joined record exceeds the maximum output row count")
+    if next_size > bounds.max_record_bytes:
+        raise ValueError("joined record exceeds the maximum record size")
+    links.append(link)
+    return next_size, next_rows
+
+
+def _validate_joined_record_limits(
+    record: JoinedTextRecord,
+    bounds: JoinAllocationBounds,
+) -> None:
+    if _joined_record_row_count(record) > bounds.max_record_rows:
+        raise ValueError("joined record exceeds the maximum output row count")
+    if _record_size(record) > bounds.max_record_bytes:
+        raise ValueError("joined record exceeds the maximum record size")
+    _require_output_row_size(
+        _source_document_row_size(record.document),
+        bounds,
+        "source document exceeds the maximum output row size",
+    )
+    _require_output_row_size(
+        _relevance_assessment_row_size(record.relevance),
+        bounds,
+        "relevance assessment exceeds the maximum output row size",
+    )
+    for link in record.links:
+        _require_output_row_size(
+            _text_polygon_link_row_size(link),
+            bounds,
+            "joined link exceeds the maximum output row size",
         )
-    return tuple(resolved)
+
+
+def _require_output_row_size(
+    row_size: int,
+    bounds: JoinAllocationBounds,
+    message: str,
+) -> None:
+    if row_size > bounds.max_output_row_bytes:
+        raise ValueError(message)
+
+
+def _source_document_row_size(document: SourceDocument) -> int:
+    return len(
+        _canonical_json(
+            {
+                "document_id": document.document_id,
+                "native_key_json": native_key_json(document.native_key),
+                "source_revision": document.source_revision,
+                "content_sha256": document.content_sha256,
+                "body_status": document.body_status.value,
+            }
+        ).encode("utf-8")
+    )
+
+
+def _relevance_assessment_row_size(relevance: RelevanceAssessment) -> int:
+    return len(
+        _canonical_json(
+            {
+                "document_id": relevance.document_id,
+                "release_id": relevance.release_id,
+                "status": relevance.status.value,
+                "source_repository": relevance.source_repository,
+                "source_revision": relevance.source_revision,
+                "mapping_rule_version": relevance.mapping_rule_version,
+                "evidence": relevance.evidence,
+                "raw_value": relevance.raw_value,
+                "evidence_sha256": relevance.evidence_sha256,
+                "reason": relevance.reason,
+            }
+        ).encode("utf-8")
+    )
+
+
+def _text_polygon_link_row_size(link: TextPolygonLink) -> int:
+    return len(
+        _canonical_json(
+            {
+                "document_id": link.document_id,
+                "inventory_row_id": link.inventory_row_id,
+                "native_link_key_json": native_key_json(link.native_link_key),
+                "source_revision": link.source_revision,
+                "status": link.status.value,
+                "evidence": link.evidence,
+                "candidate_inventory_row_ids_json": _canonical_json(
+                    sorted(link.candidate_inventory_row_ids)
+                ),
+            }
+        ).encode("utf-8")
+    )
 
 
 def _resolve_one_link(
@@ -2630,6 +3025,11 @@ def _safe_metadata_mapping(values: Mapping[Any, Any]) -> dict[str, Any]:
 
 def _canonical_json(value: Any) -> str:
     return _JSON(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _require_utf8_size(payload: str, max_bytes: int, message: str) -> None:
+    if len(payload.encode("utf-8")) > max_bytes:
+        raise ValueError(message)
 
 
 def _native_key_from_json(value: str) -> NativeKey:

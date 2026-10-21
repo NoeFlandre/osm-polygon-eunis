@@ -26,6 +26,7 @@ from osm_polygon_eunis.pool_contract import (
 from osm_polygon_eunis.text_join import (
     EunisPinnedParquetFile,
     EunisPinnedTable,
+    JoinAllocationBounds,
     PinnedSourceRow,
     iter_eunis_join_batches,
     iter_eunis_join_records,
@@ -246,6 +247,131 @@ def test_description_join_uses_stable_identity_original_hash_and_preserves_gaps(
     serialized = json.dumps([asdict(record) for record in records], default=str)
     for body in (sentence0, sentence1, "Un texte.", full_text):
         assert body not in serialized
+
+
+def test_duplicate_relevance_evidence_spills_then_rejects_the_explicit_row_cap() -> None:
+    full_text = "A short source description."
+    original_hash = _sha(full_text)
+    identity = _description_identity("way", 17, "description", original_hash)
+    source = _pinned_row(
+        "language-v1/data/region.parquet",
+        0,
+        {
+            "description_identity": identity,
+            "source_pbf": "region.osm.pbf",
+            "osm_type": "way",
+            "osm_id": 17,
+            "tag_key": "description",
+            "original_text": full_text,
+            "text_sha256": original_hash,
+            "language_code": "eng",
+            "sentences": [full_text],
+        },
+    )
+    labels = [
+        _pinned_row(
+            "labels/language-v1/data/region.parquet",
+            index,
+            {
+                "label_id": f"label-{index}",
+                "description_identity": identity,
+                "tag_key": "description",
+                "sentence_index": 0,
+                "text_sha256": original_hash,
+                "decision": "YES",
+                "language": "eng",
+            },
+        )
+        for index in range(20)
+    ]
+    bounds = JoinAllocationBounds(
+        max_record_rows=32,
+        max_record_bytes=8_192,
+        max_output_row_bytes=512,
+    )
+
+    with pytest.raises(ValueError, match="relevance evidence exceeds the maximum output row size"):
+        list(
+            iter_eunis_join_records(
+                TextSource.DESCRIPTION,
+                [source],
+                labels,
+                [_inventory("region.osm.pbf", "way", 17, "inv-17", "poly-17")],
+                allocation_bounds=bounds,
+            )
+        )
+
+
+def test_wiki_link_groups_keep_nested_evidence_order_and_enforce_record_rows() -> None:
+    text = "A sentence about one document."
+    sentence = _pinned_row(
+        "wikipedia/sentences/region.parquet",
+        0,
+        {
+            "sentence_id": "sentence-1",
+            "document_id": "document-1",
+            "project": "wikipedia",
+            "language": "en",
+            "page_id": 1,
+            "revision_id": 1,
+            "text": text,
+            "content_hash": _sha(text),
+        },
+    )
+
+    def link_row(ordinal: int, source_pbf: str, marker: str) -> PinnedSourceRow:
+        return _pinned_row(
+            "polygon_document_links/region.parquet",
+            ordinal,
+            {
+                "document_id": "document-1",
+                "project": "wikipedia",
+                "polygon_id": f"{source_pbf}:way:{ordinal}",
+                "source_pbf": source_pbf,
+                "osm_type": "way",
+                "osm_id": 10 if source_pbf.startswith("a-") else 20,
+                "link_sources": marker,
+            },
+        )
+
+    links = [
+        link_row(0, "a-region.osm.pbf", "first"),
+        link_row(1, "z-region.osm.pbf", "other-key"),
+        link_row(2, "a-region.osm.pbf", "second"),
+        link_row(3, "a-region.osm.pbf", "third"),
+    ]
+    inventory = [
+        _inventory("a-region.osm.pbf", "way", 10, "inv-a", "poly-a"),
+        _inventory("z-region.osm.pbf", "way", 20, "inv-z", "poly-z"),
+    ]
+    records = list(
+        iter_eunis_join_records(
+            TextSource.WIKI,
+            [sentence],
+            [],
+            inventory,
+            wiki_link_rows=links,
+            wiki_corpus="wikipedia",
+            allocation_bounds=JoinAllocationBounds(max_record_rows=4),
+        )
+    )
+
+    [record] = records
+    assert [link.inventory_row_id for link in record.links] == ["inv-a", "inv-z"]
+    nested = json.loads(record.links[0].evidence.split(" evidence ", 1)[1])
+    assert [[row["row"] for row in nested[0]], nested[1]["row"]] == [[0, 2], 3]
+
+    too_small = iter_eunis_join_records(
+        TextSource.WIKI,
+        [sentence],
+        [],
+        inventory,
+        wiki_link_rows=links,
+        wiki_corpus="wikipedia",
+        allocation_bounds=JoinAllocationBounds(max_record_rows=3),
+    )
+    with pytest.raises(ValueError, match="joined record exceeds the maximum output row count"):
+        next(iter(too_small))
 
 
 def test_description_rejects_source_hash_and_identity_drift() -> None:
