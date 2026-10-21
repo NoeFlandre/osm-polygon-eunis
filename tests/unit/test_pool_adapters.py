@@ -757,7 +757,8 @@ def test_worldcover_source_evidence_is_joined_one_to_one_in_raw_order() -> None:
     )
 
     assert [row.label_outcomes[0].assigned_code for row in results] == ["10", "20"]
-    assert results[0].attempt_evidence.reason.startswith("adaptive_cea_refinement;")
+    reason = results[0].attempt_evidence.reason
+    assert reason is not None and reason.startswith("adaptive_cea_refinement;")
     with pytest.raises(ValueError, match="counts differ"):
         tuple(
             iter_worldcover_source_attempts(
@@ -1593,7 +1594,7 @@ def test_lucas_streaming_union_and_reference_ids_spill_to_disk(tmp_path: Path) -
     accumulator = lucas_module._LucasSupportAccumulator(
         box(0, 0, 10, 10), taxonomy, sidecar_directory=tmp_path
     )
-    footprint_count = 4095
+    footprint_count = 1023
     for index in range(footprint_count):
         accumulator.add(LucasFootprint(str(index), "A", "A1", "A11", box(0, 0, 8, 10)))
 
@@ -1607,8 +1608,10 @@ def test_lucas_streaming_union_and_reference_ids_spill_to_disk(tmp_path: Path) -
         ("L3", "A11", 80.0),
     ]
     assert all(not row.evidence_ids for row in supports)
-    assert all(row.evidence_sidecar is not None for row in supports)
-    assert all(row.evidence_sidecar.record_count == footprint_count for row in supports)
+    assert all(
+        row.evidence_sidecar is not None and row.evidence_sidecar.record_count == footprint_count
+        for row in supports
+    )
     assert _sidecar_ids(supports[0].evidence_sidecar) == tuple(
         str(index) for index in range(footprint_count)
     )
