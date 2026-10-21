@@ -17,7 +17,7 @@ per-class contributing tile IDs, and extraction failures. The class evidence
 lists contain only tiles with positive support for that class; missing tiles
 are represented in the attempt receipt and remain uncovered denominator area.
 Its pool
-coverage uses `geodesic_class_coverage`; existing
+coverage uses `equal_area_class_coverage`; existing
 `prepare_polygons`, `label_polygons`, text joins, and published Hugging Face
 files retain their old behavior and degree-based outputs are legacy evidence
 only. The new physical-area values are not relabeled legacy results.
@@ -69,13 +69,14 @@ shared gate can pass.
 
 ## Support rules
 
-WorldCover pool support uses WGS84 ellipsoidal geodesic area in square metres.
-The denominator is the full source polygon's geodesic area. Raster interior
-cells are weighted by their ellipsoidal row area, and polygon intersections
-with boundary cells are measured directly. NoData and unavailable tiles stay
-uncovered in the denominator. Class `0` is never a label. The pinned method is
-`pyproj.Geod(ellps=WGS84); boundary-cell intersections geodesic; v1`; old
-degree-based fractions and published outputs remain legacy evidence.
+WorldCover pool support uses a WGS84 ellipsoidal cylindrical equal-area (CEA)
+projection in square metres, with geographic edges densified to at most 0.01
+degrees before projection. The same transformation measures the full source
+polygon, raster cells, and clipped support geometries. NoData and unavailable
+tiles stay uncovered in the denominator. Class `0` is never a label. The
+pinned method is `WGS84 ellipsoidal CEA (lat_ts=30); geographic edges densified
+<=0.01deg; v2`; old degree-based fractions and published outputs remain legacy
+evidence.
 
 LUCAS support is measured in square metres in EPSG:3035. The reference pin
 identifies the official 2022 Copernicus asset
@@ -105,6 +106,17 @@ produces an excluded outcome. The reader records all RTree-hit footprint IDs
 and filter counts, while candidate evidence records the eligible IDs that
 contributed to each level and class.
 
+The GeoPackage cursor is consumed with `fetchmany`; the reader feeds each
+footprint into an independent binary-carry union forest for every supported
+`(level, class)` and does not retain the raw geometry rows. Each forest holds
+at most one partial union per binary level, so retained union-geometry count
+grows logarithmically with the number of intersecting footprints. The final
+union is clipped to the unchanged full polygon before area measurement.
+Attempted and contributing reference IDs are still emitted as exact tuples
+under the current adapter record shape; very large ID lists need a streamed
+sidecar path through the shared contract to bound that separate provenance
+buffer.
+
 ## Pin and persistence requirements
 
 The authoritative source manifest and checksum receipt are pinned to the
@@ -124,7 +136,7 @@ reference IDs, missing tile IDs, and terminal status or reason. Candidate
 evidence names only the source IDs that contributed support. The shared schema
 pins reference releases and taxonomies but does not yet pin the area
 measurement method alongside candidate support evidence. The adapter holds the
-WorldCover geodesic method in source code and computes LUCAS areas in EPSG:3035,
+WorldCover equal-area method in source code and computes LUCAS areas in EPSG:3035,
 but production exports need an explicit shared-core field for those method
 pins before their manifests can prove the exact numerator and denominator
 procedure.

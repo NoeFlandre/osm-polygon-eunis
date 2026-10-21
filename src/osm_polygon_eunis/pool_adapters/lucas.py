@@ -43,7 +43,6 @@ from .common import (
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _GPKG_HEADER_SIZE = 8
 _EPSG_3035 = 3035
-_UNION_BATCH_SIZE = 128
 LUCAS_REFERENCE_ID_NAMESPACE = "lucas-footprint-id"
 LUCAS_2022_GPKG_URI = (
     "https://jeodpp.jrc.ec.europa.eu/ftp/jrc-opendata/LUCAS/"
@@ -355,6 +354,7 @@ class LucasFeatureQuery:
     exclusion_reason: str | None = None
     partial_reason: str | None = None
     attempt_reason: str | None = None
+    preaggregated_supports: tuple[SupportArea, ...] | None = None
 
 
 class LucasGeoPackageReader:
@@ -427,7 +427,7 @@ class LucasGeoPackageReader:
             cursor = _query_rtree_candidates(connection, self.manifest.layer, geometry.bounds)
         except sqlite3.DatabaseError:
             return LucasFeatureQuery((), (), "lucas_reference_query_failed:DatabaseError")
-        attempted_ids, footprints, filter_counts, partial_counts, scan_failed = (
+        attempted_ids, supports, filter_counts, partial_counts, scan_failed = (
             _scan_rtree_candidates(
                 cursor, self.fetch_size, geometry, self.taxonomy, self.manifest.layer
             )
@@ -448,10 +448,11 @@ class LucasGeoPackageReader:
                 attempt_reason=attempt_reason,
             )
         return LucasFeatureQuery(
-            footprints,
+            (),
             attempted_ids,
             partial_reason=partial_summary,
             attempt_reason=attempt_reason,
+            preaggregated_supports=supports,
         )
 
     def _validate_schema(self) -> None:
@@ -616,13 +617,13 @@ def _scan_rtree_candidates(
     layer: LucasLayerManifest,
 ) -> tuple[
     tuple[str, ...],
-    tuple[LucasFootprint, ...],
+    tuple[SupportArea, ...],
     defaultdict[str, int],
     defaultdict[str, int],
     bool,
 ]:
     attempted_ids: list[str] = []
-    footprints: list[LucasFootprint] = []
+    support_accumulator = _LucasSupportAccumulator(geometry, taxonomy)
     filter_counts: defaultdict[str, int] = defaultdict(int)
     partial_counts: defaultdict[str, int] = defaultdict(int)
     scan_failed = False
@@ -644,8 +645,14 @@ def _scan_rtree_candidates(
             if partial_reason is not None:
                 partial_counts[partial_reason] += 1
             if footprint is not None:
-                footprints.append(footprint)
-    return tuple(attempted_ids), tuple(footprints), filter_counts, partial_counts, scan_failed
+                support_accumulator.add(footprint)
+    return (
+        tuple(attempted_ids),
+        support_accumulator.finish(),
+        filter_counts,
+        partial_counts,
+        scan_failed,
+    )
 
 
 def _parse_reference_row(
@@ -760,8 +767,11 @@ def measure_lucas_supports(
                 attempt_reason=query.attempt_reason,
             )
         else:
+            supports = query.preaggregated_supports
+            if supports is None:
+                supports = _union_by_level(original, query.footprints, taxonomy)
             attempt = SupportAttempt(
-                _union_by_level(original, query.footprints, taxonomy),
+                supports,
                 attempted_reference_ids=query.attempted_feature_ids,
                 attempt_reason=query.attempt_reason,
             )
@@ -779,28 +789,84 @@ def _union_by_level(
     footprints: Sequence[LucasFootprint],
     taxonomy: LucasTaxonomy,
 ) -> tuple[SupportArea, ...]:
-    grouped: dict[tuple[str, str], list[BaseGeometry]] = defaultdict(list)
-    evidence_ids: dict[tuple[str, str], list[str]] = defaultdict(list)
-    kinds = {"L1": AssignmentKind.ANCESTOR_DERIVED, "L2": AssignmentKind.ANCESTOR_DERIVED}
-    kinds["L3"] = AssignmentKind.DIRECT
+    accumulator = _LucasSupportAccumulator(original, taxonomy)
     for footprint in footprints:
-        taxonomy.validate_path(footprint.l1_code, footprint.l2_code, footprint.l3_code)
+        accumulator.add(footprint)
+    return accumulator.finish()
+
+
+class _SupportUnionForest:
+    """Merge incoming support geometries with logarithmic retained state."""
+
+    def __init__(self) -> None:
+        self._levels: list[BaseGeometry | None] = []
+
+    @property
+    def retained_geometry_count(self) -> int:
+        return sum(geometry is not None for geometry in self._levels)
+
+    def add(self, geometry: BaseGeometry) -> None:
+        level = 0
+        while level < len(self._levels) and self._levels[level] is not None:
+            previous = self._levels[level]
+            if previous is None:
+                raise RuntimeError("support union forest has inconsistent levels")
+            geometry = unary_union((previous, geometry))
+            self._levels[level] = None
+            level += 1
+        if level == len(self._levels):
+            self._levels.append(geometry)
+        else:
+            self._levels[level] = geometry
+
+    def finish(self) -> BaseGeometry:
+        geometries = [geometry for geometry in self._levels if geometry is not None]
+        if not geometries:
+            raise ValueError("cannot finish an empty support union")
+        return geometries[0] if len(geometries) == 1 else unary_union(geometries)
+
+
+class _LucasSupportAccumulator:
+    """Union each hierarchy class as footprint rows arrive, retaining no row geometries."""
+
+    def __init__(self, original: BaseGeometry, taxonomy: LucasTaxonomy) -> None:
+        self._original = original
+        self._taxonomy = taxonomy
+        self._unions: dict[tuple[str, str], _SupportUnionForest] = {}
+        self._evidence_ids: dict[tuple[str, str], list[str]] = defaultdict(list)
+        self.peak_retained_union_geometry_count = 0
+
+    def add(self, footprint: LucasFootprint) -> None:
+        self._taxonomy.validate_path(footprint.l1_code, footprint.l2_code, footprint.l3_code)
+        clipped = footprint.geometry.intersection(self._original)
+        if clipped.is_empty or float(shapely.area(clipped)) <= 0.0:
+            return
         for level, code in (
             ("L1", footprint.l1_code),
             ("L2", footprint.l2_code),
             ("L3", footprint.l3_code),
         ):
-            if code is not None:
-                grouped[(level, code)].append(footprint.geometry)
-                clipped = footprint.geometry.intersection(original)
-                if not clipped.is_empty and float(shapely.area(clipped)) > 0.0:
-                    evidence_ids[(level, code)].append(footprint.footprint_id)
+            if code is None:
+                continue
+            key = (level, code)
+            forest = self._unions.setdefault(key, _SupportUnionForest())
+            forest.add(footprint.geometry)
+            self._evidence_ids[key].append(footprint.footprint_id)
+        retained = sum(forest.retained_geometry_count for forest in self._unions.values())
+        self.peak_retained_union_geometry_count = max(
+            self.peak_retained_union_geometry_count, retained
+        )
 
-    supports = []
-    for (level, code), geometries in sorted(grouped.items()):
-        unioned = _bounded_union(geometries)
-        intersection = unioned.intersection(original)
-        if not intersection.is_empty:
+    def finish(self) -> tuple[SupportArea, ...]:
+        kinds = {
+            "L1": AssignmentKind.ANCESTOR_DERIVED,
+            "L2": AssignmentKind.ANCESTOR_DERIVED,
+            "L3": AssignmentKind.DIRECT,
+        }
+        supports = []
+        for level, code in sorted(self._unions):
+            unioned = self._unions[(level, code)].finish()
+            intersection = unioned.intersection(self._original)
             area = float(shapely.area(intersection))
             if not math.isfinite(area) or area < 0.0:
                 raise ValueError("LUCAS intersection area must be finite and non-negative")
@@ -811,25 +877,21 @@ def _union_by_level(
                         code,
                         area,
                         kinds[level],
-                        tuple(evidence_ids[(level, code)]),
+                        tuple(self._evidence_ids[(level, code)]),
                     )
                 )
-    return tuple(supports)
+        return tuple(supports)
 
 
 def _bounded_union(geometries: Sequence[BaseGeometry]) -> BaseGeometry:
-    """Union geometry in small batches while never summing overlapping area."""
+    """Union geometry without retaining a second full copy of the input list."""
 
-    if len(geometries) == 1:
-        return geometries[0]
-    pending = list(geometries)
-    while len(pending) > 1:
-        next_level: list[BaseGeometry] = []
-        for start in range(0, len(pending), _UNION_BATCH_SIZE):
-            batch = pending[start : start + _UNION_BATCH_SIZE]
-            next_level.append(batch[0] if len(batch) == 1 else unary_union(batch))
-        pending = next_level
-    return pending[0]
+    if not geometries:
+        raise ValueError("cannot union an empty geometry sequence")
+    forest = _SupportUnionForest()
+    for geometry in geometries:
+        forest.add(geometry)
+    return forest.finish()
 
 
 def _decode_gpkg_geometry(blob: object, expected_srs_id: int) -> BaseGeometry:

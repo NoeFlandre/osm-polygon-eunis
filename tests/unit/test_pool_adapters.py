@@ -509,7 +509,7 @@ def test_worldcover_rejects_mismatched_reference_and_geometry_pins() -> None:
         worldcover_supports(polygon, replace(good, source_polygon_id="other"), pin)
     with pytest.raises(ValueError, match="physical square metres"):
         worldcover_supports(polygon, good, replace(pin, support_unit="hectares"))
-    with pytest.raises(ValueError, match="not the pinned geodesic method"):
+    with pytest.raises(ValueError, match="not the pinned equal-area method"):
         worldcover_supports(polygon, replace(good, area_measurement="square degrees"), pin)
     with pytest.raises(ValueError, match="EPSG:4326"):
         worldcover_supports(
@@ -559,7 +559,7 @@ def test_worldcover_records_exclusion_and_area_error_outcomes() -> None:
         pin,
     )
     assert invalid_area.label_outcomes[0].reason == "geometry_area_unusable"
-    with pytest.raises(ValueError, match="differs from full geodesic"):
+    with pytest.raises(ValueError, match="differs from full equal-area"):
         worldcover_supports(
             polygon,
             WorldCoverEvidence(
@@ -608,7 +608,7 @@ def test_worldcover_validates_flat_class_areas_and_tile_evidence() -> None:
         (evidence(((10, 20.0),), ((10, ("tile-1", "tile-1")),)), "repeats a support tile ID"),
         (
             evidence(((10, 60.0), (20, 60.0)), ((10, ("tile-1",)), (20, ("tile-2",)))),
-            "exceed the full geodesic denominator",
+            "exceed the full equal-area denominator",
         ),
     )
     for invalid, message in invalid_cases:
@@ -967,8 +967,13 @@ def test_lucas_reader_uses_exact_file_pins_and_records_feature_ids(tmp_path: Pat
         "filtered:point_copernicus=1,survey_obs_type=1,survey_year=1,"
         "surveycprncando=1,surveycprnlc=1"
     )
-    assert len(result.footprints) == 1
-    assert result.footprints[0].l3_code == "A11"
+    assert result.footprints == ()
+    assert result.preaggregated_supports is not None
+    assert result.preaggregated_supports == (
+        SupportArea("L1", "A", 80.0, AssignmentKind.ANCESTOR_DERIVED, ("1",)),
+        SupportArea("L2", "A1", 80.0, AssignmentKind.ANCESTOR_DERIVED, ("1",)),
+        SupportArea("L3", "A11", 80.0, AssignmentKind.DIRECT, ("1",)),
+    )
     assert result.exclusion_reason is None
     assert len(attempts) == 2
     assert attempts[0].attempt_evidence.attempted_reference_ids == ("1", "2", "3", "4", "5", "6")
@@ -1386,6 +1391,25 @@ def test_lucas_support_statuses_units_and_bounded_union() -> None:
 
     supports = lucas_module._bounded_union(tuple(box(i, 0, i + 1, 1) for i in range(129)))
     assert shapely.area(supports) == 129.0
+
+
+def test_lucas_streaming_union_retains_logarithmic_geometry_state() -> None:
+    taxonomy = _lucas_taxonomy()
+    accumulator = lucas_module._LucasSupportAccumulator(box(0, 0, 10, 10), taxonomy)
+    footprint_count = 4095
+    for index in range(footprint_count):
+        accumulator.add(LucasFootprint(str(index), "A", "A1", "A11", box(0, 0, 8, 10)))
+
+    supports = accumulator.finish()
+    expected_state_bound = 3 * footprint_count.bit_length()
+    assert accumulator.peak_retained_union_geometry_count <= expected_state_bound
+    assert accumulator.peak_retained_union_geometry_count < footprint_count
+    assert [(row.level, row.code, row.numerator) for row in supports] == [
+        ("L1", "A", 80.0),
+        ("L2", "A1", 80.0),
+        ("L3", "A11", 80.0),
+    ]
+    assert all(len(row.evidence_ids) == footprint_count for row in supports)
 
 
 def test_source_wide_runners_attempt_raw_rows_and_report_query_errors(monkeypatch) -> None:

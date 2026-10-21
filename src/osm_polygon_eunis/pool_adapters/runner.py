@@ -41,7 +41,7 @@ class WorldCoverSourceAttempt(Protocol):
 
     @property
     def polygon_area_m2(self) -> float | None:
-        """Full source polygon area in WGS84 geodesic square metres."""
+        """Full source polygon area in WGS84 ellipsoidal equal-area square metres."""
 
         ...
 

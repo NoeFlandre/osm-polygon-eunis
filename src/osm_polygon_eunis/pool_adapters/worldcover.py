@@ -19,7 +19,7 @@ from .common import (
 WORLDCOVER_CODES: Final[frozenset[int]] = frozenset({10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 100})
 WORLDCOVER_LEVELS: Final[tuple[LabelLevel, ...]] = (LabelLevel("class", supported=True),)
 WORLDCOVER_AREA_MEASUREMENT: Final[str] = (
-    "pyproj.Geod(ellps=WGS84); boundary-cell intersections geodesic; v1"
+    "WGS84 ellipsoidal CEA (lat_ts=30); geographic edges densified <=0.01deg; v2"
 )
 WORLDCOVER_REFERENCE_ID_NAMESPACE: Final[str] = "worldcover-tile-id"
 
@@ -49,14 +49,14 @@ def worldcover_supports(
     evidence: WorldCoverEvidence,
     reference_pin: ReferencePin,
 ) -> PoolPolygonLabelRecords:
-    """Turn geodesic class areas into full-area support candidates for one polygon."""
+    """Turn equal-area class measurements into full-area support candidates."""
 
     if polygon.source_polygon_id != evidence.source_polygon_id:
         raise ValueError("WorldCover evidence does not match the raw polygon key")
     if reference_pin.support_unit != "m^2":
         raise ValueError("WorldCover pool support must use physical square metres")
     if evidence.area_measurement != WORLDCOVER_AREA_MEASUREMENT:
-        raise ValueError("WorldCover support area measurement is not the pinned geodesic method")
+        raise ValueError("WorldCover support area measurement is not the pinned equal-area method")
     if (
         polygon.snapshot is not None
         and polygon.geometry is not None
@@ -102,7 +102,7 @@ def worldcover_supports(
             rel_tol=1e-12,
             abs_tol=1e-6,
         ):
-            raise ValueError("WorldCover snapshot area differs from full geodesic polygon area")
+            raise ValueError("WorldCover snapshot area differs from full equal-area polygon area")
         attempt = SupportAttempt(
             _area_supports(
                 evidence.class_areas_m2,
@@ -154,7 +154,7 @@ def _area_supports(
             f"WorldCover support evidence has no class area for {sorted(extra_evidence)}"
         )
     if area_total > original_area * (1.0 + 1e-9):
-        raise ValueError("WorldCover class areas exceed the full geodesic denominator")
+        raise ValueError("WorldCover class areas exceed the full equal-area denominator")
     return tuple(supports)
 
 
