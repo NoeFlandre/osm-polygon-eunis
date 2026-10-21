@@ -8,9 +8,11 @@ from dataclasses import replace
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+import osm_polygon_eunis.pool_contract.streaming as streaming_module
 from osm_polygon_eunis.pool_contract import (
     AmbiguityBasis,
     AssignmentKind,
@@ -24,6 +26,7 @@ from osm_polygon_eunis.pool_contract import (
     EvaluationPayload,
     EvaluationTrace,
     FilesystemSink,
+    FilesystemStreamingSink,
     GeometryStatus,
     InvalidPoolError,
     LabelCandidate,
@@ -32,15 +35,19 @@ from osm_polygon_eunis.pool_contract import (
     OutcomeStatus,
     PolygonInventoryRow,
     PolygonSnapshot,
+    PoolBatch,
     PoolBuildInput,
     PoolEligibility,
     PoolKey,
+    PoolStreamError,
+    PoolStreamSpec,
     RawInventoryEvidence,
     ReferencePin,
     ReferenceSystem,
     SourceDocument,
     SourceSnapshot,
     SplitAssignment,
+    StreamingLimits,
     SupportSemantics,
     TextLinkStatus,
     TextPolygonLink,
@@ -48,6 +55,7 @@ from osm_polygon_eunis.pool_contract import (
     build_full_pool,
     canonical_native_key,
     export_full_pool,
+    export_pool_batches,
     inventory_row_identifier,
     native_keyset_sha256,
     polygon_snapshot_identifier,
@@ -569,3 +577,312 @@ def test_split_assignment_requires_version_and_full_entity_identity():
 
     assert validate_split_assignment(assignment).ok
     assert not validate_split_assignment(replace(assignment, policy_version="")).ok
+
+
+def _stream_batches(source: PoolBuildInput) -> tuple[PoolBatch, PoolBatch]:
+    first_inventory_id = source.inventory[0].inventory_row_id
+    first_ids = {first_inventory_id}
+    return (
+        PoolBatch(
+            batch_index=0,
+            inventory=tuple(row for row in source.inventory if row.inventory_row_id in first_ids),
+            polygons=tuple(row for row in source.polygons if row.inventory_row_id in first_ids),
+            label_candidates=tuple(
+                row for row in source.label_candidates if row.inventory_row_id in first_ids
+            ),
+            label_outcomes=tuple(
+                row for row in source.label_outcomes if row.inventory_row_id in first_ids
+            ),
+            documents=(),
+            text_polygon_links=source.text_polygon_links,
+            entity_links=source.entity_links,
+            eligibility=source.eligibility,
+        ),
+        PoolBatch(
+            batch_index=1,
+            inventory=tuple(
+                row for row in source.inventory if row.inventory_row_id not in first_ids
+            ),
+            polygons=tuple(row for row in source.polygons if row.inventory_row_id not in first_ids),
+            label_candidates=tuple(
+                row for row in source.label_candidates if row.inventory_row_id not in first_ids
+            ),
+            label_outcomes=tuple(
+                row for row in source.label_outcomes if row.inventory_row_id not in first_ids
+            ),
+            documents=source.documents,
+        ),
+    )
+
+
+def _single_batch(source: PoolBuildInput) -> tuple[PoolBatch, ...]:
+    return (
+        PoolBatch(
+            batch_index=0,
+            inventory=source.inventory,
+            polygons=source.polygons,
+            label_candidates=source.label_candidates,
+            label_outcomes=source.label_outcomes,
+            documents=source.documents,
+            text_polygon_links=source.text_polygon_links,
+            entity_links=source.entity_links,
+            eligibility=source.eligibility,
+        ),
+    )
+
+
+def _tablewise_batches(source: PoolBuildInput) -> tuple[PoolBatch, ...]:
+    return (
+        PoolBatch(batch_index=0, inventory=source.inventory),
+        PoolBatch(batch_index=1, polygons=source.polygons),
+        PoolBatch(batch_index=2, label_candidates=source.label_candidates),
+        PoolBatch(batch_index=3, label_outcomes=source.label_outcomes),
+        PoolBatch(batch_index=4, text_polygon_links=source.text_polygon_links),
+        PoolBatch(batch_index=5, documents=source.documents),
+        PoolBatch(batch_index=6, entity_links=source.entity_links),
+        PoolBatch(batch_index=7, eligibility=source.eligibility),
+    )
+
+
+def _canonical_table_rows(table: pa.Table) -> list[str]:
+    return sorted(json.dumps(row, sort_keys=True) for row in table.to_pylist())
+
+
+def test_stream_export_matches_fixture_tables_and_reports_completeness(tmp_path: Path) -> None:
+    source = _pool_input()
+    bundle = _build(source)
+    legacy = export_full_pool(bundle, FilesystemSink(tmp_path / "legacy"))
+    stream_sink = FilesystemStreamingSink(tmp_path / "stream")
+    spec = PoolStreamSpec.from_build_input(source)
+
+    streamed = export_pool_batches(
+        spec,
+        _stream_batches(source),
+        stream_sink,
+        limits=StreamingLimits(max_batch_rows=32, max_shard_rows=2, max_diagnostics=1),
+    )
+
+    assert streamed.pool_id == bundle.manifest.pool_id
+    assert streamed.total_source_keys == source.raw_inventory_evidence.expected_key_count
+    assert streamed.inventory_keyset_sha256 == source.raw_inventory_evidence.expected_keyset_sha256
+    assert streamed.shard_count == 11
+    manifest = json.loads(_file_uri_path(streamed.manifest_uri).read_text())
+    assert manifest["pool_complete"] is True
+    assert manifest["source_inventory_receipt"] == {
+        "processed_key_count": source.raw_inventory_evidence.expected_key_count,
+        "observed_keyset_sha256": source.raw_inventory_evidence.expected_keyset_sha256,
+        "matches_source_evidence": True,
+    }
+    assert manifest["storage_layout_version"] == "sharded-parquet-v1"
+    shard_rows = [
+        json.loads(line)
+        for line in _file_uri_path(streamed.shard_manifest_uri).read_text().splitlines()
+    ]
+    assert len(shard_rows) == streamed.shard_count
+    legacy_accounting = {item.level: item for item in bundle.manifest.level_accounting}
+    assert [item.level for item in streamed.level_accounting] == sorted(legacy_accounting)
+    for item in streamed.level_accounting:
+        legacy_item = legacy_accounting[item.level]
+        assert item.total_source_keys == legacy_item.total_source_keys
+        assert item.processed_decisions == legacy_item.processed_decisions
+        assert item.qualifying_candidates == legacy_item.qualifying_candidates
+        assert item.assigned == legacy_item.assigned
+        assert item.ambiguous == legacy_item.ambiguous
+        assert item.unassigned == legacy_item.unassigned
+        assert item.excluded == legacy_item.excluded
+    exclusion_artifact = manifest["storage_layout"]["exclusions"]
+    exclusion_path = _file_uri_path(streamed.manifest_uri).parent / "exclusions.jsonl"
+    exclusion_rows = [json.loads(line) for line in exclusion_path.read_text().splitlines()]
+    assert len(exclusion_rows) == exclusion_artifact["group_count"]
+    assert hashlib.sha256(exclusion_path.read_bytes()).hexdigest() == exclusion_artifact["sha256"]
+    assert {item["reason"] for item in exclusion_rows} == {
+        "geometry_artifact_missing",
+        "invalid_geometry",
+    }
+    assert sum(item["count"] for item in exclusion_rows) == sum(
+        item.excluded for item in streamed.level_accounting
+    )
+    assert exclusion_path.exists()
+
+    shards_by_table = {}
+    for shard in shard_rows:
+        artifact_path = stream_sink.root / shard["path"]
+        shards_by_table.setdefault(shard["table"], []).append(artifact_path)
+    for table_name, legacy_uri in legacy.table_uris:
+        old_table = pq.read_table(_file_uri_path(legacy_uri))
+        new_table = pa.concat_tables([pq.read_table(path) for path in shards_by_table[table_name]])
+        assert new_table.schema == old_table.schema
+        assert _canonical_table_rows(new_table) == _canonical_table_rows(old_table)
+
+    rerun = export_pool_batches(
+        spec,
+        _tablewise_batches(source),
+        FilesystemStreamingSink(tmp_path / "stream-rebatched"),
+        limits=StreamingLimits(max_batch_rows=32, max_shard_rows=2, max_diagnostics=1),
+    )
+    assert rerun.manifest_sha256 == streamed.manifest_sha256
+    assert rerun.shard_manifest_sha256 == streamed.shard_manifest_sha256
+    rerun_shards = [
+        json.loads(line)
+        for line in _file_uri_path(rerun.shard_manifest_uri).read_text().splitlines()
+    ]
+    assert rerun_shards == shard_rows
+
+
+def test_stream_enforces_encoded_batch_byte_bound_before_completion(tmp_path: Path) -> None:
+    source = _pool_input()
+    with pytest.raises(PoolStreamError, match="max_batch_bytes"):
+        export_pool_batches(
+            PoolStreamSpec.from_build_input(source),
+            _single_batch(source),
+            FilesystemStreamingSink(tmp_path / "stream"),
+            limits=StreamingLimits(max_batch_bytes=128),
+        )
+    assert not list((tmp_path / "stream").rglob("manifest.json"))
+
+
+def test_stream_batch_row_limit_counts_normalized_link_candidates(tmp_path: Path) -> None:
+    source = _pool_input()
+    batch = _single_batch(source)[0]
+
+    with pytest.raises(PoolStreamError, match="max_batch_rows"):
+        export_pool_batches(
+            PoolStreamSpec.from_build_input(source),
+            (batch,),
+            FilesystemStreamingSink(tmp_path / "stream"),
+            limits=StreamingLimits(max_batch_rows=batch.row_count - 1),
+        )
+
+
+def test_stream_revalidates_reference_measurements_globally(tmp_path: Path) -> None:
+    source = _pool_input()
+    candidate = replace(source.label_candidates[0], numerator=79.0)
+    invalid = replace(source, label_candidates=(candidate, *source.label_candidates[1:]))
+    with pytest.raises(PoolStreamError, match="ratio does not match"):
+        export_pool_batches(
+            PoolStreamSpec.from_build_input(source),
+            _single_batch(invalid),
+            FilesystemStreamingSink(tmp_path / "stream"),
+            limits=StreamingLimits(max_batch_rows=32),
+        )
+    assert not list((tmp_path / "stream").rglob("manifest.json"))
+
+
+def test_stream_duplicate_native_key_across_batches_never_completes(tmp_path: Path) -> None:
+    source = _pool_input()
+    batches = _stream_batches(source)
+    duplicate = replace(
+        batches[1],
+        batch_index=2,
+        inventory=(batches[0].inventory[0],),
+        polygons=batches[0].polygons,
+        label_candidates=batches[0].label_candidates,
+        label_outcomes=batches[0].label_outcomes,
+    )
+    sink_root = tmp_path / "stream"
+    with pytest.raises(PoolStreamError, match="uniqueness or key constraint"):
+        export_pool_batches(
+            PoolStreamSpec.from_build_input(source),
+            (batches[0], batches[1], duplicate),
+            FilesystemStreamingSink(sink_root),
+            limits=StreamingLimits(max_batch_rows=32),
+        )
+    manifest_path = sink_root / "pools/1.0.0/website/eunis/raw-website/1.0.0/manifest.json"
+    assert not manifest_path.exists()
+
+
+def test_stream_inventory_receipt_rejects_missing_polygon_keys(tmp_path: Path) -> None:
+    source = _pool_input()
+    with pytest.raises(PoolStreamError, match="independent scan evidence"):
+        export_pool_batches(
+            PoolStreamSpec.from_build_input(source),
+            _stream_batches(source)[:1],
+            FilesystemStreamingSink(tmp_path / "stream"),
+            limits=StreamingLimits(max_batch_rows=32),
+        )
+    assert not list((tmp_path / "stream").rglob("manifest.json"))
+
+
+def test_stream_requires_one_decision_per_supported_level(tmp_path: Path) -> None:
+    source = _pool_input()
+    incomplete = replace(_stream_batches(source)[0], label_outcomes=())
+    with pytest.raises(PoolStreamError, match="decision coverage mismatch"):
+        export_pool_batches(
+            PoolStreamSpec.from_build_input(source),
+            (incomplete,),
+            FilesystemStreamingSink(tmp_path / "stream"),
+            limits=StreamingLimits(max_batch_rows=32),
+        )
+
+
+def test_stream_interrupted_copy_has_no_manifest_and_retries_identically(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _pool_input()
+    batches = _stream_batches(source)
+    sink_root = tmp_path / "stream"
+    sink = FilesystemStreamingSink(sink_root)
+    original_copy = streaming_module.shutil.copyfileobj
+
+    def interrupted_copy(source_file, destination_file, **_kwargs):
+        destination_file.write(source_file.read(64))
+        raise OSError("interrupted shard copy")
+
+    monkeypatch.setattr(streaming_module.shutil, "copyfileobj", interrupted_copy)
+    with pytest.raises(OSError, match="interrupted shard copy"):
+        export_pool_batches(
+            PoolStreamSpec.from_build_input(source),
+            batches,
+            sink,
+            limits=StreamingLimits(max_batch_rows=32),
+        )
+    assert not list(sink_root.rglob("manifest.json"))
+    assert not list(sink_root.rglob("*.tmp"))
+
+    monkeypatch.setattr(streaming_module.shutil, "copyfileobj", original_copy)
+    first = export_pool_batches(
+        PoolStreamSpec.from_build_input(source),
+        batches,
+        sink,
+        limits=StreamingLimits(max_batch_rows=32),
+    )
+    second = export_pool_batches(
+        PoolStreamSpec.from_build_input(source),
+        batches,
+        sink,
+        limits=StreamingLimits(max_batch_rows=32),
+    )
+    assert second == first
+    assert _file_uri_path(first.manifest_uri).exists()
+
+
+def test_stream_row_size_limit_and_bounded_diagnostics(tmp_path: Path) -> None:
+    source = _pool_input()
+    sink_root = tmp_path / "stream"
+    with pytest.raises(PoolStreamError, match="max_row_bytes"):
+        export_pool_batches(
+            PoolStreamSpec.from_build_input(source),
+            _single_batch(source),
+            FilesystemStreamingSink(sink_root),
+            limits=StreamingLimits(max_row_bytes=16, max_shard_bytes=16),
+        )
+    assert not list(sink_root.rglob("manifest.json"))
+
+    error = PoolStreamError((f"issue-{index}" for index in range(20)), max_diagnostics=2)
+    assert error.report.issues == (
+        "issue-0",
+        "issue-1",
+        "additional diagnostics omitted after the first 2 issues",
+    )
+
+
+def test_filesystem_stream_sink_rejects_conflicting_retry(tmp_path: Path) -> None:
+    sink = FilesystemStreamingSink(tmp_path / "immutable")
+    staged = tmp_path / "staged.bin"
+    staged.write_bytes(b"first version")
+    sink.put_file("layouts/sharded-parquet-v1/shards/test.parquet", staged)
+    staged.write_bytes(b"conflicting version")
+
+    with pytest.raises(FileExistsError, match="immutable pool artifact differs"):
+        sink.put_file("layouts/sharded-parquet-v1/shards/test.parquet", staged)
