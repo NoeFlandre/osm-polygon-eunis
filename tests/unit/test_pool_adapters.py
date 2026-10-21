@@ -4,12 +4,12 @@ import hashlib
 import json
 import sqlite3
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
 import shapely
-from shapely.geometry import box
+from shapely.geometry import LineString, box
 
 from osm_polygon_eunis.pool_adapters import (
     WORLDCOVER_AREA_MEASUREMENT,
@@ -23,24 +23,30 @@ from osm_polygon_eunis.pool_adapters import (
     LucasReferenceManifest,
     LucasTaxonomy,
     PoolPolygonInput,
+    SupportArea,
+    SupportAttempt,
     WorldCoverEvidence,
     build_raw_inventory_evidence,
     export_labeled_polygons,
     iter_labeled_polygon_batches,
     iter_lucas_attempts,
+    iter_lucas_rows,
     iter_polygon_batches,
     iter_worldcover_attempts,
     iter_worldcover_rows,
     iter_worldcover_source_attempts,
+    label_polygon,
     lucas_2022_copernicus_manifest,
     lucas_2022_reference_pin,
     measure_lucas_supports,
     polygon_geometry_tree_pins,
     raw_source_tree_pins,
+    verify_lucas_file,
     verify_lucas_taxonomy_file,
     worldcover_supports,
 )
 from osm_polygon_eunis.pool_adapters import lucas as lucas_module
+from osm_polygon_eunis.pool_adapters import source_pins as source_pins_module
 from osm_polygon_eunis.pool_contract import (
     AssignmentKind,
     AttemptStatus,
@@ -48,6 +54,7 @@ from osm_polygon_eunis.pool_contract import (
     FilesystemArtifactReader,
     FilesystemStreamingSink,
     GeometryStatus,
+    LabelLevel,
     OutcomeStatus,
     PolygonInventoryRow,
     PolygonSnapshot,
@@ -171,6 +178,197 @@ def test_lucas_2022_manifest_and_c3_taxonomy_are_fully_pinned() -> None:
     assert taxonomy.path_for_observed_code("C1") is None
 
 
+def test_raw_inventory_evidence_rejects_incomplete_scan_pins() -> None:
+    with pytest.raises(ValueError, match="enumeration rule"):
+        build_raw_inventory_evidence(
+            enumeration_rule=" ",
+            scan_report_uri="file:///tmp/scan.json",
+            scan_report=b"scan report",
+            expected_key_count=1,
+            expected_keyset_sha256=_SHA_A,
+        )
+
+
+def test_label_polygon_rejects_inconsistent_pins_and_support_rows() -> None:
+    sample = _polygon(19)
+    polygon = sample.pool_polygon
+    reference_pin = _reference_pin(ReferenceSystem.WORLDCOVER)
+    with pytest.raises(ValueError, match=r"0\.8 threshold"):
+        label_polygon(
+            polygon,
+            SupportAttempt(()),
+            WORLDCOVER_LEVELS,
+            replace(reference_pin, threshold=0.9),
+            reference_id_namespace="fixture-reference",
+        )
+    with pytest.raises(ValueError, match="assignment-rule version"):
+        label_polygon(
+            polygon,
+            SupportAttempt(()),
+            WORLDCOVER_LEVELS,
+            reference_pin,
+            reference_id_namespace="fixture-reference",
+            assignment_rule_version=" ",
+        )
+    with pytest.raises(ValueError, match="does not match its raw inventory"):
+        label_polygon(
+            replace(
+                polygon,
+                inventory=replace(polygon.inventory, polygon_snapshot_id="other-snapshot"),
+            ),
+            SupportAttempt(()),
+            WORLDCOVER_LEVELS,
+            reference_pin,
+            reference_id_namespace="fixture-reference",
+        )
+    with pytest.raises(ValueError, match="at least one supported level"):
+        label_polygon(
+            polygon,
+            SupportAttempt(()),
+            (LabelLevel("class", supported=False),),
+            reference_pin,
+            reference_id_namespace="fixture-reference",
+        )
+    with pytest.raises(ValueError, match="names must be unique"):
+        label_polygon(
+            polygon,
+            SupportAttempt(()),
+            (LabelLevel("class", True), LabelLevel("class", True)),
+            reference_pin,
+            reference_id_namespace="fixture-reference",
+        )
+
+    unsupported = SupportAttempt((SupportArea("unsupported", "10", 1.0, AssignmentKind.DIRECT),))
+    with pytest.raises(ValueError, match="undeclared or unsupported level"):
+        label_polygon(
+            polygon,
+            unsupported,
+            WORLDCOVER_LEVELS,
+            reference_pin,
+            reference_id_namespace="fixture-reference",
+        )
+    blank_code = SupportAttempt((SupportArea("class", " ", 1.0, AssignmentKind.DIRECT),))
+    with pytest.raises(ValueError, match="code must not be empty"):
+        label_polygon(
+            polygon,
+            blank_code,
+            WORLDCOVER_LEVELS,
+            reference_pin,
+            reference_id_namespace="fixture-reference",
+        )
+    duplicate = SupportArea("class", "10", 20.0, AssignmentKind.DIRECT)
+    with pytest.raises(ValueError, match="must be unioned before labeling"):
+        label_polygon(
+            polygon,
+            SupportAttempt((duplicate, duplicate)),
+            WORLDCOVER_LEVELS,
+            reference_pin,
+            reference_id_namespace="fixture-reference",
+        )
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        label_polygon(
+            polygon,
+            SupportAttempt((SupportArea("class", "10", float("nan"), AssignmentKind.DIRECT),)),
+            WORLDCOVER_LEVELS,
+            reference_pin,
+            reference_id_namespace="fixture-reference",
+        )
+    with pytest.raises(ValueError, match="exceeds full polygon area"):
+        label_polygon(
+            polygon,
+            SupportAttempt((SupportArea("class", "10", 101.0, AssignmentKind.DIRECT),)),
+            WORLDCOVER_LEVELS,
+            reference_pin,
+            reference_id_namespace="fixture-reference",
+        )
+
+
+def test_label_polygon_preserves_exclusion_and_partial_reasons() -> None:
+    sample = _polygon(20)
+    polygon = sample.pool_polygon
+    reference_pin = _reference_pin(ReferenceSystem.WORLDCOVER)
+    with pytest.raises(ValueError, match="area units do not match"):
+        label_polygon(
+            replace(polygon, snapshot=replace(sample.snapshot, area_unit="hectares")),
+            SupportAttempt(()),
+            WORLDCOVER_LEVELS,
+            reference_pin,
+            reference_id_namespace="fixture-reference",
+        )
+
+    invalid_status = replace(sample.snapshot, geometry_status=GeometryStatus.INVALID)
+    excluded = label_polygon(
+        replace(polygon, snapshot=invalid_status),
+        SupportAttempt(()),
+        WORLDCOVER_LEVELS,
+        reference_pin,
+        reference_id_namespace="fixture-reference",
+    )
+    assert excluded.attempt_evidence.status == "excluded"
+    assert excluded.label_outcomes[0].reason == "invalid"
+
+    invalid_area = replace(sample.snapshot, original_area=0.0)
+    excluded_area = label_polygon(
+        replace(polygon, snapshot=invalid_area),
+        SupportAttempt(()),
+        WORLDCOVER_LEVELS,
+        reference_pin,
+        reference_id_namespace="fixture-reference",
+    )
+    assert excluded_area.label_outcomes[0].reason == "geometry_area_unusable"
+
+    unusable_geometry = label_polygon(
+        replace(polygon, geometry=None),
+        SupportAttempt(()),
+        WORLDCOVER_LEVELS,
+        reference_pin,
+        reference_id_namespace="fixture-reference",
+    )
+    assert unusable_geometry.label_outcomes[0].reason == "geometry_unusable"
+
+    partial = label_polygon(
+        polygon,
+        SupportAttempt((), partial_reason="reference scan incomplete"),
+        WORLDCOVER_LEVELS,
+        reference_pin,
+        reference_id_namespace="fixture-reference",
+    )
+    assert partial.attempt_evidence.status == "partial"
+    assert partial.attempt_evidence.reason == "reference scan incomplete"
+    with pytest.raises(ValueError, match="scan-report URI"):
+        build_raw_inventory_evidence(
+            enumeration_rule="raw polygons before text joins",
+            scan_report_uri="",
+            scan_report=b"scan report",
+            expected_key_count=1,
+            expected_keyset_sha256=_SHA_A,
+        )
+    with pytest.raises(ValueError, match="scan report"):
+        build_raw_inventory_evidence(
+            enumeration_rule="raw polygons before text joins",
+            scan_report_uri="file:///tmp/scan.json",
+            scan_report=b"",
+            expected_key_count=1,
+            expected_keyset_sha256=_SHA_A,
+        )
+    with pytest.raises(ValueError, match="cannot be negative"):
+        build_raw_inventory_evidence(
+            enumeration_rule="raw polygons before text joins",
+            scan_report_uri="file:///tmp/scan.json",
+            scan_report=b"scan report",
+            expected_key_count=-1,
+            expected_keyset_sha256=_SHA_A,
+        )
+    with pytest.raises(ValueError, match="lowercase SHA-256"):
+        build_raw_inventory_evidence(
+            enumeration_rule="raw polygons before text joins",
+            scan_report_uri="file:///tmp/scan.json",
+            scan_report=b"scan report",
+            expected_key_count=1,
+            expected_keyset_sha256="A" * 64,
+        )
+
+
 def test_source_tree_pins_verify_frozen_raw_files_without_claiming_key_counts() -> None:
     pins = raw_source_tree_pins()
     assert sum(pin.file_count for pin in pins) == 2305
@@ -190,6 +388,83 @@ def test_source_tree_pins_verify_frozen_raw_files_without_claiming_key_counts() 
         for pin in pins
         if pin.path_prefix.endswith("/sentences/")
     )
+
+
+def test_source_tree_pin_validation_rejects_tampered_tree_metadata() -> None:
+    pin = polygon_geometry_tree_pins(TextSource.WEBSITE)[0]
+    raw_files = [
+        {
+            "path": row.path,
+            "size": row.size_bytes,
+            "blob_id": row.blob_id,
+            "lfs_oid": row.lfs_oid,
+            "lfs_size": row.lfs_size_bytes,
+        }
+        for row in pin.files
+    ]
+    with pytest.raises(ValueError, match="file count"):
+        source_pins_module._validate_tree_pin(
+            replace(pin, file_count=pin.file_count - 1), raw_files
+        )
+    with pytest.raises(ValueError, match="byte total"):
+        source_pins_module._validate_tree_pin(
+            replace(pin, total_size_bytes=pin.total_size_bytes - 1), raw_files
+        )
+    outside_prefix = (replace(pin.files[0], path="other/file.parquet"), *pin.files[1:])
+    with pytest.raises(ValueError, match="out-of-prefix"):
+        source_pins_module._validate_tree_pin(replace(pin, files=outside_prefix), raw_files)
+    duplicate_path = (
+        replace(pin.files[0], path=pin.files[1].path),
+        *pin.files[1:],
+    )
+    with pytest.raises(ValueError, match="duplicate or out-of-prefix"):
+        source_pins_module._validate_tree_pin(replace(pin, files=duplicate_path), raw_files)
+    changed_files = list(raw_files)
+    assert isinstance(changed_files[0]["size"], int)
+    changed_files[0] = {
+        **changed_files[0],
+        "size": changed_files[0]["size"] + 1,
+    }
+    with pytest.raises(ValueError, match="inventory digest"):
+        source_pins_module._validate_tree_pin(pin, changed_files)
+
+    with pytest.raises(ValueError, match="unclassified pinned source tree"):
+        source_pins_module._tree_purpose("unfrozen/")
+    with pytest.raises(ValueError, match="raw file count"):
+        source_pins_module._validate_source_tree_set(())
+    with pytest.raises(ValueError, match="repository or revision"):
+        source_pins_module._load_source_trees(
+            [{"name": "website", "repo": "wrong", "resolved_sha": "wrong", "groups": []}]
+        )
+
+
+@pytest.mark.parametrize("bad_field", ("handoff_sha256", "source_key_counts"))
+def test_source_tree_loader_fails_closed_on_unverified_handoff(monkeypatch, bad_field: str) -> None:
+    handoff_path = (
+        Path(__file__).parents[2]
+        / "src/osm_polygon_eunis/pool_adapters/data/raw-source-tree-pins.json"
+    )
+    handoff = json.loads(handoff_path.read_text(encoding="utf-8"))
+    if bad_field == "handoff_sha256":
+        handoff[bad_field] = "0" * 64
+    else:
+        handoff[bad_field] = 1
+
+    class FakeResource:
+        def joinpath(self, _path: str) -> FakeResource:
+            return self
+
+        def read_text(self, encoding: str) -> str:
+            assert encoding == "utf-8"
+            return json.dumps(handoff)
+
+    monkeypatch.setattr(source_pins_module, "files", lambda _package: FakeResource())
+    source_pins_module.raw_source_tree_pins.cache_clear()
+    try:
+        with pytest.raises(ValueError, match=r"verified file SHA-256|unverified raw-key counts"):
+            source_pins_module.raw_source_tree_pins()
+    finally:
+        source_pins_module.raw_source_tree_pins.cache_clear()
 
 
 def test_worldcover_keeps_nodata_and_missing_tiles_in_full_area_denominator() -> None:
@@ -217,6 +492,148 @@ def test_worldcover_keeps_nodata_and_missing_tiles_in_full_area_denominator() ->
     assert result.attempt_evidence.attempted_tile_ids == ("N00E000", "N00E003")
     assert result.attempt_evidence.missing_tile_ids == ("N00E003",)
     assert result.attempt_evidence.support_evidence == (("class", "10", ("N00E000",)),)
+
+
+def test_worldcover_rejects_mismatched_reference_and_geometry_pins() -> None:
+    sample = _polygon(21)
+    polygon = sample.pool_polygon
+    pin = _reference_pin(ReferenceSystem.WORLDCOVER)
+    good = WorldCoverEvidence(
+        polygon.source_polygon_id,
+        100.0,
+        ((10, 80.0),),
+        WORLDCOVER_AREA_MEASUREMENT,
+        class_evidence_ids=((10, ("tile-1",)),),
+    )
+    with pytest.raises(ValueError, match="does not match the raw polygon"):
+        worldcover_supports(polygon, replace(good, source_polygon_id="other"), pin)
+    with pytest.raises(ValueError, match="physical square metres"):
+        worldcover_supports(polygon, good, replace(pin, support_unit="hectares"))
+    with pytest.raises(ValueError, match="not the pinned geodesic method"):
+        worldcover_supports(polygon, replace(good, area_measurement="square degrees"), pin)
+    with pytest.raises(ValueError, match="EPSG:4326"):
+        worldcover_supports(
+            replace(polygon, snapshot=replace(sample.snapshot, crs="EPSG:3857")),
+            good,
+            pin,
+        )
+    with pytest.raises(ValueError, match="physical square metres"):
+        worldcover_supports(
+            replace(polygon, snapshot=replace(sample.snapshot, area_unit="hectares")),
+            good,
+            pin,
+        )
+
+
+def test_worldcover_records_exclusion_and_area_error_outcomes() -> None:
+    polygon = _polygon(22).pool_polygon
+    pin = _reference_pin(ReferenceSystem.WORLDCOVER)
+    for error, expected in (
+        ("geometry_unusable", "geometry_unusable"),
+        ("source_polygon_id_missing", "source_polygon_id_missing"),
+        ("raster_read_error:OSError", "worldcover_extraction_failed:raster_read_error:OSError"),
+    ):
+        result = worldcover_supports(
+            polygon,
+            WorldCoverEvidence(
+                polygon.source_polygon_id,
+                None,
+                (),
+                WORLDCOVER_AREA_MEASUREMENT,
+                extraction_error=error,
+                attempted_tiles=("tile-attempted",),
+            ),
+            pin,
+        )
+        assert result.label_outcomes[0].reason == expected
+        assert result.attempt_evidence.attempted_tile_ids == ("tile-attempted",)
+
+    invalid_area = worldcover_supports(
+        polygon,
+        WorldCoverEvidence(
+            polygon.source_polygon_id,
+            0.0,
+            (),
+            WORLDCOVER_AREA_MEASUREMENT,
+        ),
+        pin,
+    )
+    assert invalid_area.label_outcomes[0].reason == "geometry_area_unusable"
+    with pytest.raises(ValueError, match="differs from full geodesic"):
+        worldcover_supports(
+            polygon,
+            WorldCoverEvidence(
+                polygon.source_polygon_id,
+                101.0,
+                (),
+                WORLDCOVER_AREA_MEASUREMENT,
+            ),
+            pin,
+        )
+
+
+def test_worldcover_validates_flat_class_areas_and_tile_evidence() -> None:
+    polygon = _polygon(23).pool_polygon
+    pin = _reference_pin(ReferenceSystem.WORLDCOVER)
+
+    def evidence(
+        class_areas: tuple[tuple[int, float], ...],
+        class_evidence_ids: tuple[tuple[int, tuple[str, ...]], ...],
+    ) -> WorldCoverEvidence:
+        return WorldCoverEvidence(
+            polygon.source_polygon_id,
+            100.0,
+            class_areas,
+            WORLDCOVER_AREA_MEASUREMENT,
+            class_evidence_ids=class_evidence_ids,
+        )
+
+    invalid_cases = (
+        (evidence(((101, 10.0),), ((101, ("tile-1",)),)), "unknown class code"),
+        (
+            evidence(((10, 10.0), (10, 10.0)), ((10, ("tile-1",)),)),
+            "must be unioned before adaptation",
+        ),
+        (evidence(((10, -1.0),), ((10, ("tile-1",)),)), "within polygon area"),
+        (evidence(((10, float("nan")),), ((10, ("tile-1",)),)), "within polygon area"),
+        (evidence(((10, 101.0),), ((10, ("tile-1",)),)), "within polygon area"),
+        (evidence(((10, 20.0),), ()), "missing contributing tile IDs"),
+        (
+            evidence(
+                ((10, 20.0),),
+                ((10, ("tile-1",)), (20, ("tile-2",))),
+            ),
+            "no class area",
+        ),
+        (evidence(((10, 20.0),), ((10, ("tile-1", "tile-1")),)), "repeats a support tile ID"),
+        (
+            evidence(((10, 60.0), (20, 60.0)), ((10, ("tile-1",)), (20, ("tile-2",)))),
+            "exceed the full geodesic denominator",
+        ),
+    )
+    for invalid, message in invalid_cases:
+        with pytest.raises(ValueError, match=message):
+            worldcover_supports(polygon, invalid, pin)
+
+    with pytest.raises(ValueError, match="repeats its support evidence"):
+        worldcover_supports(
+            polygon,
+            evidence(((10, 20.0),), ((10, ("tile-1",)), (10, ("tile-2",)))),
+            pin,
+        )
+    with pytest.raises(ValueError, match="no class area"):
+        worldcover_supports(
+            polygon,
+            evidence((), ((10, ("tile-1",)),)),
+            pin,
+        )
+
+    zero_support = worldcover_supports(
+        polygon,
+        evidence(((10, 0.0),), ()),
+        pin,
+    )
+    assert zero_support.label_outcomes[0].status is OutcomeStatus.UNASSIGNED
 
 
 def test_worldcover_attempts_every_raw_polygon_without_text_filters() -> None:
@@ -730,3 +1147,346 @@ def test_bounded_export_preserves_adapter_rows_and_unmatched_text_link(tmp_path:
     )
     assert gate.duplicate_pools == ()
     assert gate.invalid_pools == ()
+
+
+def test_lucas_taxonomy_and_manifest_validation_is_exact() -> None:
+    taxonomy = _lucas_taxonomy()
+    with pytest.raises(ValueError, match="identity and revision"):
+        replace(taxonomy, taxonomy_id=" ")
+    with pytest.raises(ValueError, match="lowercase 64-digit"):
+        replace(taxonomy, sha256="A" * 64)
+    with pytest.raises(ValueError, match="contain code paths"):
+        replace(taxonomy, codes=())
+    with pytest.raises(ValueError, match="contain L1, L2, and L3"):
+        replace(taxonomy, codes=(LucasCode("A", "", "A11"),))
+    with pytest.raises(ValueError, match="must be unique"):
+        replace(taxonomy, codes=(*taxonomy.codes, taxonomy.codes[0]))
+    with pytest.raises(ValueError, match="multiple L1 parents"):
+        replace(taxonomy, codes=(*taxonomy.codes, LucasCode("B", "A1", "B11")))
+    with pytest.raises(ValueError, match="multiple parents"):
+        replace(taxonomy, codes=(*taxonomy.codes, LucasCode("B", "B1", "A11")))
+
+    from_records = LucasTaxonomy.from_records(
+        ({"L1": " A ", "L2": " A1 ", "L3": " A11 "},),
+        taxonomy_id="fixture",
+        revision="fixture-revision",
+        sha256=_SHA_B,
+    )
+    assert from_records.codes == (LucasCode("A", "A1", "A11"),)
+    with pytest.raises(KeyError):
+        LucasTaxonomy.from_records(
+            ({"L1": "A", "L2": "A1"},),
+            taxonomy_id="fixture",
+            revision="fixture-revision",
+            sha256=_SHA_B,
+        )
+
+    for args in ((None, "A1", None), ("Z", None, None), ("A", None, "A11")):
+        with pytest.raises(ValueError):
+            taxonomy.validate_path(*args)
+    with pytest.raises(ValueError, match="unknown LUCAS L2"):
+        taxonomy.validate_path("A", "Z", None)
+    with pytest.raises(ValueError, match="unknown LUCAS L3"):
+        taxonomy.validate_path("A", "A1", "A21")
+    taxonomy.validate_path("A", "A1", "A11")
+
+    with pytest.raises(ValueError, match="EPSG:3035"):
+        LucasLayerManifest("survey", "geom", "fid", "rtree", "class", srs_id=4326)
+    with pytest.raises(ValueError, match="identifiers must be non-empty"):
+        LucasLayerManifest("survey\x00bad", "geom", "fid", "rtree", "class")
+    manifest = lucas_2022_copernicus_manifest()
+    for changes, message in (
+        ({"release_id": " "}, "pins must be present"),
+        ({"file_size_bytes": 0}, "size must be positive"),
+        ({"file_sha256": "partial"}, "full SHA-256"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            replace(manifest, **changes)
+
+
+def test_lucas_file_pins_and_reader_preconditions_fail_closed(tmp_path: Path) -> None:
+    taxonomy = _lucas_taxonomy()
+    manifest = lucas_2022_copernicus_manifest()
+    reader_args = (tmp_path / "not-downloaded.gpkg", tmp_path / "codebook.pdf", manifest, taxonomy)
+    with pytest.raises(ValueError, match="fetch size must be positive"):
+        LucasGeoPackageReader(*reader_args, fetch_size=0)
+    with pytest.raises(ValueError, match="taxonomy ID"):
+        LucasGeoPackageReader(
+            reader_args[0], reader_args[1], manifest, replace(taxonomy, taxonomy_id="other")
+        )
+    with pytest.raises(ValueError, match="taxonomy revision"):
+        LucasGeoPackageReader(
+            reader_args[0],
+            reader_args[1],
+            manifest,
+            replace(taxonomy, taxonomy_id=manifest.taxonomy_id, revision="other"),
+        )
+    with pytest.raises(ValueError, match="taxonomy hash"):
+        LucasGeoPackageReader(
+            reader_args[0],
+            reader_args[1],
+            manifest,
+            replace(
+                taxonomy,
+                taxonomy_id=manifest.taxonomy_id,
+                revision=manifest.taxonomy_revision,
+                sha256=_SHA_A,
+            ),
+        )
+    with pytest.raises(FileNotFoundError, match="reference is not present"):
+        verify_lucas_file(reader_args[0], manifest)
+    with pytest.raises(FileNotFoundError, match="taxonomy is not present"):
+        verify_lucas_taxonomy_file(reader_args[1], manifest)
+
+    reference_path = tmp_path / "reference.bin"
+    reference_path.write_bytes(b"synthetic reference")
+    same_size_bad_hash = replace(
+        manifest,
+        file_size_bytes=reference_path.stat().st_size,
+        file_sha256=_SHA_A,
+    )
+    with pytest.raises(ValueError, match="SHA-256"):
+        verify_lucas_file(reference_path, same_size_bad_hash)
+    with pytest.raises(ValueError, match="byte size"):
+        verify_lucas_file(reference_path, replace(manifest, file_size_bytes=1))
+
+
+def test_lucas_reader_query_and_schema_failures_are_reported(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "fixture.gpkg"
+    taxonomy_path = tmp_path / "fixture.csv"
+    taxonomy_bytes = b"synthetic fixture taxonomy\n"
+    taxonomy_path.write_bytes(taxonomy_bytes)
+    taxonomy = _lucas_taxonomy(sha256=hashlib.sha256(taxonomy_bytes).hexdigest())
+    _create_lucas_fixture(path)
+    manifest = LucasReferenceManifest(
+        release_id="fixture",
+        source_uri="https://example.test/fixture.gpkg",
+        source_revision="fixture-revision",
+        file_size_bytes=path.stat().st_size,
+        file_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+        taxonomy_id=taxonomy.taxonomy_id,
+        taxonomy_uri="https://example.test/fixture.csv",
+        taxonomy_revision=taxonomy.revision,
+        taxonomy_sha256=taxonomy.sha256,
+        layer=LucasLayerManifest("survey", "geom", "fid", "rtree_survey_geom", "surveycprnlc"),
+    )
+    reader = LucasGeoPackageReader(path, taxonomy_path, manifest, taxonomy)
+    with pytest.raises(RuntimeError, match="opened before querying"):
+        reader.query(box(0, 0, 1, 1))
+    reader._connection = sqlite3.connect(":memory:")
+    try:
+        with pytest.raises(ValueError, match="valid and non-empty"):
+            reader.query(shapely.GeometryCollection())
+        monkeypatch.setattr(
+            lucas_module,
+            "_query_rtree_candidates",
+            lambda *_args: (_ for _ in ()).throw(sqlite3.DatabaseError("fixture query error")),
+        )
+        failed = reader.query(box(0, 0, 1, 1))
+        assert failed.exclusion_reason == "lucas_reference_query_failed:DatabaseError"
+    finally:
+        reader.__exit__()
+
+    closed = LucasGeoPackageReader(path, taxonomy_path, manifest, taxonomy)
+    with pytest.raises(RuntimeError, match="connection is not open"):
+        closed._validate_schema()
+
+
+def test_lucas_row_parser_preserves_unusable_and_unmatched_features() -> None:
+    taxonomy = _lucas_taxonomy()
+    layer = LucasLayerManifest("survey", "geom", "fid", "rtree", "class")
+    query_geometry = box(0, 0, 10, 10)
+    base = (2022, 1, 1, "Field Survey, point visible <= 100 m")
+
+    non_text = lucas_module._parse_reference_row(
+        (1, 5, _gpkg_blob(box(0, 0, 2, 2)), *base), query_geometry, taxonomy, layer
+    )
+    assert non_text[2:] == (None, "support_class_type_invalid")
+    unknown = lucas_module._parse_reference_row(
+        (2, "NOT-A-CODE", _gpkg_blob(box(0, 0, 2, 2)), *base),
+        query_geometry,
+        taxonomy,
+        layer,
+    )
+    assert unknown[2] == "support_class_not_in_c3"
+    malformed = lucas_module._parse_reference_row(
+        (3, "A11", b"bad", *base), query_geometry, taxonomy, layer
+    )
+    assert malformed[3] == "reference_geometry_unusable"
+    wrong_shape = lucas_module._parse_reference_row(
+        (4, "A11", _gpkg_blob(LineString([(0, 0), (1, 1)])), *base),
+        query_geometry,
+        taxonomy,
+        layer,
+    )
+    assert wrong_shape[3] == "reference_geometry_unusable"
+    outside = lucas_module._parse_reference_row(
+        (5, "A11", _gpkg_blob(box(20, 20, 22, 22)), *base),
+        query_geometry,
+        taxonomy,
+        layer,
+    )
+    assert outside[1:] == (None, None, None)
+
+    for malformed_blob, expected in (
+        ("not-bytes", "not a GeoPackage"),
+        (b"GP", "invalid GeoPackage"),
+        (b"GP\x00\x01" + struct.pack("<i", 4326) + shapely.to_wkb(box(0, 0, 1, 1)), "CRS"),
+        (
+            b"GP\x00\x0b" + struct.pack("<i", 3035) + shapely.to_wkb(box(0, 0, 1, 1)),
+            "envelope type",
+        ),
+    ):
+        with pytest.raises((TypeError, ValueError), match=expected):
+            lucas_module._decode_gpkg_geometry(malformed_blob, 3035)
+
+
+def test_lucas_support_statuses_units_and_bounded_union() -> None:
+    polygon = _polygon(0, crs="EPSG:3035")
+    taxonomy = _lucas_taxonomy()
+    pin = _reference_pin(ReferenceSystem.LUCAS)
+    with pytest.raises(ValueError, match="square metres"):
+        measure_lucas_supports(
+            polygon.pool_polygon,
+            LucasFeatureQuery((), ()),
+            taxonomy,
+            replace(pin, support_unit="ha"),
+        )
+
+    excluded = measure_lucas_supports(
+        polygon.pool_polygon,
+        LucasFeatureQuery((), ("seen",), exclusion_reason="lucas_reference_query_failed:OSError"),
+        taxonomy,
+        pin,
+    )
+    assert excluded.attempt_evidence.status == "excluded"
+    assert excluded.attempt_evidence.reason == "lucas_reference_query_failed:OSError"
+    partial = measure_lucas_supports(
+        polygon.pool_polygon,
+        LucasFeatureQuery((), ("seen",), partial_reason="reference_geometry_unusable"),
+        taxonomy,
+        pin,
+    )
+    assert partial.attempt_evidence.status == "partial"
+    assert partial.attempt_evidence.reason == "reference_geometry_unusable"
+
+    unusable_area = replace(
+        polygon.pool_polygon, snapshot=replace(polygon.snapshot, original_area=0.0)
+    )
+    no_area = measure_lucas_supports(unusable_area, LucasFeatureQuery((), ("seen",)), taxonomy, pin)
+    assert no_area.label_outcomes[0].reason == "geometry_area_unusable"
+    wrong_crs = replace(polygon.pool_polygon, snapshot=replace(polygon.snapshot, crs="EPSG:4326"))
+    with pytest.raises(ValueError, match="EPSG:3035 square metres"):
+        measure_lucas_supports(wrong_crs, LucasFeatureQuery((), ()), taxonomy, pin)
+    wrong_area = replace(
+        polygon.pool_polygon, snapshot=replace(polygon.snapshot, original_area=99.0)
+    )
+    with pytest.raises(ValueError, match="full original polygon area"):
+        measure_lucas_supports(wrong_area, LucasFeatureQuery((), ()), taxonomy, pin)
+
+    supports = lucas_module._bounded_union(tuple(box(i, 0, i + 1, 1) for i in range(129)))
+    assert shapely.area(supports) == 129.0
+
+
+def test_source_wide_runners_attempt_raw_rows_and_report_query_errors(monkeypatch) -> None:
+    polygon = _polygon(51)
+    unusable = replace(polygon.pool_polygon, geometry=None)
+    errors = tuple(
+        iter_worldcover_rows(
+            (polygon.pool_polygon, unusable),
+            lambda _row: (_ for _ in ()).throw(OSError("raster fixture error")),
+            _reference_pin(ReferenceSystem.WORLDCOVER),
+        )
+    )
+    assert len(errors) == 2
+    assert errors[0][1].label_outcomes[0].reason == (
+        "worldcover_extraction_failed:worldcover_reference_query_failed:OSError"
+    )
+    assert errors[1][1].label_outcomes[0].reason == "geometry_unusable"
+
+    extra_evidence = (
+        WorldCoverEvidence("way/51", 100.0, (), WORLDCOVER_AREA_MEASUREMENT),
+        WorldCoverEvidence("way/52", 100.0, (), WORLDCOVER_AREA_MEASUREMENT),
+    )
+    with pytest.raises(ValueError, match="counts differ"):
+        tuple(
+            iter_worldcover_source_attempts(
+                (polygon.pool_polygon,), extra_evidence, _reference_pin(ReferenceSystem.WORLDCOVER)
+            )
+        )
+    with pytest.raises(ValueError, match="does not match"):
+        tuple(
+            iter_worldcover_source_attempts(
+                (polygon.pool_polygon,),
+                (replace(extra_evidence[0], source_polygon_id="way/other"),),
+                _reference_pin(ReferenceSystem.WORLDCOVER),
+            )
+        )
+
+    taxonomy = _lucas_taxonomy()
+    layer = LucasLayerManifest("survey", "geom", "fid", "rtree", "class")
+    manifest = LucasReferenceManifest(
+        "fixture",
+        "https://example.test/gpkg",
+        "rev",
+        1,
+        _SHA_A,
+        taxonomy.taxonomy_id,
+        "https://example.test/codebook",
+        taxonomy.revision,
+        taxonomy.sha256,
+        layer,
+    )
+    reader = LucasGeoPackageReader(Path("unused"), Path("unused"), manifest, taxonomy)
+    with pytest.raises(RuntimeError, match="open, verified"):
+        tuple(
+            iter_lucas_rows(
+                (polygon.pool_polygon,), reader, taxonomy, _reference_pin(ReferenceSystem.LUCAS)
+            )
+        )
+    reader._connection = sqlite3.connect(":memory:")
+    try:
+        with pytest.raises(ValueError, match="do not match"):
+            tuple(
+                iter_lucas_rows(
+                    (polygon.pool_polygon,),
+                    reader,
+                    _lucas_taxonomy(sha256=_SHA_A),
+                    _reference_pin(ReferenceSystem.LUCAS),
+                )
+            )
+        monkeypatch.setattr(
+            reader,
+            "query",
+            lambda _geometry: (_ for _ in ()).throw(RuntimeError("synthetic query error")),
+        )
+        failed = tuple(
+            iter_lucas_rows(
+                (polygon.pool_polygon,), reader, taxonomy, _reference_pin(ReferenceSystem.LUCAS)
+            )
+        )
+        assert failed[0][1].label_outcomes[0].reason == "lucas_reference_query_failed:RuntimeError"
+    finally:
+        reader.__exit__()
+
+
+def test_adapter_batch_guardrails_keep_records_aligned() -> None:
+    polygon = _polygon(61).pool_polygon
+    record = worldcover_supports(
+        polygon,
+        WorldCoverEvidence(
+            polygon.source_polygon_id,
+            100.0,
+            ((10, 80.0),),
+            WORLDCOVER_AREA_MEASUREMENT,
+            class_evidence_ids=((10, ("tile",)),),
+        ),
+        _reference_pin(ReferenceSystem.WORLDCOVER),
+    )
+    with pytest.raises(ValueError, match="max_batch_rows"):
+        tuple(iter_polygon_batches((polygon,), (record,), max_batch_rows=5))
+    with pytest.raises(ValueError, match=r"zip\(\) argument 2 is shorter"):
+        tuple(iter_polygon_batches((polygon, polygon), (record,), max_batch_rows=12))
+    mismatched = replace(record, inventory_row_id="other")
+    with pytest.raises(ValueError, match="does not match the next raw polygon"):
+        tuple(iter_polygon_batches((polygon,), (mismatched,), max_batch_rows=12))
