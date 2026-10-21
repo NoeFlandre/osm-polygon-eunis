@@ -423,6 +423,71 @@ def _file_uri_path(uri: str) -> Path:
     return Path(unquote(urlparse(uri).path))
 
 
+class _MutatingArtifactReader(FilesystemArtifactReader):
+    changed_artifact: str
+    completion_manifest_uri: str
+    artifact_manifest_uri: str
+    shard_manifest_uri: str
+    parquet_uri: str
+    manifest_reads: int
+    changed: bool
+
+    def __init__(
+        self,
+        *,
+        changed_artifact: str,
+        completion_manifest_uri: str,
+        artifact_manifest_uri: str,
+        shard_manifest_uri: str,
+        parquet_uri: str,
+    ):
+        object.__setattr__(self, "changed_artifact", changed_artifact)
+        object.__setattr__(self, "completion_manifest_uri", completion_manifest_uri)
+        object.__setattr__(self, "artifact_manifest_uri", artifact_manifest_uri)
+        object.__setattr__(self, "shard_manifest_uri", shard_manifest_uri)
+        object.__setattr__(self, "parquet_uri", parquet_uri)
+        object.__setattr__(self, "manifest_reads", 0)
+        object.__setattr__(self, "changed", False)
+
+    def _append_byte(self, uri: str) -> None:
+        path = _file_uri_path(uri)
+        path.write_bytes(path.read_bytes() + b" ")
+        object.__setattr__(self, "changed", True)
+
+    def read_bytes(self, uri: str) -> bytes:
+        if self.changed_artifact == "completion manifest" and uri == self.completion_manifest_uri:
+            read_count = self.manifest_reads + 1
+            object.__setattr__(self, "manifest_reads", read_count)
+            if read_count == 2:
+                self._append_byte(uri)
+        return FilesystemArtifactReader.read_bytes(self, uri)
+
+    def iter_verified_lines(self, uri: str, expected_sha256: str):
+        if self.changed_artifact == "artifact manifest" and uri == self.artifact_manifest_uri:
+            self._append_byte(uri)
+        if self.changed_artifact == "shard manifest" and uri == self.shard_manifest_uri:
+            self._append_byte(uri)
+        yield from FilesystemArtifactReader.iter_verified_lines(self, uri, expected_sha256)
+
+    def iter_verified_parquet_rows(
+        self,
+        uri: str,
+        expected_sha256: str,
+        columns: tuple[str, ...],
+        *,
+        batch_size: int,
+    ):
+        if self.changed_artifact == "Parquet shard" and uri == self.parquet_uri:
+            self._append_byte(uri)
+        yield from FilesystemArtifactReader.iter_verified_parquet_rows(
+            self,
+            uri,
+            expected_sha256,
+            columns,
+            batch_size=batch_size,
+        )
+
+
 def test_full_pool_keeps_raw_keys_without_text_or_usable_geometry():
     bundle = _build(_pool_input())
 
@@ -960,6 +1025,63 @@ def test_streamed_evaluation_gate_blocks_failed_partial_and_missing_reference_re
     assert "FAILED polygon attempts" in issues
     assert "PARTIAL polygon attempts" in issues
     assert "missing reference IDs" in issues
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    "changed_artifact",
+    ("completion manifest", "artifact manifest", "shard manifest", "Parquet shard"),
+)
+def test_streamed_evaluation_gate_rejects_changes_between_validation_passes(
+    tmp_path: Path,
+    changed_artifact: str,
+):
+    receipt = _stream_fixture_pool(tmp_path)
+    manifest = json.loads(_file_uri_path(receipt.manifest_uri).read_text())
+    source_artifact_manifest_uri = manifest["source_snapshot"]["source_artifact_manifest"][
+        "manifest_uri"
+    ]
+    shard_records = [
+        json.loads(line)
+        for line in _file_uri_path(receipt.shard_manifest_uri).read_text().splitlines()
+    ]
+    attempt_record = next(row for row in shard_records if row["table"] == "polygon_attempts")
+    attempt_shard_uri = FilesystemArtifactReader().resolve_uri(
+        receipt.manifest_uri,
+        attempt_record["path"],
+    )
+
+    reader = _MutatingArtifactReader(
+        changed_artifact=changed_artifact,
+        completion_manifest_uri=receipt.manifest_uri,
+        artifact_manifest_uri=source_artifact_manifest_uri,
+        shard_manifest_uri=receipt.shard_manifest_uri,
+        parquet_uri=attempt_shard_uri,
+    )
+    readiness = validate_nine_streamed_evaluation_ready_gate((receipt,), reader)
+    issues = " ".join(issue for _, entries in readiness.invalid_pools for issue in entries)
+
+    assert reader.changed
+    assert not readiness.ok
+    assert "evaluation readiness blocked" in issues
+
+
+def test_filesystem_verified_reader_rejects_bad_pins_and_batch_sizes(tmp_path: Path):
+    artifact = tmp_path / "snapshot.jsonl"
+    artifact.write_bytes(b'{"row":1}\n')
+    reader = FilesystemArtifactReader()
+
+    with pytest.raises(ValueError, match="snapshot pin is not a SHA-256 digest"):
+        list(reader.iter_verified_lines(artifact.as_uri(), "not-a-digest"))
+    with pytest.raises(ValueError, match="Parquet batch size must be positive"):
+        list(
+            reader.iter_verified_parquet_rows(
+                artifact.as_uri(),
+                "0" * 64,
+                ("row",),
+                batch_size=0,
+            )
+        )
 
 
 def test_streamed_evaluation_gate_bounds_receipt_materialization(tmp_path: Path):

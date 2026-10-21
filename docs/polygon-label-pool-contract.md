@@ -259,15 +259,23 @@ as natural no-coverage.
 A cloud `PoolArtifactReader` streams JSONL and artifact hashes, reads Parquet
 footer metadata without loading row groups, and implements
 `iter_parquet_rows(uri, columns, batch_size=2048)` as a bounded selected-column
-row iterator. The gate checks each Parquet footer's schema and row count before
-reading rows. `FilesystemArtifactReader` supports controlled staging and
-tests. Hash and manifest checks bind files to the supplied pins; they do not
-authenticate who produced a manifest or independently prove that its file list
-contains every object in the pinned source release. Adapters must build these
-lists from the frozen source tree or reference catalog, and keep per-polygon
-required-reference IDs complete. The gate also does not verify the scientific
-correctness of area measurements. Evaluation sampling must wait for the strict
-readiness gate to pass and for source-manifest provenance review.
+row iterator. For strict readiness, it must also implement
+`iter_verified_lines(uri, expected_sha256)` and
+`iter_verified_parquet_rows(uri, expected_sha256, columns, batch_size=2048)` so
+the bytes hashed are the same snapshot later parsed or scanned. A cloud reader
+must use an immutable object version or copy the object to a bounded temporary
+snapshot; it must not hash one read and reopen a mutable URI for the decision.
+The filesystem reader copies one artifact at a time to temporary storage,
+checks its pin, then scans that same copy, keeping row memory bounded. The gate
+checks each Parquet footer's schema and row count before reading rows.
+`FilesystemArtifactReader` supports controlled staging and tests. Hash and
+manifest checks bind files to the supplied pins; they do not authenticate who
+produced a manifest or independently prove that its file list contains every
+object in the pinned source release. Adapters must build these lists from the
+frozen source tree or reference catalog, and keep per-polygon required-reference
+IDs complete. The gate also does not verify the scientific correctness of area
+measurements. Evaluation sampling must wait for the strict readiness gate to
+pass and for source-manifest provenance review.
 
 These checks bind shard contents to the supplied manifests and receipts. They
 do not authenticate who produced those records or verify the underlying
