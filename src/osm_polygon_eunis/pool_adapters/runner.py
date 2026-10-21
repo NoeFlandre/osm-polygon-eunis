@@ -30,11 +30,35 @@ from .worldcover import (
 class WorldCoverSourceAttempt(Protocol):
     """Record protocol emitted by ``osm-worldcover``'s raw-row adapter."""
 
-    source_polygon_id: str
-    class_fractions: tuple[tuple[int, float], ...]
-    attempted_tiles: tuple[str, ...]
-    missing_tiles: tuple[str, ...]
-    extraction_error: str | None
+    @property
+    def source_polygon_id(self) -> str:
+        """Stable source-polygon identifier for one raw input row."""
+
+        ...
+
+    @property
+    def class_fractions(self) -> tuple[tuple[int, float], ...]:
+        """Class fractions on the full polygon denominator."""
+
+        ...
+
+    @property
+    def attempted_tiles(self) -> tuple[str, ...]:
+        """Tile identifiers visited for this polygon."""
+
+        ...
+
+    @property
+    def missing_tiles(self) -> tuple[str, ...]:
+        """Tile identifiers not published by the reference."""
+
+        ...
+
+    @property
+    def extraction_error(self) -> str | None:
+        """Terminal extractor failure, if the attempt did not complete."""
+
+        ...
 
 
 def iter_worldcover_attempts(
