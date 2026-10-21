@@ -6,6 +6,7 @@ import logging
 import math
 import re
 from collections import OrderedDict
+from collections.abc import Iterable, Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,15 +24,18 @@ from .grid_overlap import (
     TILE_SIZE,
     WeightedCells,
     band_row_ranges,
-    is_square_north_up,
     stack_bytes,
     tile_window,
     weighted_cells,
 )
 from .matching import choose_winner
-from .raster_geometry import (
-    is_epsg_3035,
-    wgs84_envelope,
+from .raster_class_support import support_areas as _support_areas
+from .raster_geometry import is_epsg_3035, wgs84_envelope  # noqa: F401
+from .raster_reference_helpers import (
+    code_order_on_shared_grid as _code_order_on_shared_grid,
+)
+from .raster_reference_helpers import (
+    wgs84_dataset_extent as _wgs84_dataset_extent,
 )
 
 logger = logging.getLogger(__name__)
@@ -147,6 +151,24 @@ class RasterReference:
             self._source_extent_wgs84 = _wgs84_dataset_extent(self._datasets)
         return self._source_extent_wgs84
 
+    @property
+    def layer_codes(self) -> tuple[str, ...]:
+        """Return the direct EUNIS codes for the configured map layers."""
+
+        return tuple(layer.code for layer in self._layers)
+
+    @property
+    def source_version(self) -> str | None:
+        """Return the pinned source version shared by every configured layer."""
+
+        return self._source_version
+
+    @property
+    def presence_threshold(self) -> int:
+        """Return the strict-positive raster value cutoff used for support masks."""
+
+        return self._threshold
+
     def __enter__(self) -> RasterReference:
         """Open raster datasets and return this reference for overlap queries."""
         if self._stack is not None:
@@ -189,6 +211,20 @@ class RasterReference:
         if self._stack is not None:
             return self._overlap_open(polygon, self._datasets)
         return self._overlap_closed(polygon)
+
+    def support_areas(
+        self,
+        polygon: BaseGeometry,
+        classes: Mapping[tuple[str, str], Iterable[str]],
+    ) -> dict[tuple[str, str], float]:
+        """Measure exact per-class support after unioning the class's raster masks.
+
+        ``classes`` maps ``(level, code)`` to direct map codes. NoData and
+        uncovered areas return zero support; invalid or incompatible queries
+        raise instead of becoming a legacy empty winner.
+        """
+
+        return _support_areas(self, polygon, classes)
 
     def _overlap_closed(self, polygon: BaseGeometry) -> EunisResult:
         with ExitStack() as stack:
@@ -361,37 +397,3 @@ class RasterReference:
         values = np.asarray(data)
         valid = (~np.ma.getmaskarray(data)) & (values > self._threshold)
         return valid if valid.any() else None
-
-
-def _shares_square_grid(
-    datasets: tuple[tuple[RasterLayer, rasterio.DatasetReader], ...],
-) -> bool:
-    grids = {(tuple(d.transform)[:6], d.width, d.height) for _, d in datasets}
-    return len(grids) == 1 and is_square_north_up(datasets[0][1].transform)
-
-
-def _code_order_on_shared_grid(
-    datasets: tuple[tuple[RasterLayer, rasterio.DatasetReader], ...],
-) -> tuple[int, ...] | None:
-    codes = [layer.code for layer, _ in datasets]
-    if len(set(codes)) != len(codes) or not _shares_square_grid(datasets):
-        return None
-    return tuple(sorted(range(len(datasets)), key=codes.__getitem__))
-
-
-def _wgs84_dataset_extent(
-    datasets: tuple[tuple[RasterLayer, rasterio.DatasetReader], ...],
-) -> tuple[float, float, float, float] | None:
-    iterator = iter(datasets)
-    first = next(iterator, None)
-    if first is None:
-        return None
-    bounds = first[1].bounds
-    left, bottom, right, top = bounds.left, bounds.bottom, bounds.right, bounds.top
-    for _, dataset in iterator:
-        bounds = dataset.bounds
-        left = min(left, bounds.left)
-        bottom = min(bottom, bounds.bottom)
-        right = max(right, bounds.right)
-        top = max(top, bounds.top)
-    return wgs84_envelope((left, bottom, right, top))
