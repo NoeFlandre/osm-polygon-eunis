@@ -52,6 +52,12 @@ class WorldCoverSourceAttempt(Protocol):
         ...
 
     @property
+    def class_evidence_ids(self) -> tuple[tuple[int, tuple[str, ...]], ...]:
+        """Raster tile IDs that contribute positive support to each class."""
+
+        ...
+
+    @property
     def area_measurement(self) -> str:
         """Pinned area algorithm used for both numerator and denominator."""
 
@@ -149,6 +155,7 @@ def iter_worldcover_source_rows(
             attempted_tiles=evidence.attempted_tiles,
             missing_tiles=evidence.missing_tiles,
             extraction_error=evidence.extraction_error,
+            class_evidence_ids=getattr(evidence, "class_evidence_ids", ()),
         )
         yield polygon, worldcover_supports(polygon, adapted, reference_pin)
     if next(evidence_iterator, None) is not None:

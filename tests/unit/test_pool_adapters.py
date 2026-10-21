@@ -26,18 +26,26 @@ from osm_polygon_eunis.pool_adapters import (
     WorldCoverEvidence,
     build_raw_inventory_evidence,
     export_labeled_polygons,
+    iter_labeled_polygon_batches,
     iter_lucas_attempts,
     iter_polygon_batches,
     iter_worldcover_attempts,
     iter_worldcover_rows,
     iter_worldcover_source_attempts,
+    lucas_2022_copernicus_manifest,
+    lucas_2022_reference_pin,
     measure_lucas_supports,
+    polygon_geometry_tree_pins,
+    raw_source_tree_pins,
     verify_lucas_taxonomy_file,
     worldcover_supports,
 )
+from osm_polygon_eunis.pool_adapters import lucas as lucas_module
 from osm_polygon_eunis.pool_contract import (
     AssignmentKind,
+    AttemptStatus,
     BodyStatus,
+    FilesystemArtifactReader,
     FilesystemStreamingSink,
     GeometryStatus,
     OutcomeStatus,
@@ -59,6 +67,7 @@ from osm_polygon_eunis.pool_contract import (
     inventory_row_identifier,
     native_keyset_sha256,
     polygon_snapshot_identifier,
+    validate_nine_streamed_pool_gate,
 )
 
 _SHA_A = "a" * 64
@@ -140,6 +149,49 @@ def _lucas_taxonomy(*, sha256: str = _SHA_B) -> LucasTaxonomy:
     )
 
 
+def test_lucas_2022_manifest_and_c3_taxonomy_are_fully_pinned() -> None:
+    manifest = lucas_2022_copernicus_manifest()
+    taxonomy = LucasTaxonomy.lucas_2022_c3()
+    reference_pin = lucas_2022_reference_pin(manifest)
+
+    assert manifest.file_size_bytes == 1_121_144_832
+    assert len(manifest.file_sha256) == 64
+    assert manifest.layer.table == "l2022_cop_radpoly_radqs_allatr_wcol"
+    assert manifest.layer.srs_id == 3035
+    assert len(manifest.taxonomy_sha256) == 64
+    assert taxonomy.taxonomy_id == manifest.taxonomy_id
+    assert taxonomy.revision == manifest.taxonomy_revision
+    assert taxonomy.sha256 == manifest.taxonomy_sha256
+    assert reference_pin.source_revision == manifest.source_revision
+    assert reference_pin.support_unit == "m^2"
+    assert len({row.l1_code for row in taxonomy.codes}) == 8
+    assert len({row.l2_code for row in taxonomy.codes}) == 29
+    assert len({row.l3_code for row in taxonomy.codes}) == 74
+    assert taxonomy.path_for_observed_code("C10") == LucasCode("C00", "C10", "C10")
+    assert taxonomy.path_for_observed_code("C1") is None
+
+
+def test_source_tree_pins_verify_frozen_raw_files_without_claiming_key_counts() -> None:
+    pins = raw_source_tree_pins()
+    assert sum(pin.file_count for pin in pins) == 2305
+    assert {pin.text_source.value for pin in pins} == {"description", "website", "wiki"}
+    assert all(len(pin.inventory_sha256) == 64 for pin in pins)
+    assert all(len(pin.files) == pin.file_count for pin in pins)
+
+    description = polygon_geometry_tree_pins(TextSource.DESCRIPTION)
+    website = polygon_geometry_tree_pins(TextSource.WEBSITE)
+    wiki = polygon_geometry_tree_pins(TextSource.WIKI)
+    assert {pin.path_prefix for pin in description} == {"data/", "language-v1/data/"}
+    assert {pin.path_prefix for pin in website} == {"polygons/"}
+    assert {pin.path_prefix for pin in wiki} == {"polygons/"}
+    assert all(pin.purpose == "polygon_geometry" for pin in (*description, *website, *wiki))
+    assert all(
+        pin.purpose == "downstream_text_documents"
+        for pin in pins
+        if pin.path_prefix.endswith("/sentences/")
+    )
+
+
 def test_worldcover_keeps_nodata_and_missing_tiles_in_full_area_denominator() -> None:
     polygon = _polygon(1)
     result = worldcover_supports(
@@ -151,6 +203,7 @@ def test_worldcover_keeps_nodata_and_missing_tiles_in_full_area_denominator() ->
             area_measurement=WORLDCOVER_AREA_MEASUREMENT,
             attempted_tiles=("N00E000", "N00E003"),
             missing_tiles=("N00E003",),
+            class_evidence_ids=((10, ("N00E000",)),),
         ),
         _reference_pin(ReferenceSystem.WORLDCOVER),
     )
@@ -163,7 +216,7 @@ def test_worldcover_keeps_nodata_and_missing_tiles_in_full_area_denominator() ->
     assert result.label_outcomes[0].status is OutcomeStatus.ASSIGNED
     assert result.attempt_evidence.attempted_tile_ids == ("N00E000", "N00E003")
     assert result.attempt_evidence.missing_tile_ids == ("N00E003",)
-    assert result.attempt_evidence.support_evidence == (("class", "10", ("N00E000", "N00E003")),)
+    assert result.attempt_evidence.support_evidence == (("class", "10", ("N00E000",)),)
 
 
 def test_worldcover_attempts_every_raw_polygon_without_text_filters() -> None:
@@ -178,6 +231,12 @@ def test_worldcover_attempts_every_raw_polygon_without_text_filters() -> None:
             100.0,
             areas[polygon.source_polygon_id],
             WORLDCOVER_AREA_MEASUREMENT,
+            attempted_tiles=(f"tile-{polygon.source_polygon_id}",),
+            class_evidence_ids=(
+                ((10, (f"tile-{polygon.source_polygon_id}",)),)
+                if areas[polygon.source_polygon_id]
+                else ()
+            ),
         )
 
     results = tuple(
@@ -218,6 +277,7 @@ def test_worldcover_source_evidence_is_joined_one_to_one_in_raw_order() -> None:
             ((10, 80.0),),
             WORLDCOVER_AREA_MEASUREMENT,
             attempted_tiles=("N00E000",),
+            class_evidence_ids=((10, ("N00E000",)),),
         ),
         WorldCoverEvidence(
             "way/2",
@@ -225,6 +285,7 @@ def test_worldcover_source_evidence_is_joined_one_to_one_in_raw_order() -> None:
             ((20, 80.0),),
             WORLDCOVER_AREA_MEASUREMENT,
             attempted_tiles=("N00E003",),
+            class_evidence_ids=((20, ("N00E003",)),),
         ),
     )
 
@@ -256,16 +317,28 @@ def test_pool_adapter_batches_are_bounded_and_consecutive() -> None:
             100.0,
             ((10, 80.0),),
             WORLDCOVER_AREA_MEASUREMENT,
+            attempted_tiles=(f"tile-{row.source_polygon_id}", f"missing-{row.source_polygon_id}"),
+            missing_tiles=(f"missing-{row.source_polygon_id}",),
+            class_evidence_ids=((10, (f"tile-{row.source_polygon_id}",)),),
         ),
         _reference_pin(ReferenceSystem.WORLDCOVER),
     )
 
     batches = tuple(
-        iter_polygon_batches((row.pool_polygon for row in polygons), attempts, max_batch_rows=4)
+        iter_polygon_batches((row.pool_polygon for row in polygons), attempts, max_batch_rows=6)
     )
 
     assert [batch.batch_index for batch in batches] == [0, 1, 2]
-    assert all(batch.row_count == 4 for batch in batches)
+    assert all(batch.row_count == 6 for batch in batches)
+    assert all(batch.attempt_receipts[0].status is AttemptStatus.PARTIAL for batch in batches)
+    assert all(
+        batch.attempt_receipts[0].missing_reference_ids == (f"missing-way/{index}",)
+        for batch, index in zip(batches, (1, 2, 3), strict=True)
+    )
+    assert all(
+        batch.support_evidence[0].reference_ids == (f"tile-way/{index}",)
+        for batch, index in zip(batches, (1, 2, 3), strict=True)
+    )
 
 
 def test_lucas_unions_same_class_before_full_area_threshold() -> None:
@@ -276,8 +349,9 @@ def test_lucas_unions_same_class_before_full_area_threshold() -> None:
             LucasFootprint("1", "A", "A1", "A11", box(0, 0, 6, 10)),
             LucasFootprint("2", "A", "A1", "A11", box(4, 0, 8, 10)),
             LucasFootprint("3", "A", "A2", "A21", box(9, 0, 10, 10)),
+            LucasFootprint("4", "A", "A2", "A21", box(10, 0, 11, 10)),
         ),
-        attempted_feature_ids=("1", "2", "3"),
+        attempted_feature_ids=("1", "2", "3", "4"),
     )
 
     result = measure_lucas_supports(
@@ -298,8 +372,14 @@ def test_lucas_unions_same_class_before_full_area_threshold() -> None:
     assert result.label_outcomes[0].status is OutcomeStatus.ASSIGNED
     assert result.label_outcomes[1].status is OutcomeStatus.ASSIGNED
     assert result.label_outcomes[2].status is OutcomeStatus.ASSIGNED
-    assert result.attempt_evidence.attempted_reference_ids == ("1", "2", "3")
+    assert result.attempt_evidence.attempted_reference_ids == ("1", "2", "3", "4")
+    assert ("L1", "A", ("1", "2", "3")) in result.attempt_evidence.support_evidence
     assert ("L3", "A11", ("1", "2")) in result.attempt_evidence.support_evidence
+    assert ("L2", "A2", ("3",)) in result.attempt_evidence.support_evidence
+    batch = next(iter_labeled_polygon_batches(((polygon.pool_polygon, result),)))
+    assert len(batch.support_evidence) == len(result.label_candidates)
+    assert all(row.reference_id_namespace == "lucas-footprint-id" for row in batch.support_evidence)
+    assert all(row.reference_ids for row in batch.support_evidence)
 
 
 def test_lucas_ambiguous_no_coverage_and_missing_geometry_are_explicit() -> None:
@@ -357,13 +437,21 @@ def _create_lucas_fixture(path: Path) -> None:
     connection = sqlite3.connect(path)
     connection.executescript(
         """
+        CREATE TABLE gpkg_contents (table_name TEXT, data_type TEXT, srs_id INTEGER);
+        INSERT INTO gpkg_contents VALUES ('survey', 'features', 3035);
+        CREATE TABLE gpkg_spatial_ref_sys (
+            srs_id INTEGER, organization TEXT, organization_coordsys_id INTEGER
+        );
+        INSERT INTO gpkg_spatial_ref_sys VALUES (3035, 'EPSG', 3035);
         CREATE TABLE gpkg_geometry_columns (
             table_name TEXT, column_name TEXT, geometry_type_name TEXT,
             srs_id INTEGER, z INTEGER, m INTEGER
         );
-        INSERT INTO gpkg_geometry_columns VALUES ('survey', 'geom', 'POLYGON', 3035, 0, 0);
+        INSERT INTO gpkg_geometry_columns VALUES ('survey', 'geom', 'MULTISURFACE', 3035, 0, 0);
         CREATE TABLE survey (
-            fid INTEGER PRIMARY KEY, l1 TEXT, l2 TEXT, l3 TEXT, geom BLOB
+            fid INTEGER PRIMARY KEY, surveycprnlc TEXT, geom BLOB,
+            survey_year INTEGER, point_copernicus INTEGER,
+            surveycprncando INTEGER, survey_obs_type TEXT
         );
         CREATE TABLE rtree_survey_geom (
             id INTEGER PRIMARY KEY, minx REAL, maxx REAL, miny REAL, maxy REAL
@@ -372,9 +460,46 @@ def _create_lucas_fixture(path: Path) -> None:
     )
     geometry = box(0, 0, 8, 10)
     connection.execute(
-        "INSERT INTO survey VALUES (?, ?, ?, ?, ?)", (1, "A", "A1", "A11", _gpkg_blob(geometry))
+        "INSERT INTO survey VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (1, "A11", _gpkg_blob(geometry), 2022, 1, 1, "Field Survey, point visible <= 100 m"),
     )
     connection.execute("INSERT INTO rtree_survey_geom VALUES (?, ?, ?, ?, ?)", (1, 0, 8, 0, 10))
+    connection.execute(
+        "INSERT INTO survey VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            2,
+            "A21",
+            _gpkg_blob(box(8, 0, 10, 10)),
+            2021,
+            1,
+            1,
+            "Field Survey, point visible <= 100 m",
+        ),
+    )
+    connection.execute("INSERT INTO rtree_survey_geom VALUES (?, ?, ?, ?, ?)", (2, 8, 10, 0, 10))
+    rejected_rows = (
+        (3, "A21", 2022, 0, 1, "Field Survey, point visible <= 100 m"),
+        (4, "A21", 2022, 1, 0, "Field Survey, point visible <= 100 m"),
+        (5, "A21", 2022, 1, 1, "Photo-interpretation in the field"),
+        (6, None, 2022, 1, 1, "Field Survey, point visible <= 100 m"),
+    )
+    for feature_id, support_class, year, copernicus, can_do, observation_type in rejected_rows:
+        connection.execute(
+            "INSERT INTO survey VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                feature_id,
+                support_class,
+                _gpkg_blob(geometry),
+                year,
+                copernicus,
+                can_do,
+                observation_type,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO rtree_survey_geom VALUES (?, ?, ?, ?, ?)",
+            (feature_id, 0, 8, 0, 10),
+        )
     connection.commit()
     connection.close()
 
@@ -396,7 +521,14 @@ def test_lucas_reader_uses_exact_file_pins_and_records_feature_ids(tmp_path: Pat
         taxonomy_uri="https://example.test/codebook.csv",
         taxonomy_revision="fixture-codebook-1",
         taxonomy_sha256=taxonomy.sha256,
-        layer=LucasLayerManifest("survey", "geom", "fid", "rtree_survey_geom", "l1", "l2", "l3"),
+        layer=LucasLayerManifest(
+            table="survey",
+            geometry_column="geom",
+            primary_key="fid",
+            rtree_table="rtree_survey_geom",
+            support_class_column="surveycprnlc",
+            geometry_type="MULTISURFACE",
+        ),
     )
     reader = LucasGeoPackageReader(path, taxonomy_path, manifest, taxonomy, fetch_size=1)
     with reader:
@@ -413,12 +545,16 @@ def test_lucas_reader_uses_exact_file_pins_and_records_feature_ids(tmp_path: Pat
             )
         )
 
-    assert result.attempted_feature_ids == ("1",)
+    assert result.attempted_feature_ids == ("1", "2", "3", "4", "5", "6")
+    assert result.attempt_reason == (
+        "filtered:point_copernicus=1,survey_obs_type=1,survey_year=1,"
+        "surveycprncando=1,surveycprnlc=1"
+    )
     assert len(result.footprints) == 1
     assert result.footprints[0].l3_code == "A11"
     assert result.exclusion_reason is None
     assert len(attempts) == 2
-    assert attempts[0].attempt_evidence.attempted_reference_ids == ("1",)
+    assert attempts[0].attempt_evidence.attempted_reference_ids == ("1", "2", "3", "4", "5", "6")
     assert attempts[1].label_outcomes[0].status is OutcomeStatus.UNASSIGNED
 
     taxonomy_path.write_bytes(b"changed codebook")
@@ -434,9 +570,74 @@ def test_lucas_reader_uses_exact_file_pins_and_records_feature_ids(tmp_path: Pat
         pass
 
 
+def test_lucas_failed_bounded_scan_preserves_ids_already_attempted(monkeypatch) -> None:
+    taxonomy = _lucas_taxonomy()
+    layer = LucasLayerManifest(
+        table="survey",
+        geometry_column="geom",
+        primary_key="fid",
+        rtree_table="rtree_survey_geom",
+        support_class_column="surveycprnlc",
+        geometry_type="MULTISURFACE",
+    )
+    manifest = LucasReferenceManifest(
+        release_id="synthetic-fixture-only",
+        source_uri="https://example.test/fixture.gpkg",
+        source_revision="fixture-source-1",
+        file_size_bytes=1,
+        file_sha256=_SHA_A,
+        taxonomy_id=taxonomy.taxonomy_id,
+        taxonomy_uri="https://example.test/codebook.csv",
+        taxonomy_revision=taxonomy.revision,
+        taxonomy_sha256=taxonomy.sha256,
+        layer=layer,
+    )
+    reader = LucasGeoPackageReader(Path("unused.gpkg"), Path("unused.pdf"), manifest, taxonomy)
+    reader._connection = sqlite3.connect(":memory:")
+
+    class BrokenCursor:
+        calls = 0
+
+        def fetchmany(self, _size):
+            self.calls += 1
+            if self.calls == 1:
+                return [
+                    (
+                        17,
+                        "A11",
+                        _gpkg_blob(box(0, 0, 5, 10)),
+                        2022,
+                        1,
+                        1,
+                        "Field Survey, point visible <= 100 m",
+                    )
+                ]
+            raise sqlite3.DatabaseError("synthetic failure after one row")
+
+    monkeypatch.setattr(
+        lucas_module,
+        "_query_rtree_candidates",
+        lambda *_args: BrokenCursor(),
+    )
+    try:
+        result = reader.query(box(0, 0, 10, 10))
+    finally:
+        reader.__exit__()
+
+    assert result.exclusion_reason == "lucas_reference_query_failed:DatabaseError"
+    assert result.attempted_feature_ids == ("17",)
+
+
 def test_bounded_export_preserves_adapter_rows_and_unmatched_text_link(tmp_path: Path) -> None:
     sample = _polygon(1)
-    evidence = WorldCoverEvidence("way/1", 100.0, ((10, 80.0),), WORLDCOVER_AREA_MEASUREMENT)
+    evidence = WorldCoverEvidence(
+        "way/1",
+        100.0,
+        ((10, 80.0),),
+        WORLDCOVER_AREA_MEASUREMENT,
+        attempted_tiles=("N00E000",),
+        class_evidence_ids=((10, ("N00E000",)),),
+    )
     source = SourceSnapshot(
         snapshot_id="raw-description",
         repository="NoeFlandre/source-polygons",
@@ -491,7 +692,7 @@ def test_bounded_export_preserves_adapter_rows_and_unmatched_text_link(tmp_path:
         ),
         FilesystemStreamingSink(tmp_path),
         options=AdapterStreamingOptions(
-            limits=StreamingLimits(max_batch_rows=4),
+            limits=StreamingLimits(max_batch_rows=6),
             staging_directory=tmp_path,
             supplemental_batches=(
                 PoolBatch(
@@ -512,3 +713,17 @@ def test_bounded_export_preserves_adapter_rows_and_unmatched_text_link(tmp_path:
     exported = json.loads(manifests[0].read_text())
     assert exported["storage_layout"]["tables"]["source_documents"]["row_count"] == 1
     assert exported["storage_layout"]["tables"]["text_polygon_links"]["row_count"] == 1
+    assert exported["storage_layout"]["tables"]["polygon_attempts"]["row_count"] == 1
+    assert exported["storage_layout"]["tables"]["label_support_evidence"]["row_count"] == 1
+    gate = validate_nine_streamed_pool_gate((receipt,), FilesystemArtifactReader())
+    assert gate.missing_pools == tuple(
+        sorted(
+            f"{text_source}-{reference_system}"
+            for text_source in TextSource
+            for reference_system in ReferenceSystem
+            if (text_source, reference_system)
+            != (TextSource.DESCRIPTION, ReferenceSystem.WORLDCOVER)
+        )
+    )
+    assert gate.duplicate_pools == ()
+    assert gate.invalid_pools == ()

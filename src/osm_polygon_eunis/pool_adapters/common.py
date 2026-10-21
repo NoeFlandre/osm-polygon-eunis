@@ -48,6 +48,8 @@ class SupportAttempt:
     attempted_reference_ids: tuple[str, ...] = ()
     attempted_tile_ids: tuple[str, ...] = ()
     missing_tile_ids: tuple[str, ...] = ()
+    partial_reason: str | None = None
+    attempt_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +64,7 @@ class AttemptEvidenceRecord:
     support_evidence: tuple[tuple[str, str, tuple[str, ...]], ...]
     status: str
     reason: str | None
+    reference_id_namespace: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +122,7 @@ def label_polygon(
     levels: Sequence[LabelLevel],
     reference_pin: ReferencePin,
     *,
+    reference_id_namespace: str,
     assignment_rule_version: str = ASSIGNMENT_RULE_VERSION,
 ) -> PoolPolygonLabelRecords:
     """Create candidates and one decision for each supported level."""
@@ -129,7 +133,9 @@ def label_polygon(
     snapshot = polygon.snapshot
     exclusion_reason = _unusable_reason(polygon, snapshot) or attempt.exclusion_reason
     if exclusion_reason is not None:
-        return _excluded_records(polygon, attempt, supported_levels, exclusion_reason)
+        return _excluded_records(
+            polygon, attempt, supported_levels, exclusion_reason, reference_id_namespace
+        )
 
     if snapshot is None or snapshot.original_area is None:
         raise ValueError("usable pool polygon needs a geometry snapshot and full area")
@@ -152,7 +158,15 @@ def label_polygon(
         _outcome(polygon.inventory, level.name, candidates_by_level[level.name])
         for level in supported_levels
     )
-    evidence = _attempt_evidence(polygon, attempt, candidates, "completed", None)
+    status = "partial" if attempt.partial_reason is not None else "completed"
+    evidence = _attempt_evidence(
+        polygon,
+        attempt,
+        candidates,
+        status,
+        attempt.partial_reason or attempt.attempt_reason,
+        reference_id_namespace,
+    )
     return PoolPolygonLabelRecords(
         polygon.inventory.inventory_row_id, candidates, outcomes, evidence
     )
@@ -190,10 +204,21 @@ def _excluded_records(
     attempt: SupportAttempt,
     levels: Sequence[LabelLevel],
     reason: str,
+    reference_id_namespace: str,
 ) -> PoolPolygonLabelRecords:
     """Record the same explicit source failure at every supported level."""
 
-    evidence = _attempt_evidence(polygon, attempt, (), "excluded", reason)
+    evidence_status = "partial" if attempt.partial_reason is not None else "excluded"
+    evidence_reason = ";".join(
+        dict.fromkeys(
+            value
+            for value in (attempt.partial_reason, reason, attempt.attempt_reason)
+            if value is not None
+        )
+    )
+    evidence = _attempt_evidence(
+        polygon, attempt, (), evidence_status, evidence_reason, reference_id_namespace
+    )
     outcomes = tuple(
         LabelOutcome(
             inventory_row_id=polygon.inventory.inventory_row_id,
@@ -252,6 +277,7 @@ def _attempt_evidence(
     candidates: Sequence[LabelCandidate],
     status: str,
     reason: str | None,
+    reference_id_namespace: str,
 ) -> AttemptEvidenceRecord:
     support_evidence = tuple(
         sorted(
@@ -274,6 +300,7 @@ def _attempt_evidence(
         support_evidence=support_evidence,
         status=status,
         reason=reason,
+        reference_id_namespace=reference_id_namespace,
     )
 
 

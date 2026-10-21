@@ -21,6 +21,7 @@ WORLDCOVER_LEVELS: Final[tuple[LabelLevel, ...]] = (LabelLevel("class", supporte
 WORLDCOVER_AREA_MEASUREMENT: Final[str] = (
     "pyproj.Geod(ellps=WGS84); boundary-cell intersections geodesic; v1"
 )
+WORLDCOVER_REFERENCE_ID_NAMESPACE: Final[str] = "worldcover-tile-id"
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +41,7 @@ class WorldCoverEvidence:
     attempted_tiles: tuple[str, ...] = ()
     missing_tiles: tuple[str, ...] = ()
     extraction_error: str | None = None
+    class_evidence_ids: tuple[tuple[int, tuple[str, ...]], ...] = ()
 
 
 def worldcover_supports(
@@ -67,9 +69,14 @@ def worldcover_supports(
             raise ValueError("WorldCover snapshot area must use physical square metres")
 
     if evidence.extraction_error is not None:
+        reason = (
+            evidence.extraction_error
+            if evidence.extraction_error in {"geometry_unusable", "source_polygon_id_missing"}
+            else f"worldcover_extraction_failed:{evidence.extraction_error}"
+        )
         attempt = SupportAttempt(
             (),
-            f"worldcover_extraction_failed:{evidence.extraction_error}",
+            reason,
             attempted_tile_ids=evidence.attempted_tiles,
             missing_tile_ids=evidence.missing_tiles,
         )
@@ -100,22 +107,29 @@ def worldcover_supports(
             _area_supports(
                 evidence.class_areas_m2,
                 polygon.snapshot.original_area,
-                evidence.attempted_tiles,
+                evidence.class_evidence_ids,
             ),
             attempted_tile_ids=evidence.attempted_tiles,
             missing_tile_ids=evidence.missing_tiles,
         )
-    return label_polygon(polygon, attempt, WORLDCOVER_LEVELS, reference_pin)
+    return label_polygon(
+        polygon,
+        attempt,
+        WORLDCOVER_LEVELS,
+        reference_pin,
+        reference_id_namespace=WORLDCOVER_REFERENCE_ID_NAMESPACE,
+    )
 
 
 def _area_supports(
     class_areas_m2: tuple[tuple[int, float], ...],
     original_area: float,
-    evidence_ids: tuple[str, ...],
+    class_evidence_ids: tuple[tuple[int, tuple[str, ...]], ...],
 ) -> tuple[SupportArea, ...]:
     if not math.isfinite(original_area) or original_area <= 0.0:
         raise ValueError("WorldCover evidence needs a positive full polygon area")
     seen: set[int] = set()
+    evidence_by_class = _evidence_by_class(class_evidence_ids)
     supports: list[SupportArea] = []
     area_total = 0.0
     for code, area in class_areas_m2:
@@ -128,9 +142,33 @@ def _area_supports(
             raise ValueError(f"WorldCover class area for {code} must be within polygon area")
         area_total += area
         if area > 0.0:
+            evidence_ids = evidence_by_class.get(code, ())
+            if not evidence_ids:
+                raise ValueError(f"WorldCover class {code} is missing contributing tile IDs")
             supports.append(
                 SupportArea("class", str(code), area, AssignmentKind.DIRECT, evidence_ids)
             )
+    extra_evidence = set(evidence_by_class) - seen
+    if extra_evidence:
+        raise ValueError(
+            f"WorldCover support evidence has no class area for {sorted(extra_evidence)}"
+        )
     if area_total > original_area * (1.0 + 1e-9):
         raise ValueError("WorldCover class areas exceed the full geodesic denominator")
     return tuple(supports)
+
+
+def _evidence_by_class(
+    class_evidence_ids: tuple[tuple[int, tuple[str, ...]], ...],
+) -> dict[int, tuple[str, ...]]:
+    """Index exact contributing tile IDs by raster class."""
+    evidence_by_class: dict[int, tuple[str, ...]] = {}
+    for code, evidence_ids in class_evidence_ids:
+        if code not in WORLDCOVER_CODES:
+            raise ValueError(f"WorldCover evidence uses unknown class code {code}")
+        if code in evidence_by_class:
+            raise ValueError(f"WorldCover code {code} repeats its support evidence")
+        if len(evidence_ids) != len(set(evidence_ids)):
+            raise ValueError(f"WorldCover code {code} repeats a support tile ID")
+        evidence_by_class[code] = evidence_ids
+    return evidence_by_class

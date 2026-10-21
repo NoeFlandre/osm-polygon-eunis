@@ -7,7 +7,10 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from osm_polygon_eunis.pool_contract import (
+    AttemptStatus,
     FileArtifactSink,
+    LabelSupportEvidence,
+    PolygonAttemptReceipt,
     PoolBatch,
     PoolBuildInput,
     PoolStreamSpec,
@@ -105,6 +108,8 @@ def iter_labeled_polygon_batches(
     polygons = []
     candidates = []
     outcomes = []
+    attempt_receipts = []
+    support_evidence = []
 
     def current_batch(index: int) -> PoolBatch:
         return PoolBatch(
@@ -113,6 +118,8 @@ def iter_labeled_polygon_batches(
             polygons=tuple(polygons),
             label_candidates=tuple(candidates),
             label_outcomes=tuple(outcomes),
+            attempt_receipts=tuple(attempt_receipts),
+            support_evidence=tuple(support_evidence),
         )
 
     for polygon, record in labeled_polygons:
@@ -125,11 +132,15 @@ def iter_labeled_polygon_batches(
             polygons.clear()
             candidates.clear()
             outcomes.clear()
+            attempt_receipts.clear()
+            support_evidence.clear()
         inventory.append(polygon.inventory)
         if polygon.snapshot is not None:
             polygons.append(polygon.snapshot)
         candidates.extend(record.label_candidates)
         outcomes.extend(record.label_outcomes)
+        attempt_receipts.append(_attempt_receipt(record))
+        support_evidence.extend(_candidate_support_evidence(record))
     if inventory:
         yield current_batch(batch_index)
         batch_index += 1
@@ -145,6 +156,8 @@ def _validate_polygon_record(polygon: PoolPolygonInput, record: PoolPolygonLabel
         outcome.inventory_row_id != record.inventory_row_id for outcome in record.label_outcomes
     ):
         raise ValueError("label outcome references a different raw polygon")
+    if record.attempt_evidence.inventory_row_id != record.inventory_row_id:
+        raise ValueError("reference attempt receipt does not match the raw polygon")
 
 
 def _polygon_row_count(
@@ -157,10 +170,83 @@ def _polygon_row_count(
         + int(polygon.snapshot is not None)
         + len(record.label_candidates)
         + len(record.label_outcomes)
+        + 1
+        + len(record.label_candidates)
     )
     if count > max_batch_rows:
         raise ValueError("one polygon's label rows exceed max_batch_rows")
     return count
+
+
+def _attempt_receipt(record: PoolPolygonLabelRecords) -> PolygonAttemptReceipt:
+    evidence = record.attempt_evidence
+    attempted_reference_ids = evidence.attempted_reference_ids or evidence.attempted_tile_ids
+    missing_reference_ids = evidence.missing_tile_ids
+    reason = evidence.reason
+    if evidence.status in {"completed", "partial"}:
+        if missing_reference_ids:
+            status = AttemptStatus.PARTIAL
+            reason = reason or "one_or_more_reference_tiles_unavailable"
+        elif evidence.status == "partial":
+            status = AttemptStatus.PARTIAL
+            reason = reason or "reference_measurement_incomplete"
+        else:
+            status = AttemptStatus.COMPLETED
+    elif evidence.status == "excluded":
+        status = (
+            AttemptStatus.FAILED
+            if reason is not None
+            and any(
+                marker in reason
+                for marker in (
+                    "reference_query_failed",
+                    "extraction_failed",
+                    "read_failed",
+                    "measurement_failed",
+                )
+            )
+            else AttemptStatus.EXCLUDED
+        )
+    else:
+        raise ValueError(f"unknown adapter attempt status {evidence.status!r}")
+    return PolygonAttemptReceipt(
+        inventory_row_id=evidence.inventory_row_id,
+        status=status,
+        reference_id_namespace=evidence.reference_id_namespace,
+        attempted_reference_ids=attempted_reference_ids,
+        missing_reference_ids=missing_reference_ids,
+        reason=reason,
+    )
+
+
+def _candidate_support_evidence(
+    record: PoolPolygonLabelRecords,
+) -> tuple[LabelSupportEvidence, ...]:
+    evidence = record.attempt_evidence
+    ids_by_candidate = {
+        (level, code): reference_ids for level, code, reference_ids in evidence.support_evidence
+    }
+    if len(ids_by_candidate) != len(evidence.support_evidence):
+        raise ValueError("adapter emitted duplicate candidate support evidence")
+    output = []
+    for candidate in record.label_candidates:
+        key = candidate.level, candidate.code
+        reference_ids = ids_by_candidate.get(key)
+        if not reference_ids:
+            raise ValueError(f"candidate {key} is missing its exact reference evidence IDs")
+        output.append(
+            LabelSupportEvidence(
+                inventory_row_id=record.inventory_row_id,
+                level=candidate.level,
+                code=candidate.code,
+                reference_id_namespace=evidence.reference_id_namespace,
+                reference_ids=reference_ids,
+            )
+        )
+    extra = set(ids_by_candidate) - {(row.level, row.code) for row in record.label_candidates}
+    if extra:
+        raise ValueError(f"adapter emitted support evidence without a candidate: {sorted(extra)}")
+    return tuple(output)
 
 
 def _require_metadata_only(metadata_input: PoolBuildInput) -> None:
@@ -173,6 +259,9 @@ def _require_metadata_only(metadata_input: PoolBuildInput) -> None:
         metadata_input.text_polygon_links,
         metadata_input.entity_links,
         metadata_input.eligibility,
+        metadata_input.attempt_receipts,
+        metadata_input.support_evidence,
+        metadata_input.relevance_assessments,
     )
     if any(row_groups):
         raise ValueError("stream metadata input must not contain materialized pool table rows")

@@ -18,6 +18,8 @@ from .lucas import (
     LucasLayerManifest,
     LucasReferenceManifest,
     LucasTaxonomy,
+    lucas_2022_copernicus_manifest,
+    lucas_2022_reference_pin,
     measure_lucas_supports,
     verify_lucas_file,
     verify_lucas_taxonomy_file,
@@ -30,6 +32,12 @@ from .runner import (
     iter_worldcover_rows,
     iter_worldcover_source_attempts,
     iter_worldcover_source_rows,
+)
+from .source_pins import (
+    RawSourceTreePin,
+    SourceTreeFile,
+    polygon_geometry_tree_pins,
+    raw_source_tree_pins,
 )
 from .streaming import (
     AdapterStreamingOptions,
@@ -62,6 +70,8 @@ __all__ = [
     "LucasTaxonomy",
     "PoolPolygonInput",
     "PoolPolygonLabelRecords",
+    "RawSourceTreePin",
+    "SourceTreeFile",
     "SupportArea",
     "SupportAttempt",
     "WorldCoverEvidence",
@@ -78,7 +88,11 @@ __all__ = [
     "iter_worldcover_source_attempts",
     "iter_worldcover_source_rows",
     "label_polygon",
+    "lucas_2022_copernicus_manifest",
+    "lucas_2022_reference_pin",
     "measure_lucas_supports",
+    "polygon_geometry_tree_pins",
+    "raw_source_tree_pins",
     "verify_lucas_file",
     "verify_lucas_taxonomy_file",
     "worldcover_supports",
