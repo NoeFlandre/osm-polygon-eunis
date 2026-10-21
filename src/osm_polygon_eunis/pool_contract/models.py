@@ -140,14 +140,49 @@ class PoolKey:
 
 
 @dataclass(frozen=True, slots=True)
+class ArtifactManifestPin:
+    """Pin a bounded, hash-verified list of required source artifacts."""
+
+    format_version: str
+    manifest_uri: str
+    manifest_sha256: str
+    expected_artifact_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class AreaMeasureSpec:
+    """Describe one area measurement, including geometric edge handling."""
+
+    method_id: str
+    coordinate_system: str | None
+    ellipsoid: str | None
+    boundary_convention: str
+    densification_method: str
+    densification_parameters_json: str
+    error_settings_json: str
+    output_unit: str
+
+
+@dataclass(frozen=True, slots=True)
+class AreaMeasurementPin:
+    """Pin the separate area methods used for support and original geometry."""
+
+    implementation: str
+    implementation_version: str
+    numerator: AreaMeasureSpec
+    denominator: AreaMeasureSpec
+
+
+@dataclass(frozen=True, slots=True)
 class SourceSnapshot:
-    """Pin the complete frozen source inventory and its native key space."""
+    """Pin a frozen source tree and any native PBF used for polygon geometry."""
 
     snapshot_id: str
     repository: str
     revision: str
-    pbf_uri: str
-    pbf_sha256: str
+    pbf_uri: str | None = None
+    pbf_sha256: str | None = None
+    source_artifact_manifest: ArtifactManifestPin | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +209,8 @@ class ReferencePin:
     support_unit: str
     threshold: float
     support_union_policy: str
+    reference_artifact_manifest: ArtifactManifestPin | None = None
+    area_measurement: AreaMeasurementPin | None = None
 
 
 @dataclass(frozen=True, slots=True)

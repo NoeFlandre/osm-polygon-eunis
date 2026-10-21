@@ -17,6 +17,9 @@ import pytest
 import osm_polygon_eunis.pool_contract.streaming as streaming_module
 from osm_polygon_eunis.pool_contract import (
     AmbiguityBasis,
+    AreaMeasurementPin,
+    AreaMeasureSpec,
+    ArtifactManifestPin,
     AssignmentKind,
     AttemptStatus,
     BodyStatus,
@@ -72,6 +75,7 @@ from osm_polygon_eunis.pool_contract import (
     validate_evaluation_trace,
     validate_full_pool,
     validate_nine_pool_gate,
+    validate_nine_streamed_evaluation_ready_gate,
     validate_nine_streamed_pool_gate,
     validate_split_assignment,
 )
@@ -435,6 +439,25 @@ def test_full_pool_keeps_raw_keys_without_text_or_usable_geometry():
     assert bundle.manifest.level_accounting[-1].processed_decisions == 0
 
 
+def test_full_pool_allows_non_pbf_snapshot_with_source_tree_pin():
+    source = _pool_input()
+    source_snapshot = replace(
+        source.source_snapshot,
+        pbf_uri=None,
+        pbf_sha256=None,
+        source_artifact_manifest=ArtifactManifestPin(
+            format_version="artifact-list-jsonl-v1",
+            manifest_uri="https://artifacts.example/source-files.jsonl",
+            manifest_sha256=_SHA_A,
+            expected_artifact_count=2,
+        ),
+    )
+
+    bundle = build_full_pool(replace(source, source_snapshot=source_snapshot))
+
+    assert validate_full_pool(bundle).ok
+
+
 def test_assignments_are_independent_at_each_level_and_80_percent_is_inclusive():
     bundle = _build(_pool_input())
     assignments = {
@@ -563,7 +586,7 @@ def test_export_is_deterministic_and_manifest_is_the_complete_marker(tmp_path):
     table_uri = dict(first.table_uris)["label_candidates"]
     table = pq.read_table(_file_uri_path(table_uri))
     assert table.num_rows == 2
-    assert table.schema.metadata[b"contract_version"] == b"1.1.0"
+    assert table.schema.metadata[b"contract_version"] == b"1.2.0"
     assert table.column("denominator").to_pylist() == [100.0, 100.0]
 
 
@@ -601,8 +624,10 @@ def _stream_fixture_pool(
     tmp_path: Path,
     text_source: TextSource = TextSource.DESCRIPTION,
     reference_system: ReferenceSystem = ReferenceSystem.WORLDCOVER,
+    *,
+    source: PoolBuildInput | None = None,
 ):
-    source = _pool_input(text_source, reference_system)
+    source = source or _pool_input(text_source, reference_system)
     scan_bytes = f"fixture scan {text_source.value}/{reference_system.value}\n".encode()
     scan_path = tmp_path / "scan-reports" / f"{text_source.value}-{reference_system.value}.json"
     scan_path.parent.mkdir(parents=True, exist_ok=True)
@@ -612,7 +637,104 @@ def _stream_fixture_pool(
         scan_report_uri=scan_path.as_uri(),
         scan_report_sha256=hashlib.sha256(scan_bytes).hexdigest(),
     )
-    source = replace(source, raw_inventory_evidence=evidence)
+    evidence_root = (
+        tmp_path / "evaluation-evidence" / f"{text_source.value}-{reference_system.value}"
+    )
+    raw_artifact_root = evidence_root / "raw-tree"
+    pbf_path = raw_artifact_root / "source.osm.pbf"
+    pbf_path.parent.mkdir(parents=True, exist_ok=True)
+    pbf_bytes = f"fixture PBF {text_source.value}/{reference_system.value}".encode()
+    pbf_path.write_bytes(pbf_bytes)
+    geometry_rows = []
+    geometry_id_map = {}
+    geometry_artifacts = {}
+    for index, polygon in enumerate(source.polygons):
+        geometry_bytes = f"fixture geometry {index}".encode()
+        geometry_path = raw_artifact_root / "geometries" / f"polygon-{index:04d}.wkb"
+        geometry_path.parent.mkdir(parents=True, exist_ok=True)
+        geometry_path.write_bytes(geometry_bytes)
+        geometry_sha256 = hashlib.sha256(geometry_bytes).hexdigest()
+        polygon_snapshot_id = polygon_snapshot_identifier(
+            source.source_snapshot.snapshot_id,
+            polygon.native_key,
+            geometry_sha256,
+        )
+        geometry_id_map[polygon.polygon_snapshot_id] = polygon_snapshot_id
+        geometry_artifacts[f"geometries/polygon-{index:04d}.wkb"] = geometry_bytes
+        geometry_rows.append(
+            replace(
+                polygon,
+                polygon_snapshot_id=polygon_snapshot_id,
+                geometry_uri=geometry_path.as_uri(),
+                geometry_sha256=geometry_sha256,
+            )
+        )
+    source_tree_pin, _ = _write_artifact_manifest(
+        raw_artifact_root,
+        "raw-artifacts.jsonl",
+        {
+            "source.osm.pbf": pbf_bytes,
+            "polygons-region-0.parquet": b"fixture raw polygon shard",
+            **geometry_artifacts,
+        },
+    )
+    reference_tree_pin, _ = _write_artifact_manifest(
+        evidence_root / "reference-tree",
+        "reference-artifacts.jsonl",
+        {
+            "reference-tile-00.tif": b"fixture reference tile 00",
+            "reference-tile-01.tif": b"fixture reference tile 01",
+        },
+    )
+    source = replace(
+        source,
+        raw_inventory_evidence=evidence,
+        inventory=tuple(
+            replace(
+                row,
+                polygon_snapshot_id=geometry_id_map.get(
+                    row.polygon_snapshot_id,
+                    row.polygon_snapshot_id,
+                ),
+            )
+            for row in source.inventory
+        ),
+        polygons=tuple(geometry_rows),
+        label_candidates=tuple(
+            replace(
+                row,
+                polygon_snapshot_id=geometry_id_map[row.polygon_snapshot_id],
+            )
+            for row in source.label_candidates
+        ),
+        label_outcomes=tuple(
+            replace(
+                row,
+                polygon_snapshot_id=(
+                    geometry_id_map.get(row.polygon_snapshot_id)
+                    if row.polygon_snapshot_id is not None
+                    else None
+                ),
+            )
+            for row in source.label_outcomes
+        ),
+        source_snapshot=replace(
+            source.source_snapshot,
+            pbf_uri=pbf_path.as_uri(),
+            pbf_sha256=hashlib.sha256(pbf_bytes).hexdigest(),
+            source_artifact_manifest=source_tree_pin,
+        ),
+        reference_pin=replace(
+            source.reference_pin,
+            reference_artifact_manifest=reference_tree_pin,
+            area_measurement=AreaMeasurementPin(
+                implementation="fixture.geometry.measure",
+                implementation_version="1",
+                numerator=_fixture_area_measure(),
+                denominator=_fixture_area_measure(),
+            ),
+        ),
+    )
     sink = FilesystemStreamingSink(
         tmp_path / "streamed" / f"{text_source.value}-{reference_system.value}"
     )
@@ -623,20 +745,167 @@ def _stream_fixture_pool(
     )
 
 
-def _stream_nine_fixture_pools(tmp_path: Path):
-    return tuple(
-        _stream_fixture_pool(tmp_path, text_source, reference_system)
-        for text_source in TextSource
-        for reference_system in ReferenceSystem
+def _fixture_area_measure() -> AreaMeasureSpec:
+    return AreaMeasureSpec(
+        method_id="fixture-area-v1",
+        coordinate_system="EPSG:3035",
+        ellipsoid="GRS80",
+        boundary_convention="straight segments in EPSG:3035",
+        densification_method="none",
+        densification_parameters_json='{"applied":false,"reason":"projected fixture geometry"}',
+        error_settings_json='{"quantification":"not_estimated","reason":"test fixture"}',
+        output_unit="m2",
     )
 
 
+def _write_artifact_manifest(
+    root: Path,
+    manifest_filename: str,
+    artifacts: dict[str, bytes],
+):
+    artifact_rows = []
+    artifact_paths = []
+    for artifact_name, content in artifacts.items():
+        path = root / artifact_name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        artifact_paths.append(path)
+        artifact_rows.append(
+            {
+                "artifact_uri": path.as_uri(),
+                "sha256": hashlib.sha256(content).hexdigest(),
+            }
+        )
+    manifest_path = root / manifest_filename
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_bytes = b"".join(
+        (json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        for row in sorted(artifact_rows, key=lambda row: row["artifact_uri"])
+    )
+    manifest_path.write_bytes(manifest_bytes)
+    return (
+        ArtifactManifestPin(
+            format_version="artifact-list-jsonl-v1",
+            manifest_uri=manifest_path.as_uri(),
+            manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+            expected_artifact_count=len(artifact_rows),
+        ),
+        tuple(artifact_paths),
+    )
+
+
+def _rewrite_stream_manifest(receipt, update):
+    manifest_path = _file_uri_path(receipt.manifest_uri)
+    manifest = json.loads(manifest_path.read_text())
+    update(manifest)
+    manifest_bytes = (
+        json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode()
+    manifest_path.write_bytes(manifest_bytes)
+    return replace(receipt, manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest())
+
+
+def _completed_unassigned_fixture(source: PoolBuildInput) -> PoolBuildInput:
+    row = source.inventory[1]
+    polygon_id = polygon_snapshot_identifier(
+        source.source_snapshot.snapshot_id,
+        row.native_key,
+        "d" * 64,
+    )
+    polygon = PolygonSnapshot(
+        polygon_snapshot_id=polygon_id,
+        inventory_row_id=row.inventory_row_id,
+        native_key=row.native_key,
+        geometry_uri="https://artifacts.example/geometries/no-reference-overlap.wkb",
+        geometry_sha256="d" * 64,
+        geometry_format="WKB",
+        crs="EPSG:3035",
+        coordinate_transform="EPSG:4326 -> EPSG:3035",
+        geometry_status=GeometryStatus.USABLE,
+        original_area=100.0,
+        area_unit="m2",
+    )
+    inventory = tuple(
+        replace(
+            item,
+            polygon_snapshot_id=polygon_id,
+            exclusion_reason=None,
+        )
+        if item.inventory_row_id == row.inventory_row_id
+        else item
+        for item in source.inventory
+    )
+    outcomes = tuple(
+        replace(
+            item,
+            polygon_snapshot_id=polygon_id,
+            status=OutcomeStatus.UNASSIGNED,
+            assigned_code=None,
+            reason="completed reference search found no qualifying class",
+            ambiguity_basis=None,
+        )
+        if item.inventory_row_id == row.inventory_row_id
+        else item
+        for item in source.label_outcomes
+    )
+    attempts = tuple(
+        replace(
+            item,
+            status=AttemptStatus.COMPLETED,
+            attempted_reference_ids=(),
+            missing_reference_ids=(),
+            reason=None,
+        )
+        if item.inventory_row_id == row.inventory_row_id
+        else item
+        for item in source.attempt_receipts
+    )
+    return replace(
+        source,
+        inventory=inventory,
+        polygons=(*source.polygons, polygon),
+        label_outcomes=outcomes,
+        attempt_receipts=attempts,
+    )
+
+
+def _stream_nine_fixture_pools(
+    tmp_path: Path,
+    *,
+    include_completed_unassigned: bool = False,
+):
+    receipts = []
+    for text_source in TextSource:
+        for reference_system in ReferenceSystem:
+            source = _pool_input(text_source, reference_system)
+            if (
+                include_completed_unassigned
+                and text_source is TextSource.DESCRIPTION
+                and reference_system is ReferenceSystem.WORLDCOVER
+            ):
+                source = _completed_unassigned_fixture(source)
+            receipts.append(
+                _stream_fixture_pool(
+                    tmp_path,
+                    text_source,
+                    reference_system,
+                    source=source,
+                )
+            )
+    return tuple(receipts)
+
+
 def test_streamed_nine_pool_gate_verifies_manifests_shards_and_inventory(tmp_path: Path):
-    receipts = _stream_nine_fixture_pools(tmp_path)
+    receipts = _stream_nine_fixture_pools(tmp_path, include_completed_unassigned=True)
 
     gate = validate_nine_streamed_pool_gate(receipts, FilesystemArtifactReader())
+    evaluation_gate = validate_nine_streamed_evaluation_ready_gate(
+        receipts,
+        FilesystemArtifactReader(),
+    )
 
     assert gate.ok, gate.invalid_pools
+    assert evaluation_gate.ok, evaluation_gate.invalid_pools
     forged = replace(receipts[0], total_source_keys=receipts[0].total_source_keys + 1)
     rejected = validate_nine_streamed_pool_gate((forged, *receipts[1:]), FilesystemArtifactReader())
     assert not rejected.ok
@@ -651,6 +920,347 @@ def test_streamed_nine_pool_gate_verifies_manifests_shards_and_inventory(tmp_pat
     assert "description-worldcover" in duplicate.duplicate_pools
     incomplete = validate_nine_streamed_pool_gate(receipts[:-1], FilesystemArtifactReader())
     assert "wiki-eunis" in incomplete.missing_pools
+
+
+def test_streamed_evaluation_gate_blocks_failed_partial_and_missing_reference_receipts(
+    tmp_path: Path,
+):
+    source = _pool_input(TextSource.DESCRIPTION, ReferenceSystem.WORLDCOVER)
+    attempts = (
+        replace(
+            source.attempt_receipts[0],
+            status=AttemptStatus.FAILED,
+            reason="tile_read_failed",
+        ),
+        replace(
+            source.attempt_receipts[1],
+            status=AttemptStatus.PARTIAL,
+            reason="one required shard was unreadable",
+        ),
+        replace(
+            source.attempt_receipts[2],
+            status=AttemptStatus.COMPLETED,
+            missing_reference_ids=("required-reference-tile-7",),
+            reason=None,
+        ),
+    )
+    receipt = _stream_fixture_pool(
+        tmp_path,
+        TextSource.DESCRIPTION,
+        ReferenceSystem.WORLDCOVER,
+        source=replace(source, attempt_receipts=attempts),
+    )
+    reader = FilesystemArtifactReader()
+
+    structural = validate_nine_streamed_pool_gate((receipt,), reader)
+    readiness = validate_nine_streamed_evaluation_ready_gate((receipt,), reader)
+    issues = " ".join(issue for _, rows in readiness.invalid_pools for issue in rows)
+
+    assert not structural.invalid_pools
+    assert not readiness.ok
+    assert "FAILED polygon attempts" in issues
+    assert "PARTIAL polygon attempts" in issues
+    assert "missing reference IDs" in issues
+
+
+def test_streamed_evaluation_gate_bounds_receipt_materialization(tmp_path: Path):
+    receipt = _stream_fixture_pool(tmp_path)
+    consumed = 0
+
+    def receipts():
+        nonlocal consumed
+        for _ in range(100):
+            consumed += 1
+            yield receipt
+
+    readiness = validate_nine_streamed_evaluation_ready_gate(
+        receipts(),
+        FilesystemArtifactReader(),
+    )
+
+    assert not readiness.ok
+    assert consumed == 10
+
+
+def test_streamed_evaluation_gate_blocks_unread_pinned_reference_artifacts(tmp_path: Path):
+    receipt = _stream_fixture_pool(tmp_path)
+    manifest = json.loads(_file_uri_path(receipt.manifest_uri).read_text())
+    reference_pin = manifest["reference_pin"]["reference_artifact_manifest"]
+    first_artifact = json.loads(
+        _file_uri_path(reference_pin["manifest_uri"]).read_text().splitlines()[0]
+    )
+    Path(unquote(urlparse(first_artifact["artifact_uri"]).path)).unlink()
+
+    readiness = validate_nine_streamed_evaluation_ready_gate(
+        (receipt,),
+        FilesystemArtifactReader(),
+    )
+    issues = " ".join(issue for _, rows in readiness.invalid_pools for issue in rows)
+
+    assert not readiness.ok
+    assert "reference artifact could not be read" in issues
+
+
+def test_streamed_evaluation_gate_requires_artifact_lists_and_area_method(tmp_path: Path):
+    receipt = _stream_fixture_pool(tmp_path)
+
+    def remove_or_corrupt_readiness_pins(manifest):
+        manifest["source_snapshot"]["source_artifact_manifest"]["format_version"] = "unknown-v0"
+        manifest["reference_pin"]["reference_artifact_manifest"] = None
+        manifest["reference_pin"]["area_measurement"]["numerator"][
+            "densification_parameters_json"
+        ] = "{}"
+
+    receipt = _rewrite_stream_manifest(receipt, remove_or_corrupt_readiness_pins)
+    readiness = validate_nine_streamed_evaluation_ready_gate(
+        (receipt,),
+        FilesystemArtifactReader(),
+    )
+    issues = " ".join(issue for _, rows in readiness.invalid_pools for issue in rows)
+
+    assert "raw source artifact manifest format is unsupported" in issues
+    assert "reference artifact manifest pin is missing" in issues
+    assert (
+        "area measurement numerator densification_parameters_json is not a non-empty "
+        "canonical JSON object" in issues
+    )
+
+    def remove_readiness_pins(manifest):
+        manifest["source_snapshot"]["source_artifact_manifest"] = None
+        manifest["reference_pin"]["area_measurement"] = None
+
+    receipt = _rewrite_stream_manifest(receipt, remove_readiness_pins)
+    readiness = validate_nine_streamed_evaluation_ready_gate(
+        (receipt,),
+        FilesystemArtifactReader(),
+    )
+    issues = " ".join(issue for _, rows in readiness.invalid_pools for issue in rows)
+
+    assert "raw source artifact manifest pin is missing" in issues
+    assert "area measurement method pin is incomplete" in issues
+
+
+def test_streamed_evaluation_gate_requires_explicit_area_geometry_settings(tmp_path: Path):
+    receipt = _stream_fixture_pool(tmp_path)
+
+    def remove_area_method_evidence(manifest):
+        method = manifest["reference_pin"]["area_measurement"]
+        method["numerator"]["coordinate_system"] = None
+        method["numerator"]["ellipsoid"] = None
+        method["numerator"]["boundary_convention"] = ""
+        method["numerator"]["error_settings_json"] = "[]"
+        method["denominator"]["output_unit"] = "ha"
+
+    receipt = _rewrite_stream_manifest(receipt, remove_area_method_evidence)
+    readiness = validate_nine_streamed_evaluation_ready_gate(
+        (receipt,),
+        FilesystemArtifactReader(),
+    )
+    issues = " ".join(issue for _, rows in readiness.invalid_pools for issue in rows)
+
+    assert "numerator needs a coordinate system or ellipsoid" in issues
+    assert "numerator lacks boundary_convention" in issues
+    assert "numerator error_settings_json is not a non-empty canonical JSON object" in issues
+    assert "denominator output unit differs from the support unit" in issues
+
+
+def test_streamed_evaluation_gate_requires_pinned_pbf_in_source_manifest(tmp_path: Path):
+    receipt = _stream_fixture_pool(tmp_path)
+    manifest = json.loads(_file_uri_path(receipt.manifest_uri).read_text())
+    source = manifest["source_snapshot"]
+    pin = source["source_artifact_manifest"]
+    manifest_path = _file_uri_path(pin["manifest_uri"])
+    rows = [json.loads(line) for line in manifest_path.read_text().splitlines()]
+    rows = [row for row in rows if row["artifact_uri"] != source["pbf_uri"]]
+    manifest_bytes = b"".join(
+        (json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        for row in rows
+    )
+    manifest_path.write_bytes(manifest_bytes)
+    pin["manifest_sha256"] = hashlib.sha256(manifest_bytes).hexdigest()
+    pin["expected_artifact_count"] = len(rows)
+    receipt = _rewrite_stream_manifest(receipt, lambda updated: updated.update(manifest))
+
+    readiness = validate_nine_streamed_evaluation_ready_gate(
+        (receipt,),
+        FilesystemArtifactReader(),
+    )
+    issues = " ".join(issue for _, entries in readiness.invalid_pools for issue in entries)
+
+    assert "raw source manifest omits the pinned PBF" in issues
+
+
+def test_streamed_evaluation_gate_accepts_a_pinned_non_pbf_source_tree(tmp_path: Path):
+    receipt = _stream_fixture_pool(tmp_path)
+    manifest = json.loads(_file_uri_path(receipt.manifest_uri).read_text())
+    source = manifest["source_snapshot"]
+    pin = source["source_artifact_manifest"]
+    artifact_manifest_path = _file_uri_path(pin["manifest_uri"])
+    rows = [json.loads(line) for line in artifact_manifest_path.read_text().splitlines()]
+    rows = [row for row in rows if row["artifact_uri"] != source["pbf_uri"]]
+    artifact_manifest_bytes = b"".join(
+        (json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        for row in rows
+    )
+    artifact_manifest_path.write_bytes(artifact_manifest_bytes)
+    pin["manifest_sha256"] = hashlib.sha256(artifact_manifest_bytes).hexdigest()
+    pin["expected_artifact_count"] = len(rows)
+    source["pbf_uri"] = None
+    source["pbf_sha256"] = None
+    receipt = _rewrite_stream_manifest(receipt, lambda updated: updated.update(manifest))
+
+    readiness = validate_nine_streamed_evaluation_ready_gate(
+        (receipt,),
+        FilesystemArtifactReader(),
+    )
+
+    assert not readiness.invalid_pools
+    assert readiness.missing_pools
+
+
+def test_streamed_evaluation_gate_checks_artifact_manifest_hash_order_and_count(
+    tmp_path: Path,
+):
+    receipt = _stream_fixture_pool(tmp_path)
+    manifest = json.loads(_file_uri_path(receipt.manifest_uri).read_text())
+    pin = manifest["reference_pin"]["reference_artifact_manifest"]
+    manifest_path = _file_uri_path(pin["manifest_uri"])
+    rows = [json.loads(line) for line in manifest_path.read_text().splitlines()]
+    rows.reverse()
+    rows[0]["sha256"] = "0" * 64
+    artifact_manifest_bytes = b"".join(
+        (json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        for row in rows
+    )
+    manifest_path.write_bytes(artifact_manifest_bytes)
+    pin["manifest_sha256"] = hashlib.sha256(artifact_manifest_bytes).hexdigest()
+    pin["expected_artifact_count"] = len(rows) + 1
+    receipt = _rewrite_stream_manifest(receipt, lambda updated: updated.update(manifest))
+
+    readiness = validate_nine_streamed_evaluation_ready_gate(
+        (receipt,),
+        FilesystemArtifactReader(),
+    )
+    issues = " ".join(issue for _, entries in readiness.invalid_pools for issue in entries)
+
+    assert "artifact manifest is not uniquely sorted" in issues
+    assert "reference artifact SHA-256 does not match its pin" in issues
+    assert "artifact manifest lists 2 artifacts, expected 3" in issues
+
+
+def test_streamed_evaluation_gate_hashes_measurement_sidecars(tmp_path: Path):
+    source = _pool_input(TextSource.DESCRIPTION, ReferenceSystem.WORLDCOVER)
+    sidecar = tmp_path / "measurements.jsonl"
+    sidecar_bytes = b'{"feature_id":"tile-7","intersection_area":80.0}\n'
+    sidecar.write_bytes(sidecar_bytes)
+    evidence = replace(
+        source.support_evidence[0],
+        reference_ids=(),
+        measurement_sidecar_uri=sidecar.as_uri(),
+        measurement_sidecar_sha256=hashlib.sha256(sidecar_bytes).hexdigest(),
+        measurement_record_count=1,
+    )
+    source = replace(source, support_evidence=(evidence, *source.support_evidence[1:]))
+    receipt = _stream_fixture_pool(
+        tmp_path,
+        TextSource.DESCRIPTION,
+        ReferenceSystem.WORLDCOVER,
+        source=source,
+    )
+    reader = FilesystemArtifactReader()
+
+    valid = validate_nine_streamed_evaluation_ready_gate((receipt,), reader)
+    sidecar.unlink()
+    missing = validate_nine_streamed_evaluation_ready_gate((receipt,), reader)
+    issues = " ".join(issue for _, entries in missing.invalid_pools for issue in entries)
+
+    assert not valid.invalid_pools
+    assert "label support evidence" in issues
+    assert "could not be read" in issues
+
+
+def test_streamed_evaluation_gate_rejects_malformed_artifact_manifest_rows(tmp_path: Path):
+    receipt = _stream_fixture_pool(tmp_path)
+    manifest = json.loads(_file_uri_path(receipt.manifest_uri).read_text())
+    pin = manifest["reference_pin"]["reference_artifact_manifest"]
+    manifest_path = _file_uri_path(pin["manifest_uri"])
+    valid_row = json.loads(manifest_path.read_text().splitlines()[0])
+    noncanonical_row = json.dumps(
+        {"sha256": valid_row["sha256"], "artifact_uri": valid_row["artifact_uri"]},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    artifact_manifest_bytes = (
+        f'[]\n{{"artifact_path":"missing-key","sha256":"not-a-digest"}}\n{noncanonical_row}\n'
+    ).encode()
+    manifest_path.write_bytes(artifact_manifest_bytes)
+    pin["manifest_sha256"] = hashlib.sha256(artifact_manifest_bytes).hexdigest()
+    pin["expected_artifact_count"] = 3
+    receipt = _rewrite_stream_manifest(receipt, lambda updated: updated.update(manifest))
+
+    readiness = validate_nine_streamed_evaluation_ready_gate(
+        (receipt,),
+        FilesystemArtifactReader(),
+    )
+    issues = " ".join(issue for _, entries in readiness.invalid_pools for issue in entries)
+
+    assert "contains a non-object row" in issues
+    assert "row has an invalid schema" in issues
+    assert "contains an invalid artifact pin" in issues
+    assert "rows are not canonical JSONL" in issues
+
+
+def test_streamed_evaluation_gate_rejects_invalid_and_empty_artifact_manifests(
+    tmp_path: Path,
+):
+    receipt = _stream_fixture_pool(tmp_path)
+
+    def set_invalid_count(manifest):
+        manifest["reference_pin"]["reference_artifact_manifest"]["expected_artifact_count"] = 0
+
+    receipt = _rewrite_stream_manifest(receipt, set_invalid_count)
+    invalid_pin = validate_nine_streamed_evaluation_ready_gate(
+        (receipt,),
+        FilesystemArtifactReader(),
+    )
+    invalid_pin_issues = " ".join(
+        issue for _, entries in invalid_pin.invalid_pools for issue in entries
+    )
+
+    assert "reference artifact manifest pin is invalid" in invalid_pin_issues
+
+    def set_empty_manifest(manifest):
+        pin = manifest["reference_pin"]["reference_artifact_manifest"]
+        _file_uri_path(pin["manifest_uri"]).write_bytes(b"")
+        pin["manifest_sha256"] = hashlib.sha256(b"").hexdigest()
+        pin["expected_artifact_count"] = 1
+
+    receipt = _rewrite_stream_manifest(receipt, set_empty_manifest)
+    empty_manifest = validate_nine_streamed_evaluation_ready_gate(
+        (receipt,),
+        FilesystemArtifactReader(),
+    )
+    empty_issues = " ".join(
+        issue for _, entries in empty_manifest.invalid_pools for issue in entries
+    )
+
+    assert "artifact manifest is empty" in empty_issues
+    assert "lists 0 artifacts, expected 1" in empty_issues
+
+
+def test_streamed_evaluation_gate_blocks_unread_artifact_manifest(tmp_path: Path):
+    receipt = _stream_fixture_pool(tmp_path)
+    manifest = json.loads(_file_uri_path(receipt.manifest_uri).read_text())
+    pin_uri = manifest["reference_pin"]["reference_artifact_manifest"]["manifest_uri"]
+    _file_uri_path(pin_uri).unlink()
+
+    readiness = validate_nine_streamed_evaluation_ready_gate(
+        (receipt,),
+        FilesystemArtifactReader(),
+    )
+    issues = " ".join(issue for _, entries in readiness.invalid_pools for issue in entries)
+
+    assert "reference artifact manifest could not be read" in issues
 
 
 def test_streamed_gate_rejects_tampered_shard(tmp_path: Path):
@@ -1212,7 +1822,7 @@ def test_stream_duplicate_native_key_across_batches_never_completes(tmp_path: Pa
             FilesystemStreamingSink(sink_root),
             limits=StreamingLimits(max_batch_rows=32),
         )
-    manifest_path = sink_root / "pools/1.1.0/website/eunis/raw-website/1.0.0/manifest.json"
+    manifest_path = sink_root / "pools/1.2.0/website/eunis/raw-website/1.0.0/manifest.json"
     assert not manifest_path.exists()
 
 

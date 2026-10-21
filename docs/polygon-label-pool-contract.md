@@ -10,10 +10,12 @@ The shared code does not import EUNIS matching logic or compute overlays.
 ## Pool identity and source coverage
 
 The current additive contract version is
-`noeflandre.polygon-label-pool/1.1.0`. A pool is one of `description`,
+`noeflandre.polygon-label-pool/1.2.0`. A pool is one of `description`,
 `website`, or `wiki` crossed with `worldcover`, `lucas`, or `eunis`. Each pool
-pins its text-source snapshot, PBF artifact, source repository revision,
-reference release, and taxonomy revision.
+pins its text-source snapshot tree, source repository revision, reference
+release, and taxonomy revision. A PBF pin is present when that source snapshot
+uses a PBF; other frozen multi-file inventories use their exact artifact
+manifest without inventing a PBF.
 
 Adapters must enumerate every distinct native polygon key in the frozen raw
 source before joining text, relevance labels, evaluation arms, or token-budget
@@ -29,6 +31,21 @@ candidate has one `LabelSupportEvidence` row with source reference IDs or a
 resolvable measurement-sidecar URI, SHA-256, and record count. These records
 make the adapter's overlay inputs inspectable without changing raw-polygon
 accounting.
+
+Evaluation readiness needs more provenance than structural archive validity.
+Contract 1.2 adds optional `ArtifactManifestPin` records for the raw source and
+reference artifact sets, plus an `AreaMeasurementPin` on the reference pin.
+Each artifact manifest is canonical JSONL, sorted by `artifact_uri`; every row
+contains exactly `artifact_uri` and `sha256`. The pin stores the manifest URI,
+its SHA-256, format version, and expected artifact count. All listed artifacts
+are required. When a PBF pin is present, the raw source manifest must list it.
+Non-PBF snapshots pin their actual source files directly. The area-method
+pin records the implementation and version plus separate `AreaMeasureSpec`
+records for numerator and denominator. Each record includes a method ID, a
+coordinate system and/or ellipsoid, boundary convention, densification method
+and canonical settings, error settings, and output unit. Both outputs must use
+the reference support unit. The shared contract does not select or approve a
+scientific area method; adapters pin their source-specific choice and settings.
 
 The EUNIS PR #159 relevance census starts from relevance-labeled sentence
 rows. It includes only polygons reachable through those rows. Build the EUNIS
@@ -217,17 +234,40 @@ pools/<contract-version>/<text-source>/<reference-system>/
 The streaming manifest lists the total source-key count and observed key-set
 digest, per-level processed decisions and outcomes, qualifying candidate
 counts, the exclusion-reason sidecar, source and reference pins, adapter and
-shared-builder revisions, and the hash and row count of every shard. Use
-`validate_nine_streamed_pool_gate(receipts, reader)` to verify streamed
-completion manifests, scan receipts, shard inventories, shard hashes, per-level
-accounting, and all nine distinct combinations without reconstructing pools in
-RAM. The gate reads each Parquet footer and compares its schema and row count
-with the table contract and shard manifest. A cloud `PoolArtifactReader` streams
-JSONL and artifact hashes, reads Parquet footer metadata without loading row
-groups, and resolves sink-relative paths. Its `parquet_metadata()` method
-returns `ParquetArtifactMetadata`. `FilesystemArtifactReader` supports
-controlled staging and tests. Evaluation sampling must wait for that gate to
-pass.
+shared-builder revisions, and the hash and row count of every shard.
+`validate_nine_streamed_pool_gate(receipts, reader)` verifies structural archive
+completeness: manifests, scan receipts, shard inventories, shard hashes,
+per-level accounting, and all nine distinct combinations without
+reconstructing pools in RAM. It remains useful for validating preserved
+archives even when they contain failed or partial attempts.
+
+Before evaluation sampling, use
+`validate_nine_streamed_evaluation_ready_gate(receipts, reader)`. It first
+requires the structural gate to pass, then reads attempt, geometry, and support
+evidence rows in bounded Parquet batches. `FAILED` and `PARTIAL` attempts,
+malformed or non-empty `missing_reference_ids`, unreadable geometry or
+measurement sidecars, missing source/reference artifact manifests, unavailable
+listed shards, missing area-method provenance, inconsistent area units, or
+PBF/hash mismatches block readiness. A `COMPLETED` attempt with no matching
+reference IDs remains valid:
+natural lack of reference coverage is a scientific coverage caveat, not an
+operational read failure. An explicit `EXCLUDED` outcome with its reason also
+remains accounted. Adapters must record operational read errors as `FAILED` or
+`PARTIAL`, and list missing required reference IDs, rather than encoding them
+as natural no-coverage.
+
+A cloud `PoolArtifactReader` streams JSONL and artifact hashes, reads Parquet
+footer metadata without loading row groups, and implements
+`iter_parquet_rows(uri, columns, batch_size=2048)` as a bounded selected-column
+row iterator. The gate checks each Parquet footer's schema and row count before
+reading rows. `FilesystemArtifactReader` supports controlled staging and
+tests. Hash and manifest checks bind files to the supplied pins; they do not
+authenticate who produced a manifest or independently prove that its file list
+contains every object in the pinned source release. Adapters must build these
+lists from the frozen source tree or reference catalog, and keep per-polygon
+required-reference IDs complete. The gate also does not verify the scientific
+correctness of area measurements. Evaluation sampling must wait for the strict
+readiness gate to pass and for source-manifest provenance review.
 
 These checks bind shard contents to the supplied manifests and receipts. They
 do not authenticate who produced those records or verify the underlying

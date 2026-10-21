@@ -196,10 +196,19 @@ def _validate_pins(bundle: PoolBundle) -> list[str]:
 def _validate_source_pin(source: SourceSnapshot, issues: list[str]) -> None:
     if not _present(source.snapshot_id) or not _present(source.repository):
         issues.append("source snapshot id and repository must not be empty")
-    if not _present(source.revision) or not _valid_uri(source.pbf_uri):
-        issues.append("source revision and PBF URI must not be empty")
-    if not _valid_sha256(source.pbf_sha256):
-        issues.append("source PBF SHA-256 is invalid")
+    if not _present(source.revision):
+        issues.append("source revision must not be empty")
+    pbf_present = source.pbf_uri is not None or source.pbf_sha256 is not None
+    if pbf_present:
+        if (
+            not isinstance(source.pbf_uri, str)
+            or not _valid_uri(source.pbf_uri)
+            or not isinstance(source.pbf_sha256, str)
+            or not _valid_sha256(source.pbf_sha256)
+        ):
+            issues.append("source PBF URI and SHA-256 must form a valid artifact pin")
+    elif source.source_artifact_manifest is None:
+        issues.append("source snapshot needs a PBF pin or a frozen source artifact manifest")
 
 
 def _validate_raw_inventory_evidence(
