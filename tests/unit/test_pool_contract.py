@@ -637,13 +637,11 @@ def _stream_fixture_pool(
         scan_report_uri=scan_path.as_uri(),
         scan_report_sha256=hashlib.sha256(scan_bytes).hexdigest(),
     )
-    evidence_root = (
-        tmp_path / "evaluation-evidence" / f"{text_source.value}-{reference_system.value}"
-    )
-    raw_artifact_root = evidence_root / "raw-tree"
+    evidence_root = tmp_path / "evaluation-evidence"
+    raw_artifact_root = evidence_root / "raw-tree" / f"{text_source.value}-{len(source.polygons)}"
     pbf_path = raw_artifact_root / "source.osm.pbf"
     pbf_path.parent.mkdir(parents=True, exist_ok=True)
-    pbf_bytes = f"fixture PBF {text_source.value}/{reference_system.value}".encode()
+    pbf_bytes = f"fixture PBF {text_source.value}".encode()
     pbf_path.write_bytes(pbf_bytes)
     geometry_rows = []
     geometry_id_map = {}
@@ -679,7 +677,7 @@ def _stream_fixture_pool(
         },
     )
     reference_tree_pin, _ = _write_artifact_manifest(
-        evidence_root / "reference-tree",
+        evidence_root / "reference-tree" / reference_system.value,
         "reference-artifacts.jsonl",
         {
             "reference-tile-00.tif": b"fixture reference tile 00",
@@ -895,6 +893,7 @@ def _stream_nine_fixture_pools(
     return tuple(receipts)
 
 
+@pytest.mark.slow
 def test_streamed_nine_pool_gate_verifies_manifests_shards_and_inventory(tmp_path: Path):
     receipts = _stream_nine_fixture_pools(tmp_path, include_completed_unassigned=True)
 
