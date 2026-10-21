@@ -655,6 +655,7 @@ def test_export_is_deterministic_and_manifest_is_the_complete_marker(tmp_path):
     assert table.column("denominator").to_pylist() == [100.0, 100.0]
 
 
+@pytest.mark.slow
 def test_export_schema_metadata_uses_the_manifest_contract_version(tmp_path):
     bundle = build_full_pool(_pool_input(), contract_version="1.2.0")
     receipt = export_full_pool(bundle, FilesystemSink(tmp_path))
@@ -986,6 +987,7 @@ def test_streamed_nine_pool_gate_verifies_manifests_shards_and_inventory(tmp_pat
     assert "wiki-eunis" in incomplete.missing_pools
 
 
+@pytest.mark.slow
 def test_streamed_evaluation_gate_blocks_failed_partial_and_missing_reference_receipts(
     tmp_path: Path,
 ):
@@ -1084,6 +1086,7 @@ def test_filesystem_verified_reader_rejects_bad_pins_and_batch_sizes(tmp_path: P
         )
 
 
+@pytest.mark.slow
 def test_streamed_evaluation_gate_bounds_receipt_materialization(tmp_path: Path):
     receipt = _stream_fixture_pool(tmp_path)
     consumed = 0
@@ -1103,6 +1106,7 @@ def test_streamed_evaluation_gate_bounds_receipt_materialization(tmp_path: Path)
     assert consumed == 10
 
 
+@pytest.mark.slow
 def test_streamed_evaluation_gate_blocks_unread_pinned_reference_artifacts(tmp_path: Path):
     receipt = _stream_fixture_pool(tmp_path)
     manifest = json.loads(_file_uri_path(receipt.manifest_uri).read_text())
@@ -1122,6 +1126,7 @@ def test_streamed_evaluation_gate_blocks_unread_pinned_reference_artifacts(tmp_p
     assert "reference artifact could not be read" in issues
 
 
+@pytest.mark.slow
 def test_streamed_evaluation_gate_requires_artifact_lists_and_area_method(tmp_path: Path):
     receipt = _stream_fixture_pool(tmp_path)
 
@@ -1161,6 +1166,7 @@ def test_streamed_evaluation_gate_requires_artifact_lists_and_area_method(tmp_pa
     assert "area measurement method pin is incomplete" in issues
 
 
+@pytest.mark.slow
 def test_streamed_evaluation_gate_requires_explicit_area_geometry_settings(tmp_path: Path):
     receipt = _stream_fixture_pool(tmp_path)
 
@@ -1185,6 +1191,7 @@ def test_streamed_evaluation_gate_requires_explicit_area_geometry_settings(tmp_p
     assert "denominator output unit differs from the support unit" in issues
 
 
+@pytest.mark.slow
 def test_streamed_evaluation_gate_requires_pinned_pbf_in_source_manifest(tmp_path: Path):
     receipt = _stream_fixture_pool(tmp_path)
     manifest = json.loads(_file_uri_path(receipt.manifest_uri).read_text())
@@ -1211,6 +1218,7 @@ def test_streamed_evaluation_gate_requires_pinned_pbf_in_source_manifest(tmp_pat
     assert "raw source manifest omits the pinned PBF" in issues
 
 
+@pytest.mark.slow
 def test_streamed_evaluation_gate_accepts_a_pinned_non_pbf_source_tree(tmp_path: Path):
     receipt = _stream_fixture_pool(tmp_path)
     manifest = json.loads(_file_uri_path(receipt.manifest_uri).read_text())
@@ -1239,6 +1247,7 @@ def test_streamed_evaluation_gate_accepts_a_pinned_non_pbf_source_tree(tmp_path:
     assert readiness.missing_pools
 
 
+@pytest.mark.slow
 def test_streamed_evaluation_gate_checks_artifact_manifest_hash_order_and_count(
     tmp_path: Path,
 ):
@@ -1269,6 +1278,7 @@ def test_streamed_evaluation_gate_checks_artifact_manifest_hash_order_and_count(
     assert "artifact manifest lists 2 artifacts, expected 3" in issues
 
 
+@pytest.mark.slow
 def test_streamed_evaluation_gate_hashes_measurement_sidecars(tmp_path: Path):
     source = _pool_input(TextSource.DESCRIPTION, ReferenceSystem.WORLDCOVER)
     sidecar = tmp_path / "measurements.jsonl"
@@ -1300,6 +1310,7 @@ def test_streamed_evaluation_gate_hashes_measurement_sidecars(tmp_path: Path):
     assert "could not be read" in issues
 
 
+@pytest.mark.slow
 def test_streamed_evaluation_gate_rejects_malformed_artifact_manifest_rows(tmp_path: Path):
     receipt = _stream_fixture_pool(tmp_path)
     manifest = json.loads(_file_uri_path(receipt.manifest_uri).read_text())
@@ -1331,6 +1342,7 @@ def test_streamed_evaluation_gate_rejects_malformed_artifact_manifest_rows(tmp_p
     assert "rows are not canonical JSONL" in issues
 
 
+@pytest.mark.slow
 def test_streamed_evaluation_gate_rejects_invalid_and_empty_artifact_manifests(
     tmp_path: Path,
 ):
@@ -1369,6 +1381,7 @@ def test_streamed_evaluation_gate_rejects_invalid_and_empty_artifact_manifests(
     assert "lists 0 artifacts, expected 1" in empty_issues
 
 
+@pytest.mark.slow
 def test_streamed_evaluation_gate_blocks_unread_artifact_manifest(tmp_path: Path):
     receipt = _stream_fixture_pool(tmp_path)
     manifest = json.loads(_file_uri_path(receipt.manifest_uri).read_text())
@@ -1384,6 +1397,7 @@ def test_streamed_evaluation_gate_blocks_unread_artifact_manifest(tmp_path: Path
     assert "reference artifact manifest could not be read" in issues
 
 
+@pytest.mark.slow
 def test_streamed_gate_rejects_tampered_shard(tmp_path: Path):
     receipt = _stream_fixture_pool(tmp_path)
     manifest = json.loads(_file_uri_path(receipt.manifest_uri).read_text())
@@ -1427,6 +1441,7 @@ def _rewrite_streamed_receipt(
     )
 
 
+@pytest.mark.slow
 def test_streamed_gate_checks_parquet_footer_row_count_against_manifests(tmp_path: Path):
     receipt = _stream_fixture_pool(tmp_path)
     manifest = json.loads(_file_uri_path(receipt.manifest_uri).read_text())
@@ -1450,6 +1465,7 @@ def test_streamed_gate_checks_parquet_footer_row_count_against_manifests(tmp_pat
     )
 
 
+@pytest.mark.slow
 def test_streamed_gate_checks_parquet_footer_schema_against_contract(tmp_path: Path):
     receipt = _stream_fixture_pool(tmp_path)
     manifest = json.loads(_file_uri_path(receipt.manifest_uri).read_text())
@@ -1486,6 +1502,7 @@ def test_streamed_gate_checks_parquet_footer_schema_against_contract(tmp_path: P
     )
 
 
+@pytest.mark.slow
 def test_streamed_gate_reports_malformed_receipt_pool_id_after_read_failure(tmp_path: Path):
     receipt = _stream_fixture_pool(tmp_path)
     broken_uri = _file_uri_path(receipt.manifest_uri).with_suffix(".missing").as_uri()
