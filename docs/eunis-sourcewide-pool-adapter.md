@@ -11,9 +11,9 @@ select the rows in either stage.
 
 | Pool source | Raw polygon snapshot | Downstream relevance snapshot | Downstream text evidence |
 | --- | --- | --- | --- |
-| Description | `NoeFlandre/osm-polygon-description-tag` at `b4706eb315c66a8a57135289e7612dca8e03caf8`, `data/*.parquet` | `NoeFlandre/osm-polygon-description-tag-landuse` at `ce98b328f3c6543800a3d931877b51eb3f0cf768`, `labels/language-v1/data/*.parquet` | Description fields remain attached to raw rows. |
-| Website | `NoeFlandre/osm-polygon-website-tag` at `4cbddf95ce614e68d5ada8b94ca21bf9e48d39dd`, `polygons/*.parquet` | `NoeFlandre/osm-polygon-website-tag-landuse` at `e6524c711ee0033c3cd5990e5fdbbe4b89992dfb`, `labels/polygons/*.parquet` | Website fields remain attached to raw rows. |
-| Wiki | `NoeFlandre/osm-polygon-wikidata-and-wikipedia` at `d6fc058ccf4643bc5fe5bfd5c1c0bc403d3da801`, `polygons/*.parquet` | `NoeFlandre/osm-polygon-wikidata-and-wikipedia-landuse` at `49307aeb05b6dcc8a5d393f77f59a1e6d13a967a`, `labels/wikipedia/sentences/*.parquet` and `labels/wikivoyage/sentences/*.parquet` | `wikipedia/documents/*.parquet`, `polygon_document_links/*.parquet`, and `wikivoyage/sentences/*.parquet`. |
+| Description | `NoeFlandre/osm-polygon-description-tag` at `b4706eb315c66a8a57135289e7612dca8e03caf8`, `data/*.parquet` (386 shards; 746,727,545 bytes) | `NoeFlandre/osm-polygon-description-tag-landuse` at `ce98b328f3c6543800a3d931877b51eb3f0cf768`, `labels/language-v1/data/*.parquet` | Description fields remain attached to raw rows. |
+| Website | `NoeFlandre/osm-polygon-website-tag` at `4cbddf95ce614e68d5ada8b94ca21bf9e48d39dd`, `polygons/*.parquet` (386 shards; 3,943,775,497 bytes) | `NoeFlandre/osm-polygon-website-tag-landuse` at `e6524c711ee0033c3cd5990e5fdbbe4b89992dfb`, `labels/polygons/*.parquet` | Website fields remain attached to raw rows. |
+| Wiki | `NoeFlandre/osm-polygon-wikidata-and-wikipedia` at `d6fc058ccf4643bc5fe5bfd5c1c0bc403d3da801`, `polygons/*.parquet` (386 shards; 2,203,317,876 bytes) | `NoeFlandre/osm-polygon-wikidata-and-wikipedia-landuse` at `49307aeb05b6dcc8a5d393f77f59a1e6d13a967a`, `labels/wikipedia/sentences/*.parquet` and `labels/wikivoyage/sentences/*.parquet` | `wikipedia/documents/*.parquet`, `polygon_document_links/*.parquet`, and `wikivoyage/sentences/*.parquet`. |
 
 The [frozen source config at PR #159's reviewed commit](https://github.com/NoeFlandre/osm-polygon-eunis/blob/d96e0651f4d3ac97de4d73f6a6fee1e1294a7fe3/scripts/eunis_geometry_census_sources.py)
 records these repository IDs, revisions, and path globs. This is configuration
@@ -70,15 +70,28 @@ through row-addressed checkpoint URIs.
 `Name` rows. It links a code only to the longest proper code prefix present at
 a strictly lower level, following the hierarchy rule reviewed in PR #159. The
 parser is tested with repeated headers, multiple sheets, same-level prefixes,
-and conflicting or incomplete rows. The source-wide runner still requires an
-explicit map-code-to-L1/L2/L3 mapping. The parser does not select or fetch a
-workbook, because the workbook URL, crosswalk rows, and artifact checksum have
-not been verified against the classification record. The old classification
-URL is not used as a workbook URL.
+and conflicting or incomplete rows. `validate_classification_taxonomy_lineage()`
+checks a taxonomy cache against the pinned cache digest, classification record,
+workbook digest, and workbook-derived level/parent mapping. After validation,
+`make_eunis_taxonomy_from_classification()` creates explicit paths for direct
+L3 map codes and requires an L1 and L2 ancestor for every code. This uses the
+hierarchy only; no external habitat crosswalk is needed for L3-to-L2-to-L1
+rollups. The verified metadata pins are taxonomy cache SHA-256
+`223aa3fb89ac48cb5095e443433412c085e66fc54602e2c29253537455a2424f`, EEA
+classification record `bfe4c237-e378-4a83-ab21-b3807f96c2e2`, and workbook
+SHA-256 `1427d22db8d77d1053ab1683aa60713bdec3d810605dd6b7bc16683b4ca14665`.
+The cache does not retain the direct workbook URL or crosswalk values; the
+lineage validator requires the workbook bytes and checks their digest before
+accepting the cached hierarchy.
 
 Text link resolution is a separate helper. It retains linked, ambiguous,
 unmatched, and geometry-missing links without removing source inventory rows.
-It does not perform relevance selection, YES/NO balancing, H3 sampling, or
+The shared contract v1.1 also has typed `RelevanceAssessment` records for YES,
+NO, UNKNOWN, and MISSING. The EUNIS exporter does not yet emit documents, links,
+or relevance rows: the source-specific text schemas and revision-pinned
+manifests still need verification before implementing those joins. This keeps
+missing-link and relevance states available without guessing at label meaning.
+Neither the helper nor the contract performs YES/NO balancing, H3 sampling, or
 evaluation draws.
 
 ## Staging artifacts and integration boundary
@@ -92,22 +105,24 @@ scan report and attempt shards through the core file-artifact sink, constructs a
 global validation and writes the completion manifest last. Polygon geometry
 URIs point to the durable attempt-shard copy in the sink.
 
-This uses PR #165's streaming API added at `26a6ce9`; this branch is stacked on
-that open PR. The filesystem sink and deterministic source fixtures exercise
-the path locally. No source-wide production export or Hub publication was run.
-Text documents and YES/NO relevance remain downstream; the shared contract has
-no typed YES/NO relevance record yet, so this adapter does not encode that label
-as pool eligibility or a reference outcome.
+This uses PR #165's streaming API at contract 1.1.0, including one attempt
+receipt per raw key, support evidence for every label candidate, disk-backed
+validation, and a bounded nine-pool gate. The filesystem sink and deterministic
+source fixtures exercise this path locally. No source-wide production export
+or Hub publication was run. Text documents and YES/NO relevance remain
+downstream until their pinned manifests and schemas are verified; the existing
+raw-first census and EUNIS label attempts do not use relevance to select keys.
 
 ## Verification limits
 
 The implementation tests use deterministic local fixtures and do not download
-the 5 GB EEA raster set or source shards. Hub tree metadata reports 386 polygon
-shards per raw source, but the revision-specific raw manifests and shard bytes
-have not been validated in this work. Unique raw row counts and key-set hashes
-remain unknown. The EEA workbook URL, crosswalk rows, and artifact checksum also
-remain unverified. The parser exposes the reviewed prefix hierarchy rule, while
-the runner still accepts only an explicit taxonomy mapping whose digest matches
-the EEA taxonomy pin. Production attempts and exports remain gated until source
-manifest pins, the workbook artifact, and the complete code-to-path mapping are
-verified.
+the 5 GB EEA raster set or source shards. Pinned raw Hub trees contain 386
+polygon shards each; their metadata totals are 746,727,545 bytes for Description,
+3,943,775,497 bytes for Website, and 2,203,317,876 bytes for Wiki. These tree
+totals do not provide unique raw row counts or key-set hashes. The source
+manifest and individual shard hashes still need verification at the pinned
+revisions. The taxonomy lineage validator is implemented but the cached
+hierarchy and workbook bytes have not yet been transferred into this workspace
+for a production check. Production attempts and exports remain gated until raw
+manifests, the taxonomy lineage, and downstream text/relevance manifests and
+schemas are verified.

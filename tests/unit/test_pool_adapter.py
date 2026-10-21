@@ -8,6 +8,7 @@ import rasterio
 from rasterio.transform import from_origin
 from shapely.geometry import box
 
+from osm_polygon_eunis.eea import ClassificationTaxonomy, parse_classification_taxonomy_rows
 from osm_polygon_eunis.pool_adapter import (
     EEA_2021_ASSET_BYTES,
     EEA_2021_ASSET_COUNT,
@@ -20,6 +21,7 @@ from osm_polygon_eunis.pool_adapter import (
     EunisTaxonomyPath,
     PolygonDocumentEvidence,
     make_eunis_2021_reference_pin,
+    make_eunis_taxonomy_from_classification,
     resolve_eunis_labels,
     resolve_polygon_document_links,
 )
@@ -114,6 +116,49 @@ def test_taxonomy_groups_explicit_paths_without_guessing_code_prefixes() -> None
     assert groups[("L1", "A")] == ("C1", "C2")
     assert groups[("L2", "A1")] == ("C1",)
     assert groups[("L3", "C1")] == ("C1",)
+
+
+def test_eunis_taxonomy_paths_come_from_classification_parent_edges() -> None:
+    classification = parse_classification_taxonomy_rows(
+        [
+            ["Level", "Code", "Name"],
+            [1, "X", "Root X"],
+            [2, "X1", "Branch X1"],
+            [3, "X11", "Class X11"],
+            [3, "X12", "Class X12"],
+        ]
+    )
+
+    taxonomy = make_eunis_taxonomy_from_classification(
+        classification,
+        ("X12", "X11"),
+        taxonomy_id="fixture-eunis",
+        taxonomy_revision="classification-record:fixture;workbook-sha256:" + "a" * 64,
+        taxonomy_sha256="b" * 64,
+    )
+
+    assert taxonomy.paths_by_direct_code == {
+        "X11": EunisTaxonomyPath("X", "X1", "X11"),
+        "X12": EunisTaxonomyPath("X", "X1", "X12"),
+    }
+    assert taxonomy.support_groups()[("L2", "X1")] == ("X11", "X12")
+
+
+def test_eunis_taxonomy_requires_a_complete_l1_l2_l3_path() -> None:
+    classification = ClassificationTaxonomy(
+        labels={"X": "Root X", "X11": "Class X11"},
+        levels={"X": 1, "X11": 3},
+        parents={"X11": "X"},
+    )
+
+    with pytest.raises(ValueError, match="lacks one L1-L2-L3 parent path"):
+        make_eunis_taxonomy_from_classification(
+            classification,
+            ("X11",),
+            taxonomy_id="fixture-eunis",
+            taxonomy_revision="classification-fixture-v1",
+            taxonomy_sha256="c" * 64,
+        )
 
 
 def test_pool_sources_cover_the_three_raw_text_sources_with_wiki_artifacts_downstream() -> None:

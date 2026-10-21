@@ -43,6 +43,11 @@ _DEFAULT_CATALOG_API = "https://sdi.eea.europa.eu/catalogue/datahub/api/records"
 _DEFAULT_WEBDAV_HOST = "sdi.eea.europa.eu"
 _RASTER_SUFFIXES = (".tif", ".tiff")
 _VECTOR_SUFFIX = ".gpkg"
+EEA_2021_TAXONOMY_CACHE_SHA256 = "223aa3fb89ac48cb5095e443433412c085e66fc54602e2c29253537455a2424f"
+EEA_2021_CLASSIFICATION_RECORD_ID = "bfe4c237-e378-4a83-ab21-b3807f96c2e2"
+EEA_2021_CLASSIFICATION_WORKBOOK_SHA256 = (
+    "1427d22db8d77d1053ab1683aa60713bdec3d810605dd6b7bc16683b4ca14665"
+)
 _WEBDAV_DEPTH = "1"
 _XLSX_MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _HTTP_RETRY_ATTEMPTS = 3
@@ -51,7 +56,13 @@ _HTTP_TOO_MANY_REQUESTS = 429
 _HTTP_SERVER_ERROR_MIN = 500
 _HTTP_STATUS_CODE_LIMIT = 600
 __all__ = [
+    "EEA_2021_CLASSIFICATION_LINEAGE_PIN",
+    "EEA_2021_CLASSIFICATION_RECORD_ID",
+    "EEA_2021_CLASSIFICATION_WORKBOOK_SHA256",
+    "EEA_2021_TAXONOMY_CACHE_SHA256",
     "ClassificationTaxonomy",
+    "ClassificationTaxonomyCacheLineage",
+    "ClassificationTaxonomyLineagePin",
     "EeaGroup",
     "RemoteAsset",
     "WebDavEntry",
@@ -59,6 +70,7 @@ __all__ = [
     "parse_classification_taxonomy_workbook",
     "resolve_config",
     "resolve_config_data",
+    "validate_classification_taxonomy_lineage",
 ]
 
 
@@ -148,6 +160,78 @@ class ClassificationTaxonomy:
         """Return the highest parsed ancestor, treating unknown codes as roots."""
 
         return self.ancestors_including_self(code)[-1]
+
+
+@dataclass(frozen=True, slots=True)
+class ClassificationTaxonomyCacheLineage:
+    """Record and workbook identity decoded from a taxonomy cache artifact."""
+
+    classification_record_id: str
+    workbook_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class ClassificationTaxonomyLineagePin:
+    """Immutable EEA cache, classification record, and workbook digests."""
+
+    cache_sha256: str
+    classification_record_id: str
+    workbook_sha256: str
+
+
+EEA_2021_CLASSIFICATION_LINEAGE_PIN = ClassificationTaxonomyLineagePin(
+    cache_sha256=EEA_2021_TAXONOMY_CACHE_SHA256,
+    classification_record_id=EEA_2021_CLASSIFICATION_RECORD_ID,
+    workbook_sha256=EEA_2021_CLASSIFICATION_WORKBOOK_SHA256,
+)
+
+
+def validate_classification_taxonomy_lineage(
+    cached_taxonomy: ClassificationTaxonomy,
+    cache_payload: bytes,
+    workbook_payload: bytes,
+    cache_lineage: ClassificationTaxonomyCacheLineage,
+    expected: ClassificationTaxonomyLineagePin = EEA_2021_CLASSIFICATION_LINEAGE_PIN,
+    *,
+    supplemental_labels: Mapping[str, str] | None = None,
+) -> ClassificationTaxonomy:
+    """Verify a decoded taxonomy cache against its pinned workbook lineage.
+
+    ``cached_taxonomy`` must be decoded from ``cache_payload``. The cache's
+    hierarchy and workbook labels are compared with a fresh parse of the
+    checksum-pinned workbook; supplemental cache labels may be retained.
+    """
+
+    actual_cache_sha256 = hashlib.sha256(cache_payload).hexdigest()
+    if actual_cache_sha256 != expected.cache_sha256:
+        raise ValueError("classification taxonomy cache checksum does not match its pin")
+    actual_workbook_sha256 = hashlib.sha256(workbook_payload).hexdigest()
+    if actual_workbook_sha256 != expected.workbook_sha256:
+        raise ValueError("classification workbook checksum does not match its pin")
+    if cache_lineage.classification_record_id != expected.classification_record_id:
+        raise ValueError("classification taxonomy cache references another EEA record")
+    if cache_lineage.workbook_sha256 != actual_workbook_sha256:
+        raise ValueError("classification taxonomy cache points to another workbook")
+
+    workbook_taxonomy = parse_classification_taxonomy_workbook(
+        workbook_payload,
+        supplemental_labels=supplemental_labels,
+    )
+    if (
+        cached_taxonomy.levels != workbook_taxonomy.levels
+        or cached_taxonomy.parents != workbook_taxonomy.parents
+    ):
+        raise ValueError("cached EUNIS levels or parent hierarchy differs from the workbook")
+    mismatched_labels = sorted(
+        code
+        for code, name in workbook_taxonomy.labels.items()
+        if cached_taxonomy.labels.get(code) != name
+    )
+    if mismatched_labels:
+        raise ValueError(
+            "cached EUNIS labels differ from the workbook for " + ", ".join(mismatched_labels)
+        )
+    return cached_taxonomy
 
 
 @dataclass(frozen=True, slots=True)

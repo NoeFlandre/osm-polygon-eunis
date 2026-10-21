@@ -307,6 +307,7 @@ def test_label_attempts_follow_raw_inventory_and_keep_missing_geometry_outcome(
 
     assert reference.query_count == 1
     assert attempts.shards[0].row_count == raw.evidence.expected_key_count == 2
+    assert dict(attempts.shards[0].attempt_counts) == {"completed": 1, "excluded": 1}
     assert dict(attempts.shards[0].outcome_counts) == {
         "L1:assigned": 1,
         "L2:assigned": 1,
@@ -320,8 +321,15 @@ def test_label_attempts_follow_raw_inventory_and_keep_missing_geometry_outcome(
     assert len({row["inventory"]["inventory_row_id"] for row in rows}) == 2
     missing = next(row for row in rows if row["inventory"]["exclusion_reason"])
     assert missing["inventory"]["exclusion_reason"] == "missing_geometry"
+    assert missing["attempt_receipt"]["status"] == "excluded"
+    assert missing["attempt_receipt"]["reason"] == "missing_geometry"
+    assert missing["attempt_receipt"]["attempted_reference_ids"] == []
     assert [item["status"] for item in missing["outcomes"]] == ["excluded"] * 3
     usable = next(row for row in rows if row["polygon"] is not None)
+    assert usable["attempt_receipt"]["status"] == "completed"
+    assert usable["attempt_receipt"]["attempted_reference_ids"] == ["C1"]
+    assert len(usable["support_evidence"]) == len(usable["candidates"]) == 3
+    assert {tuple(item["reference_ids"]) for item in usable["support_evidence"]} == {("C1",)}
     assert usable["polygon"]["geometry_uri"].startswith("file://")
     assert usable["projected_geometry_wkb_base64"]
     projected_wkb = read_projected_geometry_wkb(usable["polygon"]["geometry_uri"])
@@ -333,6 +341,7 @@ def test_label_attempts_follow_raw_inventory_and_keep_missing_geometry_outcome(
     }
     report = json.loads(Path(attempts.report_uri.removeprefix("file://")).read_text())
     assert report["total_attempted_polygons"] == 2
+    assert report["attempt_counts_by_status"] == dict(attempts.shards[0].attempt_counts)
     assert report["outcome_counts_by_level_status"] == dict(attempts.shards[0].outcome_counts)
 
 
@@ -351,6 +360,8 @@ def test_query_error_is_excluded_with_reason_at_every_supported_level(tmp_path: 
 
     assert [item["status"] for item in row["outcomes"]] == ["excluded"] * 3
     assert {item["reason"] for item in row["outcomes"]} == {"reference_query_error:RuntimeError"}
+    assert row["attempt_receipt"]["status"] == "failed"
+    assert row["attempt_receipt"]["reason"] == "reference_query_error:RuntimeError"
 
 
 def test_eunis_attempts_export_through_bounded_shared_streaming_contract(
@@ -374,7 +385,7 @@ def test_eunis_attempts_export_through_bounded_shared_streaming_contract(
     exported = export_eunis_pool(
         attempts,
         FilesystemStreamingSink(sink_root),
-        limits=StreamingLimits(max_batch_rows=8),
+        limits=StreamingLimits(max_batch_rows=16),
         staging_directory=tmp_path,
     )
 
@@ -411,6 +422,14 @@ def test_eunis_attempts_export_through_bounded_shared_streaming_contract(
     assert geometry_uri.startswith(exported.attempt_checkpoint_uris[0][1] + "#row=")
     projected_wkb = read_projected_geometry_wkb(geometry_uri)
     assert hashlib.sha256(projected_wkb).hexdigest() == polygon_table["geometry_sha256"][0].as_py()
+    attempt_shard = next(row for row in shard_rows if row["table"] == "polygon_attempts")
+    attempt_table = pq.read_table(sink_root / attempt_shard["path"])
+    assert attempt_table.num_rows == raw_scan.evidence.expected_key_count
+    support_shard = next(row for row in shard_rows if row["table"] == "label_support_evidence")
+    support_table = pq.read_table(sink_root / support_shard["path"])
+    assert support_table.num_rows == sum(
+        count for _level, count in attempts.shards[0].candidate_counts
+    )
 
 
 def test_invalid_attempt_signature_is_recomputed_from_cached_raw_inventory(

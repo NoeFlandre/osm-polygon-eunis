@@ -8,6 +8,12 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from math import isfinite
 
+from .eea import (
+    EEA_2021_TAXONOMY_CACHE_SHA256 as EEA_2021_TAXONOMY_SHA256,
+)
+from .eea import (
+    ClassificationTaxonomy,
+)
 from .pool_contract import (
     AmbiguityBasis,
     AssignmentKind,
@@ -37,8 +43,8 @@ EUNIS_POOL_LEVELS = (
 EUNIS_ASSIGNMENT_RULE_VERSION = "eea-positive-cell-union-80pct-v1"
 EUNIS_THRESHOLD = 0.8
 EUNIS_SUPPORT_SEMANTICS = SupportSemantics.MODELED_HABITAT_SUPPORT
+_EUNIS_DIRECT_MAP_LEVEL = 3
 EEA_2021_NATIVE_MANIFEST_SHA256 = "4a91e553b2e0271e7ca935e542dd092fe45288c5f9bb4a09f40f6b74da4eae22"
-EEA_2021_TAXONOMY_SHA256 = "223aa3fb89ac48cb5095e443433412c085e66fc54602e2c29253537455a2424f"
 EEA_2021_ASSET_COUNT = 136
 EEA_2021_ASSET_BYTES = 5_007_209_626
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -170,6 +176,39 @@ def hierarchy_support_groups(
     """Expose map groups for direct L3 plus independently rolled-up L1/L2."""
 
     return taxonomy.support_groups()
+
+
+def make_eunis_taxonomy_from_classification(
+    classification: ClassificationTaxonomy,
+    direct_codes: Iterable[str],
+    *,
+    taxonomy_id: str,
+    taxonomy_revision: str,
+    taxonomy_sha256: str,
+) -> EunisTaxonomy:
+    """Build explicit map-code paths from a verified classification hierarchy."""
+
+    codes = tuple(sorted(set(direct_codes)))
+    if not codes:
+        raise ValueError("EEA direct map codes must be present")
+    paths: dict[str, EunisTaxonomyPath] = {}
+    for code in codes:
+        if classification.levels.get(code) != _EUNIS_DIRECT_MAP_LEVEL:
+            raise ValueError(f"EEA direct map code {code} is not a classification L3 code")
+        by_level = {
+            classification.levels[ancestor]: ancestor
+            for ancestor in classification.ancestors_including_self(code)
+            if ancestor in classification.levels and classification.levels[ancestor] in {1, 2, 3}
+        }
+        if set(by_level) != {1, 2, 3} or by_level[3] != code:
+            raise ValueError(f"EEA direct map code {code} lacks one L1-L2-L3 parent path")
+        paths[code] = EunisTaxonomyPath(by_level[1], by_level[2], by_level[3])
+    return EunisTaxonomy(
+        taxonomy_id=taxonomy_id,
+        taxonomy_revision=taxonomy_revision,
+        taxonomy_sha256=taxonomy_sha256,
+        paths_by_direct_code=paths,
+    )
 
 
 def make_eunis_2021_reference_pin(taxonomy: EunisTaxonomy) -> ReferencePin:

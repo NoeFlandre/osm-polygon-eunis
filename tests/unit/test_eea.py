@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import logging
@@ -13,6 +14,9 @@ import pytest
 from osm_polygon_eunis import eea
 from osm_polygon_eunis._protocols import HttpClient
 from osm_polygon_eunis.eea import (
+    ClassificationTaxonomy,
+    ClassificationTaxonomyCacheLineage,
+    ClassificationTaxonomyLineagePin,
     RemoteAsset,
     WebDavEntry,
     _classification_folder,
@@ -34,6 +38,7 @@ from osm_polygon_eunis.eea import (
     raster_assets_from_entries,
     resolve_classification_labels,
     resolve_group,
+    validate_classification_taxonomy_lineage,
 )
 
 
@@ -137,6 +142,77 @@ def test_classification_taxonomy_rejects_invalid_levels_and_conflicting_rows() -
     with pytest.raises(ValueError, match="missing name"):
         parse_classification_taxonomy_rows(
             [["Level", "Code", "Name"], [1, "Q1", "Root"], [2, "Q11", ""]]
+        )
+
+
+def test_cached_classification_hierarchy_must_match_pinned_workbook_lineage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workbook_taxonomy = parse_classification_taxonomy_rows(
+        [
+            ["Level", "Code", "Name"],
+            [1, "A", "Root A"],
+            [2, "A1", "Branch A1"],
+            [3, "A11", "Class A11"],
+        ]
+    )
+    workbook_payload = b"pinned workbook fixture"
+    cache_payload = b"pinned cache fixture"
+    workbook_sha256 = hashlib.sha256(workbook_payload).hexdigest()
+    cache_sha256 = hashlib.sha256(cache_payload).hexdigest()
+    monkeypatch.setattr(
+        eea,
+        "parse_classification_taxonomy_workbook",
+        lambda _payload, *, supplemental_labels=None: workbook_taxonomy,
+    )
+
+    verified = validate_classification_taxonomy_lineage(
+        workbook_taxonomy,
+        cache_payload,
+        workbook_payload,
+        ClassificationTaxonomyCacheLineage("fixture-record", workbook_sha256),
+        ClassificationTaxonomyLineagePin(cache_sha256, "fixture-record", workbook_sha256),
+    )
+
+    assert verified == workbook_taxonomy
+
+
+def test_cached_classification_hierarchy_rejects_changed_parent_edges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workbook_taxonomy = parse_classification_taxonomy_rows(
+        [
+            ["Level", "Code", "Name"],
+            [1, "A", "Root A"],
+            [2, "A1", "Branch A1"],
+            [3, "A11", "Class A11"],
+        ]
+    )
+    changed_cache = ClassificationTaxonomy(
+        labels=workbook_taxonomy.labels,
+        levels=workbook_taxonomy.levels,
+        parents={"A11": "A"},
+    )
+    workbook_payload = b"workbook"
+    cache_payload = b"cache"
+    workbook_sha256 = hashlib.sha256(workbook_payload).hexdigest()
+    monkeypatch.setattr(
+        eea,
+        "parse_classification_taxonomy_workbook",
+        lambda _payload, *, supplemental_labels=None: workbook_taxonomy,
+    )
+
+    with pytest.raises(ValueError, match="parent hierarchy differs"):
+        validate_classification_taxonomy_lineage(
+            changed_cache,
+            cache_payload,
+            workbook_payload,
+            ClassificationTaxonomyCacheLineage("fixture-record", workbook_sha256),
+            ClassificationTaxonomyLineagePin(
+                hashlib.sha256(cache_payload).hexdigest(),
+                "fixture-record",
+                workbook_sha256,
+            ),
         )
 
 

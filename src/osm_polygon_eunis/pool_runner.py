@@ -42,11 +42,14 @@ from .pool_adapter import (
 from .pool_contract import (
     AmbiguityBasis,
     AssignmentKind,
+    AttemptStatus,
     FileArtifactSink,
     GeometryStatus,
     LabelCandidate,
     LabelOutcome,
+    LabelSupportEvidence,
     OutcomeStatus,
+    PolygonAttemptReceipt,
     PolygonInventoryRow,
     PolygonSnapshot,
     PoolBatch,
@@ -72,7 +75,8 @@ from .raster_reference import RasterReference
 _KEY_FIELDS = ("source_pbf", "osm_type", "osm_id")
 _GEOMETRY_FIELD = "geometry"
 _RAW_CHECKPOINT_VERSION = 1
-_ATTEMPT_CHECKPOINT_VERSION = 1
+_ATTEMPT_CHECKPOINT_VERSION = 2
+_EEA_REFERENCE_ID_NAMESPACE = "eea-eunis-2021-probability-map-l3-code"
 _ENUMERATION_RULE = (
     "enumerate every geometry row from every pinned polygon shard before any text, "
     "document-link, YES/NO, or relevance join; native key is (source_pbf, osm_type, osm_id)"
@@ -152,6 +156,7 @@ class AttemptShardReceipt:
     checkpoint_uri: str
     checkpoint_sha256: str
     row_count: int
+    attempt_counts: tuple[tuple[str, int], ...]
     outcome_counts: tuple[tuple[str, int], ...]
     candidate_counts: tuple[tuple[str, int], ...]
 
@@ -191,6 +196,8 @@ class _PoolBatchAccumulator:
     polygons: list[PolygonSnapshot] = dataclass_field(default_factory=list)
     candidates: list[LabelCandidate] = dataclass_field(default_factory=list)
     outcomes: list[LabelOutcome] = dataclass_field(default_factory=list)
+    attempts: list[PolygonAttemptReceipt] = dataclass_field(default_factory=list)
+    support_evidence: list[LabelSupportEvidence] = dataclass_field(default_factory=list)
     current_rows: int = 0
     current_polygons: int = 0
 
@@ -200,10 +207,14 @@ class _PoolBatchAccumulator:
         polygon: PolygonSnapshot | None,
         candidates: tuple[LabelCandidate, ...],
         outcomes: tuple[LabelOutcome, ...],
+        attempt: PolygonAttemptReceipt,
+        support_evidence: tuple[LabelSupportEvidence, ...],
     ) -> PoolBatch | None:
         """Append one raw polygon attempt, flushing a full batch first."""
 
-        row_count = 1 + int(polygon is not None) + len(candidates) + len(outcomes)
+        row_count = (
+            2 + int(polygon is not None) + len(candidates) + len(outcomes) + len(support_evidence)
+        )
         if row_count > self.limits.max_batch_rows:
             raise ValueError(
                 f"one polygon attempt has {row_count} rows, exceeding the configured "
@@ -220,6 +231,8 @@ class _PoolBatchAccumulator:
             self.polygons.append(polygon)
         self.candidates.extend(candidates)
         self.outcomes.extend(outcomes)
+        self.attempts.append(attempt)
+        self.support_evidence.extend(support_evidence)
         self.current_rows += row_count
         self.current_polygons += 1
         return previous
@@ -235,12 +248,16 @@ class _PoolBatchAccumulator:
             polygons=tuple(self.polygons),
             label_candidates=tuple(self.candidates),
             label_outcomes=tuple(self.outcomes),
+            attempt_receipts=tuple(self.attempts),
+            support_evidence=tuple(self.support_evidence),
         )
         self.batch_index += 1
         self.inventory.clear()
         self.polygons.clear()
         self.candidates.clear()
         self.outcomes.clear()
+        self.attempts.clear()
+        self.support_evidence.clear()
         self.current_rows = 0
         self.current_polygons = 0
         return batch
@@ -451,7 +468,7 @@ def export_eunis_pool(
     *,
     limits: StreamingLimits | None = None,
     staging_directory: Path | None = None,
-    contract_version: str = "1.0.0",
+    contract_version: str = "1.1.0",
     pool_version: str = "1.0.0",
 ) -> EunisPoolExport:
     """Finalize one EUNIS source pool from bounded per-shard attempt records.
@@ -675,6 +692,8 @@ def _validate_attempt_report(
         row = observed[shard.path_in_repo]
         if (
             row.get("row_count") != shard.row_count
+            or tuple((str(key), int(value)) for key, value in row["attempt_counts"])
+            != shard.attempt_counts
             or row.get("checkpoint_sha256") != shard.checkpoint_sha256
             or tuple((str(key), int(value)) for key, value in row["outcome_counts"])
             != shard.outcome_counts
@@ -692,7 +711,7 @@ def _iter_eunis_pool_batches(
     limits: StreamingLimits,
 ) -> Iterator[PoolBatch]:
     code_count = len(attempts.taxonomy.paths_by_direct_code)
-    max_rows_per_polygon = 5 + 3 * code_count
+    max_rows_per_polygon = 6 + 6 * code_count
     polygons_per_batch = max(1, limits.max_batch_rows // max_rows_per_polygon)
     if limits.max_batch_bytes < StreamingLimits().max_batch_bytes:
         polygons_per_batch = 1
@@ -705,12 +724,19 @@ def _iter_eunis_pool_batches(
         source_path = _local_file_uri_path(shard.checkpoint_uri)
         shard_rows = 0
         for row_number, record in enumerate(_read_jsonl(source_path)):
-            inventory, polygon, candidates, outcomes = _pool_batch_row(
+            inventory, polygon, candidates, outcomes, attempt, support_evidence = _pool_batch_row(
                 record,
                 durable_uri,
                 row_number,
             )
-            completed = accumulator.add(inventory, polygon, candidates, outcomes)
+            completed = accumulator.add(
+                inventory,
+                polygon,
+                candidates,
+                outcomes,
+                attempt,
+                support_evidence,
+            )
             if completed is not None:
                 yield completed
             shard_rows += 1
@@ -736,14 +762,20 @@ def _pool_batch_row(
     PolygonSnapshot | None,
     tuple[LabelCandidate, ...],
     tuple[LabelOutcome, ...],
+    PolygonAttemptReceipt,
+    tuple[LabelSupportEvidence, ...],
 ]:
     inventory = _inventory_from_json(record["inventory"])
     geometry_uri = f"{checkpoint_uri}#row={row_number}/projected_geometry_wkb"
     polygon = _polygon_from_json(record["polygon"], geometry_uri)
     candidates = tuple(_candidate_from_json(item) for item in record["candidates"])
     outcomes = tuple(_outcome_from_json(item) for item in record["outcomes"])
+    attempt = _attempt_receipt_from_json(record["attempt_receipt"])
+    support_evidence = tuple(
+        _support_evidence_from_json(item) for item in record["support_evidence"]
+    )
     _verify_projected_geometry(record, polygon)
-    return inventory, polygon, candidates, outcomes
+    return inventory, polygon, candidates, outcomes, attempt, support_evidence
 
 
 def _inventory_from_json(value: dict[str, Any]) -> PolygonInventoryRow:
@@ -813,6 +845,27 @@ def _outcome_from_json(value: dict[str, Any]) -> LabelOutcome:
         ambiguity_basis=(
             AmbiguityBasis(str(value["ambiguity_basis"])) if value["ambiguity_basis"] else None
         ),
+    )
+
+
+def _attempt_receipt_from_json(value: dict[str, Any]) -> PolygonAttemptReceipt:
+    return PolygonAttemptReceipt(
+        inventory_row_id=str(value["inventory_row_id"]),
+        status=AttemptStatus(str(value["status"])),
+        reference_id_namespace=str(value["reference_id_namespace"]),
+        attempted_reference_ids=tuple(str(item) for item in value["attempted_reference_ids"]),
+        missing_reference_ids=tuple(str(item) for item in value["missing_reference_ids"]),
+        reason=str(value["reason"]) if value["reason"] else None,
+    )
+
+
+def _support_evidence_from_json(value: dict[str, Any]) -> LabelSupportEvidence:
+    return LabelSupportEvidence(
+        inventory_row_id=str(value["inventory_row_id"]),
+        level=str(value["level"]),
+        code=str(value["code"]),
+        reference_id_namespace=str(value["reference_id_namespace"]),
+        reference_ids=tuple(str(item) for item in value["reference_ids"]),
     )
 
 
@@ -927,6 +980,7 @@ def _write_attempt_shard(
     sidecar_path = output_path.with_suffix(".done.json")
     raw_path = _local_file_uri_path(raw_shard.checkpoint_uri)
     temporary_path = output_path.with_name(f".{output_path.name}.partial")
+    attempt_counts: Counter[str] = Counter()
     outcome_counts: Counter[str] = Counter()
     candidate_counts: Counter[str] = Counter()
     row_count = 0
@@ -947,6 +1001,7 @@ def _write_attempt_shard(
                 )
                 output.write(_canonical_json_bytes(record))
                 row_count += 1
+                attempt_counts[record["attempt_receipt"]["status"]] += 1
                 for item in record["outcomes"]:
                     outcome_counts[f"{item['level']}:{item['status']}"] += 1
                 for item in record["candidates"]:
@@ -964,6 +1019,7 @@ def _write_attempt_shard(
         checkpoint_uri=output_path.resolve().as_uri(),
         checkpoint_sha256=_sha256_file(output_path),
         row_count=row_count,
+        attempt_counts=tuple(sorted(attempt_counts.items())),
         outcome_counts=tuple(sorted(outcome_counts.items())),
         candidate_counts=tuple(sorted(candidate_counts.items())),
     )
@@ -978,6 +1034,7 @@ def _write_attempt_shard(
                 "checkpoint_uri": receipt.checkpoint_uri,
                 "checkpoint_sha256": receipt.checkpoint_sha256,
                 "row_count": row_count,
+                "attempt_counts": receipt.attempt_counts,
                 "outcome_counts": receipt.outcome_counts,
                 "candidate_counts": receipt.candidate_counts,
             }
@@ -1050,12 +1107,10 @@ def _attempt_raw_row(
     )
     support_areas = None
     query_error = None
+    support_groups = hierarchy_support_groups(context.taxonomy)
     if polygon is not None and projected is not None:
         try:
-            support_areas = context.reference.support_areas(
-                projected,
-                hierarchy_support_groups(context.taxonomy),
-            )
+            support_areas = context.reference.support_areas(projected, support_groups)
         except _REFERENCE_ERRORS as error:
             query_error = f"reference_query_error:{type(error).__name__}"
     candidates, outcomes = resolve_eunis_labels(
@@ -1070,6 +1125,31 @@ def _attempt_raw_row(
             exclusion_reason=geometry_reason,
         )
     )
+    attempt_receipt = PolygonAttemptReceipt(
+        inventory_row_id=inventory_id,
+        status=(
+            AttemptStatus.EXCLUDED
+            if geometry_reason is not None
+            else AttemptStatus.FAILED
+            if query_error is not None
+            else AttemptStatus.COMPLETED
+        ),
+        reference_id_namespace=_EEA_REFERENCE_ID_NAMESPACE,
+        attempted_reference_ids=(
+            tuple(sorted(context.reference.layer_codes)) if polygon is not None else ()
+        ),
+        reason=geometry_reason or query_error,
+    )
+    support_evidence = tuple(
+        LabelSupportEvidence(
+            inventory_row_id=candidate.inventory_row_id,
+            level=candidate.level,
+            code=candidate.code,
+            reference_id_namespace=_EEA_REFERENCE_ID_NAMESPACE,
+            reference_ids=support_groups[(candidate.level, candidate.code)],
+        )
+        for candidate in candidates
+    )
     return {
         "inventory": _inventory_json(inventory),
         "polygon": _polygon_json(polygon),
@@ -1081,6 +1161,8 @@ def _attempt_raw_row(
         ),
         "candidates": [_candidate_json(candidate) for candidate in candidates],
         "outcomes": [_outcome_json(outcome) for outcome in outcomes],
+        "attempt_receipt": _attempt_receipt_json(attempt_receipt),
+        "support_evidence": [_support_evidence_json(item) for item in support_evidence],
     }
 
 
@@ -1093,9 +1175,11 @@ def _attempt_summary(
     receipts: list[AttemptShardReceipt],
 ) -> dict[str, Any]:
     total_rows = sum(receipt.row_count for receipt in receipts)
+    attempts: Counter[str] = Counter()
     outcomes: Counter[str] = Counter()
     candidates: Counter[str] = Counter()
     for receipt in receipts:
+        attempts.update(dict(receipt.attempt_counts))
         outcomes.update(dict(receipt.outcome_counts))
         candidates.update(dict(receipt.candidate_counts))
     expected_level_rows = total_rows * sum(level.supported for level in EUNIS_POOL_LEVELS)
@@ -1116,6 +1200,7 @@ def _attempt_summary(
         "builder_revision": code_pin.builder_revision,
         "signature": signature,
         "total_attempted_polygons": total_rows,
+        "attempt_counts_by_status": dict(sorted(attempts.items())),
         "supported_levels": [level.name for level in EUNIS_POOL_LEVELS if level.supported],
         "outcome_counts_by_level_status": dict(sorted(outcomes.items())),
         "candidate_counts_by_level": dict(sorted(candidates.items())),
@@ -1285,6 +1370,9 @@ def _valid_attempt_checkpoint(
             checkpoint_uri=checkpoint_path.resolve().as_uri(),
             checkpoint_sha256=str(sidecar["checkpoint_sha256"]),
             row_count=int(sidecar["row_count"]),
+            attempt_counts=tuple(
+                (str(key), int(value)) for key, value in sidecar["attempt_counts"]
+            ),
             outcome_counts=tuple(
                 (str(key), int(value)) for key, value in sidecar["outcome_counts"]
             ),
@@ -1444,6 +1532,16 @@ def _candidate_json(row: LabelCandidate) -> dict[str, Any]:
     result["assignment_kind"] = row.assignment_kind.value
     result["support_semantics"] = row.support_semantics.value
     return result
+
+
+def _attempt_receipt_json(row: PolygonAttemptReceipt) -> dict[str, Any]:
+    result = asdict(row)
+    result["status"] = row.status.value
+    return result
+
+
+def _support_evidence_json(row: LabelSupportEvidence) -> dict[str, Any]:
+    return asdict(row)
 
 
 def _outcome_json(row: LabelOutcome) -> dict[str, Any]:
