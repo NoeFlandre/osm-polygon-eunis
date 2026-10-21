@@ -76,15 +76,14 @@ unsupported until finer map evidence exists.
 
 ## Build and export API
 
-Source-specific adapters stay separate from this package. There is no
-core-owned loader protocol: an adapter constructs one complete `PoolBuildInput`
-and calls `build_full_pool`. The required input fields are `pool_key`,
-`source_snapshot`, `raw_inventory_evidence`, `reference_pin`, `adapter_id`,
-`adapter_revision`, `builder_revision`, `inventory`, `polygons`, `levels`,
-`label_candidates`, and `label_outcomes`. The optional tables are `documents`,
-`text_polygon_links`, `entity_links`, and `eligibility`. The input inventory
-must come from the full raw polygon snapshot before any text or evaluation
-filtering.
+Source-specific adapters stay separate from this package. For fixtures and
+small pools, an adapter can construct one complete `PoolBuildInput` and call
+`build_full_pool`. Its required fields are `pool_key`, `source_snapshot`,
+`raw_inventory_evidence`, `reference_pin`, `adapter_id`, `adapter_revision`,
+`builder_revision`, `inventory`, `polygons`, `levels`, `label_candidates`, and
+`label_outcomes`. The optional tables are `documents`, `text_polygon_links`,
+`entity_links`, and `eligibility`. The input inventory must come from the full
+raw polygon snapshot before any text or evaluation filtering.
 
 `raw_inventory_evidence` is also required. It pins the unfiltered enumeration
 rule and scan-report URI/hash, expected raw key count, and SHA-256 of the
@@ -102,7 +101,7 @@ The public record types include `PoolKey`, `SourceSnapshot`,
 `EvaluationTrace`, and `SplitAssignment` are separate downstream types. The
 complete API is re-exported from `osm_polygon_eunis.pool_contract`.
 
-Construct `PoolBuildInput` with all records, then call:
+The in-memory API constructs `PoolBuildInput` with all records, then calls:
 
 ```python
 from osm_polygon_eunis.pool_contract import (
@@ -122,36 +121,81 @@ receipt = export_full_pool(bundle, FilesystemSink(output_directory))
 
 `build_full_pool` sorts records deterministically and computes manifest counts;
 it does not select, drop, or label polygons. `validate_full_pool` checks the
-whole inventory, including processed decisions, candidates, assignments,
-ambiguous outcomes, and exclusions at every supported level. Export validates
-again and writes explicit Arrow schemas as Parquet tables plus a canonical JSON
-manifest containing table hashes. `PoolArtifactSink` is the adapter point for a
-future cloud sink. Export does not publish to Hugging Face or choose credentials.
-The v1 builder and exporter currently materialize the supplied pool and encoded
-table payloads in memory. Add a batch or streaming path before running them on
-full-source snapshots that exceed worker memory.
+whole inventory and decisions. `export_full_pool` validates again and writes
+explicit Arrow schemas as Parquet tables plus a canonical JSON manifest.
+`PoolArtifactSink` is the in-memory exporter interface.
+
+For full source snapshots, use the disk-backed streaming API. Create a
+`PoolStreamSpec` from the pool-wide metadata and independent raw-inventory
+receipt, then yield bounded `PoolBatch` objects to `export_pool_batches`:
+
+```python
+from osm_polygon_eunis.pool_contract import (
+    FilesystemStreamingSink,
+    PoolBatch,
+    PoolStreamSpec,
+    StreamingLimits,
+    export_pool_batches,
+)
+
+spec = PoolStreamSpec.from_build_input(metadata_input)
+receipt = export_pool_batches(
+    spec,
+    batches,
+    FilesystemStreamingSink(output_directory),
+    limits=StreamingLimits(),
+)
+```
+
+`metadata_input` carries the pins, levels, and independent raw-source count and
+key-set digest; its row tables can be empty. Each batch has a zero-based,
+consecutive `batch_index` and any combination of inventory, geometry,
+candidate, outcome, document, link, entity-link, or eligibility rows. Rows may
+be split across batches. The adapter should yield one batch at a time and keep
+it within the configured limits. The default maximum is 2,048 contract rows and
+32 MiB estimated input per batch. Hard ceilings are 10,000 rows and 64 MiB.
+Each stored row is capped at 1 MiB, and each Parquet shard at 8,192 rows and
+64 MiB of uncompressed row JSON. Validation returns at most 100 issue details
+plus one truncation marker.
+
+The stream is spooled into a local SQLite index with a 4 MiB page cache and
+file-backed temporary data. Global uniqueness, raw inventory count and
+key-set digest, geometry links, document links, cross-batch references, and
+one outcome per supported level are checked from that index before shard
+writing. Candidate measurement, provenance, ambiguity, and exclusion rules are
+revalidated there. The exporter does not keep the complete pool or its encoded
+table payloads in RAM. It requires scratch disk proportional to the staged row
+payloads and performs a second sequential read to create canonical shards.
+
+Logical table rows are sorted by stable contract keys and split into fixed
+shards, so the same inputs produce the same files regardless of batch
+boundaries. The stream writes under a versioned layout directory. It writes
+`manifest.json` last as the completion marker; an interrupted write can leave
+immutable shards without a completion manifest. An identical retry reuses those
+files, while a conflicting retry fails. The existing unsharded exporter and
+its paths remain unchanged. A cloud adapter implements `FileArtifactSink`,
+including atomic immutable `put_file` behavior; the filesystem sink is for
+controlled staging and tests. Streaming does not publish to Hugging Face or
+select credentials.
 
 The output layout is:
 
 ```text
 pools/<contract-version>/<text-source>/<reference-system>/
   <source-snapshot-id>/<pool-version>/
-    manifest.json
-    polygon_inventory.parquet
-    polygon_snapshots.parquet
-    label_candidates.parquet
-    label_outcomes.parquet
-    source_documents.parquet
-    text_polygon_links.parquet
-    entity_links.parquet
-    pool_eligibility.parquet
+    layouts/sharded-parquet-v1/
+      shards/<logical-table>/part-00000000.parquet
+      shards.jsonl
+      exclusions.jsonl
+      manifest.json
 ```
 
-The manifest lists all source keys, per-level processed decisions and outcomes,
-qualifying candidate counts, exclusions by reason, source and reference pins,
-adapter and shared-builder revisions, and every table hash. The nine-pool gate requires each of the nine distinct
-combinations and matching contract/pool versions; evaluation sampling must wait
-for that gate to pass.
+The streaming manifest lists the total source-key count and observed key-set
+digest, per-level processed decisions and outcomes, qualifying candidate
+counts, the exclusion-reason sidecar, source and reference pins, adapter and
+shared-builder revisions, and the hash and row count of every shard. The
+nine-pool gate requires each of the nine distinct combinations and matching
+contract and pool versions; evaluation sampling must wait for that gate to pass.
 
 ## Splits and migration
 
