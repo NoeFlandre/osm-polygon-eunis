@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -15,7 +17,7 @@ from .builder import native_key_json
 from .models import PoolBundle, PoolValidationReport
 from .validation import validate_full_pool
 
-_CONTRACT_VERSION = "1.0.0"
+_CONTRACT_VERSION = "1.1.0"
 _TABLE_FIELDS: dict[str, tuple[pa.Field, ...]] = {
     "polygon_inventory": (
         pa.field("inventory_row_id", pa.string(), nullable=False),
@@ -63,12 +65,45 @@ _TABLE_FIELDS: dict[str, tuple[pa.Field, ...]] = {
         pa.field("reason", pa.string()),
         pa.field("ambiguity_basis", pa.string()),
     ),
+    "polygon_attempts": (
+        pa.field("inventory_row_id", pa.string(), nullable=False),
+        pa.field("status", pa.string(), nullable=False),
+        pa.field("reference_id_namespace", pa.string(), nullable=False),
+        pa.field("attempted_reference_ids_json", pa.string(), nullable=False),
+        pa.field("missing_reference_ids_json", pa.string(), nullable=False),
+        pa.field("measurement_sidecar_uri", pa.string()),
+        pa.field("measurement_sidecar_sha256", pa.string()),
+        pa.field("measurement_record_count", pa.int64()),
+        pa.field("reason", pa.string()),
+    ),
+    "label_support_evidence": (
+        pa.field("inventory_row_id", pa.string(), nullable=False),
+        pa.field("level", pa.string(), nullable=False),
+        pa.field("code", pa.string(), nullable=False),
+        pa.field("reference_id_namespace", pa.string(), nullable=False),
+        pa.field("reference_ids_json", pa.string(), nullable=False),
+        pa.field("measurement_sidecar_uri", pa.string()),
+        pa.field("measurement_sidecar_sha256", pa.string()),
+        pa.field("measurement_record_count", pa.int64()),
+    ),
     "source_documents": (
         pa.field("document_id", pa.string(), nullable=False),
         pa.field("native_key_json", pa.string(), nullable=False),
         pa.field("source_revision", pa.string(), nullable=False),
         pa.field("content_sha256", pa.string()),
         pa.field("body_status", pa.string(), nullable=False),
+    ),
+    "document_relevance": (
+        pa.field("document_id", pa.string(), nullable=False),
+        pa.field("release_id", pa.string(), nullable=False),
+        pa.field("status", pa.string(), nullable=False),
+        pa.field("source_repository", pa.string(), nullable=False),
+        pa.field("source_revision", pa.string(), nullable=False),
+        pa.field("mapping_rule_version", pa.string(), nullable=False),
+        pa.field("evidence", pa.string(), nullable=False),
+        pa.field("raw_value", pa.string()),
+        pa.field("evidence_sha256", pa.string()),
+        pa.field("reason", pa.string()),
     ),
     "text_polygon_links": (
         pa.field("document_id", pa.string(), nullable=False),
@@ -113,19 +148,32 @@ class FilesystemSink:
     root: Path
 
     def put(self, relative_path: str, content: bytes) -> str:
-        """Write bytes once, allowing an identical retry of immutable content."""
+        """Atomically create immutable bytes, allowing only an identical retry."""
 
         target = self.root / relative_path
         target.resolve().relative_to(self.root.resolve())
         target.parent.mkdir(parents=True, exist_ok=True)
-        if target.exists():
-            if target.read_bytes() != content:
-                raise FileExistsError(f"immutable pool artifact differs at {relative_path}")
-            return target.as_uri()
-        temporary = target.with_name(f".{target.name}.tmp")
-        temporary.write_bytes(content)
-        temporary.replace(target)
-        return target.as_uri()
+        descriptor, temporary_name = tempfile.mkstemp(
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                os.link(temporary, target)
+            except FileExistsError as existing:
+                if target.read_bytes() != content:
+                    raise FileExistsError(
+                        f"immutable pool artifact differs at {relative_path}"
+                    ) from existing
+            return target.resolve().as_uri()
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,6 +300,37 @@ def _table_rows(bundle: PoolBundle) -> dict[str, list[dict[str, object]]]:
             }
             for row in bundle.label_outcomes
         ],
+        "polygon_attempts": [
+            {
+                "inventory_row_id": row.inventory_row_id,
+                "status": row.status.value,
+                "reference_id_namespace": row.reference_id_namespace,
+                "attempted_reference_ids_json": json.dumps(
+                    sorted(row.attempted_reference_ids), separators=(",", ":")
+                ),
+                "missing_reference_ids_json": json.dumps(
+                    sorted(row.missing_reference_ids), separators=(",", ":")
+                ),
+                "measurement_sidecar_uri": row.measurement_sidecar_uri,
+                "measurement_sidecar_sha256": row.measurement_sidecar_sha256,
+                "measurement_record_count": row.measurement_record_count,
+                "reason": row.reason,
+            }
+            for row in bundle.attempt_receipts
+        ],
+        "label_support_evidence": [
+            {
+                "inventory_row_id": row.inventory_row_id,
+                "level": row.level,
+                "code": row.code,
+                "reference_id_namespace": row.reference_id_namespace,
+                "reference_ids_json": json.dumps(sorted(row.reference_ids), separators=(",", ":")),
+                "measurement_sidecar_uri": row.measurement_sidecar_uri,
+                "measurement_sidecar_sha256": row.measurement_sidecar_sha256,
+                "measurement_record_count": row.measurement_record_count,
+            }
+            for row in bundle.support_evidence
+        ],
         "source_documents": [
             {
                 "document_id": row.document_id,
@@ -261,6 +340,21 @@ def _table_rows(bundle: PoolBundle) -> dict[str, list[dict[str, object]]]:
                 "body_status": row.body_status.value,
             }
             for row in bundle.documents
+        ],
+        "document_relevance": [
+            {
+                "document_id": row.document_id,
+                "release_id": row.release_id,
+                "status": row.status.value,
+                "source_repository": row.source_repository,
+                "source_revision": row.source_revision,
+                "mapping_rule_version": row.mapping_rule_version,
+                "evidence": row.evidence,
+                "raw_value": row.raw_value,
+                "evidence_sha256": row.evidence_sha256,
+                "reason": row.reason,
+            }
+            for row in bundle.relevance_assessments
         ],
         "text_polygon_links": [
             {

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -16,6 +18,7 @@ import osm_polygon_eunis.pool_contract.streaming as streaming_module
 from osm_polygon_eunis.pool_contract import (
     AmbiguityBasis,
     AssignmentKind,
+    AttemptStatus,
     BodyStatus,
     DataSplit,
     EligibilityStatus,
@@ -25,6 +28,7 @@ from osm_polygon_eunis.pool_contract import (
     EvaluationCase,
     EvaluationPayload,
     EvaluationTrace,
+    FilesystemArtifactReader,
     FilesystemSink,
     FilesystemStreamingSink,
     GeometryStatus,
@@ -32,7 +36,9 @@ from osm_polygon_eunis.pool_contract import (
     LabelCandidate,
     LabelLevel,
     LabelOutcome,
+    LabelSupportEvidence,
     OutcomeStatus,
+    PolygonAttemptReceipt,
     PolygonInventoryRow,
     PolygonSnapshot,
     PoolBatch,
@@ -44,6 +50,8 @@ from osm_polygon_eunis.pool_contract import (
     RawInventoryEvidence,
     ReferencePin,
     ReferenceSystem,
+    RelevanceAssessment,
+    RelevanceStatus,
     SourceDocument,
     SourceSnapshot,
     SplitAssignment,
@@ -63,6 +71,7 @@ from osm_polygon_eunis.pool_contract import (
     validate_evaluation_trace,
     validate_full_pool,
     validate_nine_pool_gate,
+    validate_nine_streamed_pool_gate,
     validate_split_assignment,
 )
 
@@ -306,6 +315,60 @@ def _pool_input(
             reason="no evaluation context",
         ),
     )
+    attempt_receipts = tuple(
+        PolygonAttemptReceipt(
+            inventory_row_id=row.inventory_row_id,
+            status=(
+                AttemptStatus.COMPLETED
+                if row.inventory_row_id == inventory_ids[0]
+                else AttemptStatus.EXCLUDED
+            ),
+            reference_id_namespace="fixture/reference-feature-id",
+            attempted_reference_ids=(
+                ("feature-A", "feature-A1") if row.inventory_row_id == inventory_ids[0] else ()
+            ),
+            reason=(
+                None
+                if row.inventory_row_id == inventory_ids[0]
+                else "geometry_artifact_missing"
+                if row.inventory_row_id == inventory_ids[1]
+                else "invalid_geometry"
+            ),
+        )
+        for row in inventory
+    )
+    support_evidence = tuple(
+        LabelSupportEvidence(
+            inventory_row_id=row.inventory_row_id,
+            level=row.level,
+            code=row.code,
+            reference_id_namespace="fixture/reference-feature-id",
+            reference_ids=(f"feature-{row.code}",),
+        )
+        for row in candidates
+    )
+    relevance_assessments = (
+        RelevanceAssessment(
+            document_id="document-private",
+            release_id="relevance-release-1",
+            status=RelevanceStatus.YES,
+            source_repository="NoeFlandre/website-relevance",
+            source_revision="relevance-revision-1",
+            mapping_rule_version="relevance-map-v1",
+            evidence="native relevance record yes",
+            raw_value="yes",
+        ),
+        RelevanceAssessment(
+            document_id="document-missing",
+            release_id="relevance-release-1",
+            status=RelevanceStatus.MISSING,
+            source_repository="NoeFlandre/website-relevance",
+            source_revision="relevance-revision-1",
+            mapping_rule_version="relevance-map-v1",
+            evidence="no relevance row for source document",
+            reason="source relevance record absent",
+        ),
+    )
     return PoolBuildInput(
         pool_key=PoolKey(text_source, reference_system),
         source_snapshot=source,
@@ -323,6 +386,9 @@ def _pool_input(
         text_polygon_links=links,
         entity_links=entity_links,
         eligibility=eligibility,
+        attempt_receipts=attempt_receipts,
+        support_evidence=support_evidence,
+        relevance_assessments=relevance_assessments,
     )
 
 
@@ -474,21 +540,21 @@ def test_export_is_deterministic_and_manifest_is_the_complete_marker(tmp_path):
     assert manifest["pool_complete"] is True
     assert manifest["total_source_keys"] == 3
     assert manifest["raw_inventory_evidence"]["expected_key_count"] == 3
-    assert len(manifest["files"]) == 8
+    assert len(manifest["files"]) == 11
     table_uri = dict(first.table_uris)["label_candidates"]
     table = pq.read_table(_file_uri_path(table_uri))
     assert table.num_rows == 2
-    assert table.schema.metadata[b"contract_version"] == b"1.0.0"
+    assert table.schema.metadata[b"contract_version"] == b"1.1.0"
     assert table.column("denominator").to_pylist() == [100.0, 100.0]
 
 
 def test_export_schema_metadata_uses_the_manifest_contract_version(tmp_path):
-    bundle = build_full_pool(_pool_input(), contract_version="1.1.0")
+    bundle = build_full_pool(_pool_input(), contract_version="1.2.0")
     receipt = export_full_pool(bundle, FilesystemSink(tmp_path))
 
     table_path = _file_uri_path(dict(receipt.table_uris)["label_candidates"])
 
-    assert pq.read_schema(table_path).metadata[b"contract_version"] == b"1.1.0"
+    assert pq.read_schema(table_path).metadata[b"contract_version"] == b"1.2.0"
 
 
 def test_export_refuses_incomplete_pool(tmp_path):
@@ -510,6 +576,181 @@ def test_nine_pool_gate_requires_all_three_by_three_combinations():
     gate = validate_nine_pool_gate(bundles[:-1])
     assert not gate.ok
     assert gate.missing_pools
+
+
+def _stream_nine_fixture_pools(tmp_path: Path):
+    receipts = []
+    for text_source in TextSource:
+        for reference_system in ReferenceSystem:
+            source = _pool_input(text_source, reference_system)
+            scan_bytes = f"fixture scan {text_source.value}/{reference_system.value}\n".encode()
+            scan_path = (
+                tmp_path / "scan-reports" / f"{text_source.value}-{reference_system.value}.json"
+            )
+            scan_path.parent.mkdir(parents=True, exist_ok=True)
+            scan_path.write_bytes(scan_bytes)
+            evidence = replace(
+                source.raw_inventory_evidence,
+                scan_report_uri=scan_path.as_uri(),
+                scan_report_sha256=hashlib.sha256(scan_bytes).hexdigest(),
+            )
+            source = replace(source, raw_inventory_evidence=evidence)
+            sink = FilesystemStreamingSink(
+                tmp_path / "streamed" / f"{text_source.value}-{reference_system.value}"
+            )
+            receipts.append(
+                export_pool_batches(
+                    PoolStreamSpec.from_build_input(source),
+                    _single_batch(source),
+                    sink,
+                )
+            )
+    return tuple(receipts)
+
+
+def test_streamed_nine_pool_gate_verifies_manifests_shards_and_inventory(tmp_path: Path):
+    receipts = _stream_nine_fixture_pools(tmp_path)
+
+    gate = validate_nine_streamed_pool_gate(receipts, FilesystemArtifactReader())
+
+    assert gate.ok, gate.invalid_pools
+    forged = replace(receipts[0], total_source_keys=receipts[0].total_source_keys + 1)
+    rejected = validate_nine_streamed_pool_gate((forged, *receipts[1:]), FilesystemArtifactReader())
+    assert not rejected.ok
+    assert any(
+        "raw inventory receipt differs" in issue
+        for _pool, issues in rejected.invalid_pools
+        for issue in issues
+    )
+    duplicate = validate_nine_streamed_pool_gate(
+        (receipts[0], *receipts), FilesystemArtifactReader()
+    )
+    assert "description-worldcover" in duplicate.duplicate_pools
+    incomplete = validate_nine_streamed_pool_gate(receipts[:-1], FilesystemArtifactReader())
+    assert "wiki-eunis" in incomplete.missing_pools
+
+
+def test_streamed_gate_rejects_tampered_shard(tmp_path: Path):
+    receipts = _stream_nine_fixture_pools(tmp_path)
+    manifest = json.loads(_file_uri_path(receipts[0].manifest_uri).read_text())
+    shard_manifest = _file_uri_path(receipts[0].shard_manifest_uri)
+    first_shard = json.loads(shard_manifest.read_text().splitlines()[0])
+    shard_path = _file_uri_path(
+        FilesystemArtifactReader().resolve_uri(receipts[0].manifest_uri, first_shard["path"])
+    )
+    shard_path.write_bytes(shard_path.read_bytes() + b"tamper")
+
+    gate = validate_nine_streamed_pool_gate(receipts, FilesystemArtifactReader())
+
+    assert not gate.ok
+    assert any(
+        "shard content hash mismatch" in issue
+        for pool, issues in gate.invalid_pools
+        if pool == "description-worldcover"
+        for issue in issues
+    )
+    assert manifest["pool_complete"] is True
+
+
+def test_filesystem_sink_concurrent_writers_never_overwrite_immutable_artifact(tmp_path: Path):
+    sink = FilesystemSink(tmp_path)
+    barrier = threading.Barrier(2)
+
+    def write(content: bytes):
+        barrier.wait()
+        try:
+            return sink.put("immutable/artifact.bin", content), None
+        except FileExistsError as error:
+            return None, error
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = tuple(executor.map(write, (b"left", b"right")))
+
+    successes = [uri for uri, error in results if uri is not None and error is None]
+    failures = [error for _uri, error in results if error is not None]
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert _file_uri_path(successes[0]).read_bytes() in {b"left", b"right"}
+    assert [path.name for path in (tmp_path / "immutable").iterdir()] == ["artifact.bin"]
+
+
+def test_relevance_is_typed_provenance_and_never_filters_the_raw_pool(tmp_path: Path):
+    source = _pool_input()
+    assessments = (
+        source.relevance_assessments[0],
+        RelevanceAssessment(
+            document_id="document-private",
+            release_id="relevance-release-no",
+            status=RelevanceStatus.NO,
+            source_repository="NoeFlandre/website-relevance",
+            source_revision="relevance-revision-2",
+            mapping_rule_version="relevance-map-v2",
+            evidence="native relevance record no",
+            raw_value="no",
+        ),
+        RelevanceAssessment(
+            document_id="document-missing",
+            release_id="relevance-release-unknown",
+            status=RelevanceStatus.UNKNOWN,
+            source_repository="NoeFlandre/website-relevance",
+            source_revision="relevance-revision-2",
+            mapping_rule_version="relevance-map-v2",
+            evidence="native relevance record could not be mapped",
+            raw_value="ambiguous",
+            reason="source value has no verified yes/no mapping",
+        ),
+        source.relevance_assessments[1],
+    )
+    populated = replace(source, relevance_assessments=assessments)
+    bundle = _build(populated)
+    no_relevance_bundle = _build(replace(source, relevance_assessments=()))
+
+    assert validate_full_pool(bundle).ok
+    assert len(bundle.inventory) == len(source.inventory) == 3
+    assert bundle.label_outcomes == no_relevance_bundle.label_outcomes
+    assert bundle.manifest.total_source_keys == no_relevance_bundle.manifest.total_source_keys
+    assert not isinstance(RelevanceStatus.YES, EvaluationArm)
+
+    receipt = export_full_pool(bundle, FilesystemSink(tmp_path / "relevance"))
+    table = pq.read_table(_file_uri_path(dict(receipt.table_uris)["document_relevance"]))
+    assert set(table.column("status").to_pylist()) == {"yes", "no", "unknown", "missing"}
+    assert set(table.column("source_revision").to_pylist()) == {
+        "relevance-revision-1",
+        "relevance-revision-2",
+    }
+
+
+def test_measurement_evidence_accepts_reference_ids_or_hashed_sidecars(tmp_path: Path):
+    source = _pool_input()
+    evidence = replace(
+        source.support_evidence[0],
+        reference_ids=(),
+        measurement_sidecar_uri="https://artifacts.example/measurements/row-1.jsonl",
+        measurement_sidecar_sha256=_SHA_B,
+        measurement_record_count=2,
+    )
+    receipt = replace(
+        source.attempt_receipts[0],
+        attempted_reference_ids=(),
+        measurement_sidecar_uri="https://artifacts.example/attempts/row-1.jsonl",
+        measurement_sidecar_sha256=_SHA_A,
+        measurement_record_count=3,
+    )
+    source = replace(
+        source,
+        support_evidence=(evidence, *source.support_evidence[1:]),
+        attempt_receipts=(receipt, *source.attempt_receipts[1:]),
+    )
+
+    bundle = _build(source)
+    assert validate_full_pool(bundle).ok
+    exported = export_full_pool(bundle, FilesystemSink(tmp_path / "evidence"))
+    support_table = pq.read_table(
+        _file_uri_path(dict(exported.table_uris)["label_support_evidence"])
+    )
+    attempt_table = pq.read_table(_file_uri_path(dict(exported.table_uris)["polygon_attempts"]))
+    assert _SHA_B in support_table.column("measurement_sidecar_sha256").to_pylist()
+    assert _SHA_A in attempt_table.column("measurement_sidecar_sha256").to_pylist()
 
 
 def test_source_native_keys_preserve_component_names_and_value_types():
@@ -593,6 +834,12 @@ def _stream_batches(source: PoolBuildInput) -> tuple[PoolBatch, PoolBatch]:
             label_outcomes=tuple(
                 row for row in source.label_outcomes if row.inventory_row_id in first_ids
             ),
+            attempt_receipts=tuple(
+                row for row in source.attempt_receipts if row.inventory_row_id in first_ids
+            ),
+            support_evidence=tuple(
+                row for row in source.support_evidence if row.inventory_row_id in first_ids
+            ),
             documents=(),
             text_polygon_links=source.text_polygon_links,
             entity_links=source.entity_links,
@@ -610,7 +857,14 @@ def _stream_batches(source: PoolBuildInput) -> tuple[PoolBatch, PoolBatch]:
             label_outcomes=tuple(
                 row for row in source.label_outcomes if row.inventory_row_id not in first_ids
             ),
+            attempt_receipts=tuple(
+                row for row in source.attempt_receipts if row.inventory_row_id not in first_ids
+            ),
+            support_evidence=tuple(
+                row for row in source.support_evidence if row.inventory_row_id not in first_ids
+            ),
             documents=source.documents,
+            relevance_assessments=source.relevance_assessments,
         ),
     )
 
@@ -623,7 +877,10 @@ def _single_batch(source: PoolBuildInput) -> tuple[PoolBatch, ...]:
             polygons=source.polygons,
             label_candidates=source.label_candidates,
             label_outcomes=source.label_outcomes,
+            attempt_receipts=source.attempt_receipts,
+            support_evidence=source.support_evidence,
             documents=source.documents,
+            relevance_assessments=source.relevance_assessments,
             text_polygon_links=source.text_polygon_links,
             entity_links=source.entity_links,
             eligibility=source.eligibility,
@@ -637,10 +894,13 @@ def _tablewise_batches(source: PoolBuildInput) -> tuple[PoolBatch, ...]:
         PoolBatch(batch_index=1, polygons=source.polygons),
         PoolBatch(batch_index=2, label_candidates=source.label_candidates),
         PoolBatch(batch_index=3, label_outcomes=source.label_outcomes),
-        PoolBatch(batch_index=4, text_polygon_links=source.text_polygon_links),
-        PoolBatch(batch_index=5, documents=source.documents),
-        PoolBatch(batch_index=6, entity_links=source.entity_links),
-        PoolBatch(batch_index=7, eligibility=source.eligibility),
+        PoolBatch(batch_index=4, attempt_receipts=source.attempt_receipts),
+        PoolBatch(batch_index=5, support_evidence=source.support_evidence),
+        PoolBatch(batch_index=6, text_polygon_links=source.text_polygon_links),
+        PoolBatch(batch_index=7, documents=source.documents),
+        PoolBatch(batch_index=8, relevance_assessments=source.relevance_assessments),
+        PoolBatch(batch_index=9, entity_links=source.entity_links),
+        PoolBatch(batch_index=10, eligibility=source.eligibility),
     )
 
 
@@ -665,7 +925,7 @@ def test_stream_export_matches_fixture_tables_and_reports_completeness(tmp_path:
     assert streamed.pool_id == bundle.manifest.pool_id
     assert streamed.total_source_keys == source.raw_inventory_evidence.expected_key_count
     assert streamed.inventory_keyset_sha256 == source.raw_inventory_evidence.expected_keyset_sha256
-    assert streamed.shard_count == 11
+    assert streamed.shard_count == 15
     manifest = json.loads(_file_uri_path(streamed.manifest_uri).read_text())
     assert manifest["pool_complete"] is True
     assert manifest["source_inventory_receipt"] == {
@@ -768,6 +1028,26 @@ def test_stream_revalidates_reference_measurements_globally(tmp_path: Path) -> N
     assert not list((tmp_path / "stream").rglob("manifest.json"))
 
 
+def test_streaming_and_fixture_validation_reject_polygon_area_unit_mismatch(
+    tmp_path: Path,
+) -> None:
+    source = _pool_input()
+    invalid = replace(
+        source,
+        polygons=(replace(source.polygons[0], area_unit="ha"), source.polygons[1]),
+    )
+
+    full_report = validate_full_pool(_build(invalid))
+    assert any("does not use polygon support units" in issue for issue in full_report.issues)
+    with pytest.raises(PoolStreamError, match="does not use polygon support units"):
+        export_pool_batches(
+            PoolStreamSpec.from_build_input(source),
+            _single_batch(invalid),
+            FilesystemStreamingSink(tmp_path / "unit-mismatch"),
+        )
+    assert not list((tmp_path / "unit-mismatch").rglob("manifest.json"))
+
+
 def test_stream_duplicate_native_key_across_batches_never_completes(tmp_path: Path) -> None:
     source = _pool_input()
     batches = _stream_batches(source)
@@ -787,7 +1067,7 @@ def test_stream_duplicate_native_key_across_batches_never_completes(tmp_path: Pa
             FilesystemStreamingSink(sink_root),
             limits=StreamingLimits(max_batch_rows=32),
         )
-    manifest_path = sink_root / "pools/1.0.0/website/eunis/raw-website/1.0.0/manifest.json"
+    manifest_path = sink_root / "pools/1.1.0/website/eunis/raw-website/1.0.0/manifest.json"
     assert not manifest_path.exists()
 
 

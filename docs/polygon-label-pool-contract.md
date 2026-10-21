@@ -9,10 +9,11 @@ The shared code does not import EUNIS matching logic or compute overlays.
 
 ## Pool identity and source coverage
 
-The first contract version is `noeflandre.polygon-label-pool/1.0.0`. A pool is
-one of `description`, `website`, or `wiki` crossed with `worldcover`, `lucas`,
-or `eunis`. Each pool pins its text-source snapshot, PBF artifact, source
-repository revision, reference release, and taxonomy revision.
+The current additive contract version is
+`noeflandre.polygon-label-pool/1.1.0`. A pool is one of `description`,
+`website`, or `wiki` crossed with `worldcover`, `lucas`, or `eunis`. Each pool
+pins its text-source snapshot, PBF artifact, source repository revision,
+reference release, and taxonomy revision.
 
 Adapters must enumerate every distinct native polygon key in the frozen raw
 source before joining text, relevance labels, evaluation arms, or token-budget
@@ -22,12 +23,18 @@ reference level must then contain exactly one `LabelOutcome` per inventory key.
 Rows without YES/NO documents, without text, or without evaluation context still
 remain in the pool and receive their reference-label decision.
 
-The EUNIS PR #159 relevance census is candidate evidence, not a source-wide
-inventory: its source query starts from relevance-labeled sentence rows. It
-cannot be supplied as the EUNIS `inventory` input. Enumerate raw PBF polygon
-composite keys first, then record source-native text links. Keep the EUNIS
-published largest-intersection label product distinct from the new full-pool
-80% assignment rule.
+Each raw inventory key also has one `PolygonAttemptReceipt`, including failed
+and geometry-excluded attempts. Every positive or below-threshold label
+candidate has one `LabelSupportEvidence` row with source reference IDs or a
+resolvable measurement-sidecar URI, SHA-256, and record count. These records
+make the adapter's overlay inputs inspectable without changing raw-polygon
+accounting.
+
+The EUNIS PR #159 relevance census starts from relevance-labeled sentence
+rows. It includes only polygons reachable through those rows. Build the EUNIS
+inventory by enumerating raw PBF polygon composite keys, then record
+source-native text links. Keep the published largest-intersection EUNIS labels
+separate from the new full-pool 80% assignment rule.
 
 ## Logical tables
 
@@ -37,7 +44,10 @@ published largest-intersection label product distinct from the new full-pool
 | `polygon_snapshots` | Recoverable geometry URI and SHA-256, native format, CRS, transform, geometry status, and full original polygon area. |
 | `label_candidates` | Long-form polygon × release × level × code support, including below-threshold candidates, threshold, numerator, denominator, ratio, assignment-rule version, support semantics, and direct or ancestor-derived provenance. |
 | `label_outcomes` | One assigned, ambiguous, unassigned, or excluded decision per raw polygon and supported level. |
+| `polygon_attempts` | Exactly one typed reference-query receipt per raw polygon, with attempted/missing reference IDs, terminal attempt state, reason, and optional hashed measurement sidecar. |
+| `label_support_evidence` | One evidence row per label candidate, retaining reference feature/tile IDs directly or a hashed measurement sidecar. |
 | `source_documents` | Source-native document key, revision, content hash, and explicit available/missing/private/not-retained body state. The table has no body field. |
+| `document_relevance` | Typed YES/NO/UNKNOWN/MISSING relevance assessments by document and release, with source pins, mapping-rule version, native value, and evidence. Relevance is a downstream text property and never filters raw polygons or labels. |
 | `text_polygon_links` | Native link key, link evidence, revision, and linked, ambiguous, unmatched, key-mismatch, text-hash-mismatch, or geometry-missing status. Unresolved links can retain candidate polygon rows. |
 | `entity_links` | Versioned cross-snapshot polygon links, with both full source-native keys and evidence. No join uses a bare OSM ID or text hash. |
 | `pool_eligibility` | Optional downstream candidate/cohort eligibility, exclusion reasons, and replacement lineage. It does not filter the full pool. |
@@ -66,13 +76,15 @@ numerator, full-area denominator, ratio, threshold, support unit, source and
 taxonomy pins, assignment-rule version, and direct/ancestor-derived kind.
 
 The validator checks denominator equality against the polygon's original area,
-ratio arithmetic, threshold, pin consistency, outcome cardinality, and
-accounting. It cannot independently recalculate geometric unions; the source
-adapter must compute and declare the per-class union before constructing
-`LabelCandidate` rows. Existing scalar EUNIS deepest-winner census results must
-be recomputed into independent level decisions. EUNIS direct map support is
-available at L3, with ancestor unions at L1–L2; levels L4–L8 should be declared
-unsupported until finer map evidence exists.
+unit equality between polygon area and candidate support, ratio arithmetic,
+threshold, pin consistency, outcome cardinality, and accounting. It cannot
+recalculate geometric unions. The source adapter must compute and declare each
+per-class union before it constructs `LabelCandidate` rows. It must also record
+the contributing reference IDs or a hashed measurement sidecar in
+`LabelSupportEvidence`. Recompute scalar EUNIS deepest-winner census results
+into independent level decisions. EUNIS direct map support covers L3, and
+ancestor unions cover L1–L2. Declare levels L4–L8 unsupported until finer map
+evidence exists.
 
 ## Build and export API
 
@@ -80,10 +92,12 @@ Source-specific adapters stay separate from this package. For fixtures and
 small pools, an adapter can construct one complete `PoolBuildInput` and call
 `build_full_pool`. Its required fields are `pool_key`, `source_snapshot`,
 `raw_inventory_evidence`, `reference_pin`, `adapter_id`, `adapter_revision`,
-`builder_revision`, `inventory`, `polygons`, `levels`, `label_candidates`, and
-`label_outcomes`. The optional tables are `documents`, `text_polygon_links`,
-`entity_links`, and `eligibility`. The input inventory must come from the full
-raw polygon snapshot before any text or evaluation filtering.
+`builder_revision`, `inventory`, `polygons`, `levels`, `label_candidates`,
+`label_outcomes`, and `attempt_receipts`. Each candidate requires one matching
+`support_evidence` row. Optional text-related tables are `documents`,
+`relevance_assessments`, and `text_polygon_links`. `entity_links` and
+`eligibility` retain separate lineage. Build the input inventory from the full
+raw polygon snapshot before text or evaluation filtering.
 
 `raw_inventory_evidence` is also required. It pins the unfiltered enumeration
 rule and scan-report URI/hash, expected raw key count, and SHA-256 of the
@@ -93,10 +107,16 @@ source scan, before joining text or relevance labels. The digest input is each
 key serialized by `native_key_json`, sorted by that serialized form, joined by
 literal LF with no trailing LF, then encoded as UTF-8 before SHA-256.
 
+`RelevanceAssessment` uses `RelevanceStatus.YES` or `.NO` only when the native
+value and mapping provenance support that result. Use `.UNKNOWN` for a present
+but unresolved value and `.MISSING` with an absence reason when a source record
+has no relevance value. Do not coerce either state into an evaluation arm.
+
 The public record types include `PoolKey`, `SourceSnapshot`,
 `RawInventoryEvidence`, `ReferencePin`, `PolygonInventoryRow`,
 `PolygonSnapshot`, `LabelLevel`, `LabelCandidate`, `LabelOutcome`,
-`SourceDocument`, `TextPolygonLink`, `EntityLink`,
+`PolygonAttemptReceipt`, `LabelSupportEvidence`, `SourceDocument`,
+`RelevanceAssessment`, `TextPolygonLink`, `EntityLink`,
 `PoolEligibility`, `PoolManifest`, and `PoolBundle`. `EvaluationCase`,
 `EvaluationTrace`, and `SplitAssignment` are separate downstream types. The
 complete API is re-exported from `osm_polygon_eunis.pool_contract`.
@@ -151,9 +171,11 @@ receipt = export_pool_batches(
 key-set digest; its row tables can be empty. Each batch has a zero-based,
 consecutive `batch_index` and any combination of inventory, geometry,
 candidate, outcome, document, link, entity-link, or eligibility rows. Rows may
-be split across batches. The adapter should yield one batch at a time and keep
-it within the configured limits. The default maximum is 2,048 contract rows and
-32 MiB estimated input per batch. Hard ceilings are 10,000 rows and 64 MiB.
+be split across batches. Attempt receipts, support evidence, and relevance
+assessments can also be split across batches. Yield one batch at a time and
+keep it within the configured limits. The default maximum is 2,048 contract
+rows and 32 MiB estimated input per batch. Hard ceilings are 10,000 rows and
+64 MiB.
 Each stored row is capped at 1 MiB, and each Parquet shard at 8,192 rows and
 64 MiB of uncompressed row JSON. Validation returns at most 100 issue details
 plus one truncation marker.
@@ -161,11 +183,12 @@ plus one truncation marker.
 The stream is spooled into a local SQLite index with a 4 MiB page cache and
 file-backed temporary data. Global uniqueness, raw inventory count and
 key-set digest, geometry links, document links, cross-batch references, and
-one outcome per supported level are checked from that index before shard
-writing. Candidate measurement, provenance, ambiguity, and exclusion rules are
-revalidated there. The exporter does not keep the complete pool or its encoded
-table payloads in RAM. It requires scratch disk proportional to the staged row
-payloads and performs a second sequential read to create canonical shards.
+one outcome per supported level, one attempt receipt per raw key, one support
+evidence row per candidate, and relevance-document references are checked from
+that index before shard writing. The exporter revalidates candidate
+measurements, area units, provenance, ambiguity, and exclusions. It stores
+staged rows in scratch SQLite files, then reads them sequentially to create
+canonical shards.
 
 Logical table rows are sorted by stable contract keys and split into fixed
 shards, so the same inputs produce the same files regardless of batch
@@ -173,10 +196,11 @@ boundaries. The stream writes under a versioned layout directory. It writes
 `manifest.json` last as the completion marker; an interrupted write can leave
 immutable shards without a completion manifest. An identical retry reuses those
 files, while a conflicting retry fails. The existing unsharded exporter and
-its paths remain unchanged. A cloud adapter implements `FileArtifactSink`,
-including atomic immutable `put_file` behavior; the filesystem sink is for
-controlled staging and tests. Streaming does not publish to Hugging Face or
-select credentials.
+its output paths remain unchanged. Its filesystem sink uses atomic create-only
+writes and rejects conflicting concurrent writers. A cloud adapter implements
+`FileArtifactSink` with atomic immutable `put_file` behavior. The filesystem
+sink supports controlled staging and tests. Streaming does not publish to
+Hugging Face or select credentials.
 
 The output layout is:
 
@@ -193,9 +217,13 @@ pools/<contract-version>/<text-source>/<reference-system>/
 The streaming manifest lists the total source-key count and observed key-set
 digest, per-level processed decisions and outcomes, qualifying candidate
 counts, the exclusion-reason sidecar, source and reference pins, adapter and
-shared-builder revisions, and the hash and row count of every shard. The
-nine-pool gate requires each of the nine distinct combinations and matching
-contract and pool versions; evaluation sampling must wait for that gate to pass.
+shared-builder revisions, and the hash and row count of every shard. Use
+`validate_nine_streamed_pool_gate(receipts, reader)` to verify streamed
+completion manifests, scan receipts, shard inventories, shard hashes, per-level
+accounting, and all nine distinct combinations without reconstructing pools in
+RAM. A cloud `PoolArtifactReader` streams JSONL and artifact hashes and resolves
+sink-relative paths; `FilesystemArtifactReader` supports controlled staging
+and tests. Evaluation sampling must wait for that gate to pass.
 
 ## Splits and migration
 
