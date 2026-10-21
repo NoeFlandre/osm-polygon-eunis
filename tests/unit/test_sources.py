@@ -94,6 +94,9 @@ def test_unmatched_link_path_fails_closed() -> None:
 
 def test_download_to_temp_streams_and_verifies_length(tmp_path: Path, monkeypatch) -> None:
     class FakeResponse:
+        def __init__(self) -> None:
+            self.num_bytes_downloaded = 0
+
         def __enter__(self):
             return self
 
@@ -109,8 +112,9 @@ def test_download_to_temp_streams_and_verifies_length(tmp_path: Path, monkeypatc
 
         def iter_bytes(self, chunk_size: int):
             assert chunk_size > 0
-            yield b"abc"
-            yield b"def"
+            for chunk in (b"abc", b"def"):
+                self.num_bytes_downloaded += len(chunk)
+                yield chunk
 
     monkeypatch.setattr(sources, "download_client", lambda: _ScriptedClient(FakeResponse()))
     local_path = download_to_temp(
@@ -159,15 +163,20 @@ def test_download_to_temp_rejects_httpx_gzip_length_mismatch(tmp_path: Path) -> 
             stream=httpx.ByteStream(encoded),
         )
 
-    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        with pytest.raises(ValueError, match="byte count"):
-            _download(tmp_path, client=client)
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(ValueError, match="byte count"),
+    ):
+        _download(tmp_path, client=client)
 
     assert sorted(entry.name for entry in tmp_path.iterdir()) == []
 
 
 def test_download_to_temp_rejects_wrong_length(tmp_path: Path, monkeypatch) -> None:
     class FakeResponse:
+        def __init__(self) -> None:
+            self.num_bytes_downloaded = 0
+
         def __enter__(self):
             return self
 
@@ -183,7 +192,9 @@ def test_download_to_temp_rejects_wrong_length(tmp_path: Path, monkeypatch) -> N
 
         # Signature mirrors the StreamResponse protocol.
         def iter_bytes(self, chunk_size: int):  # noqa: ARG002
-            yield b"abc"
+            chunk = b"abc"
+            self.num_bytes_downloaded += len(chunk)
+            yield chunk
 
     monkeypatch.setattr(sources, "download_client", lambda: _ScriptedClient(FakeResponse()))
 
@@ -199,6 +210,9 @@ def test_download_to_temp_rejects_wrong_length(tmp_path: Path, monkeypatch) -> N
 
 def test_download_to_temp_reuses_supplied_http_client(tmp_path: Path, monkeypatch) -> None:
     class FakeResponse:
+        def __init__(self) -> None:
+            self.num_bytes_downloaded = 0
+
         def __enter__(self):
             return self
 
@@ -214,7 +228,9 @@ def test_download_to_temp_reuses_supplied_http_client(tmp_path: Path, monkeypatc
 
         def iter_bytes(self, chunk_size: int):
             assert chunk_size == 8 * 1024 * 1024
-            yield b"abc"
+            chunk = b"abc"
+            self.num_bytes_downloaded += len(chunk)
+            yield chunk
 
     class FakeClient:
         def __init__(self) -> None:
@@ -250,6 +266,7 @@ class _ScriptedResponse:
         self._chunks = chunks
         self._content_length = content_length
         self._error = error
+        self.num_bytes_downloaded = 0
 
     def __enter__(self):
         return self
@@ -265,7 +282,9 @@ class _ScriptedResponse:
         return {"content-length": self._content_length}
 
     def iter_bytes(self, chunk_size: int):  # noqa: ARG002
-        yield from self._chunks
+        for chunk in self._chunks:
+            self.num_bytes_downloaded += len(chunk)
+            yield chunk
         if self._error is not None:
             raise self._error
 
