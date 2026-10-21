@@ -193,12 +193,12 @@ def download_to_temp(
     try:
         if client is None:
             with download_client() as owned_client:
-                written, expected = _download_with_client(owned_client, url, headers, partial)
+                downloaded, expected = _download_with_client(owned_client, url, headers, partial)
         else:
-            written, expected = _download_with_client(client, url, headers, partial)
-        if expected is not None and written != int(expected):
+            downloaded, expected = _download_with_client(client, url, headers, partial)
+        if expected is not None and downloaded != int(expected):
             raise ValueError(
-                f"downloaded byte count {written} does not match Content-Length {expected}",
+                f"downloaded byte count {downloaded} does not match Content-Length {expected}",
             )
         partial.replace(destination)
     finally:
@@ -225,8 +225,8 @@ def _download_with_client(
 def _write_response(response: _StreamResponse, destination: Path) -> tuple[int, str | None]:
     response.raise_for_status()
     with destination.open("wb") as output:
-        written = write_chunks(response.iter_bytes(chunk_size=8 * 1024 * 1024), output)
-    return written, response.headers.get("content-length")
+        write_chunks(response.iter_bytes(chunk_size=8 * 1024 * 1024), output)
+    return response.num_bytes_downloaded, response.headers.get("content-length")
 
 
 def matches_layout(path: str, pattern: str) -> bool:
