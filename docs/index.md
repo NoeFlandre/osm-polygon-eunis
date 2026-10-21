@@ -10,3 +10,6 @@ filters only.
 For the commands and the release gates, see the
 [operations runbook](operations.md). For the project terms, see the
 [glossary](glossary.md).
+
+The shared full-pool schema and export rules are documented in the
+[polygon-label pool contract](polygon-label-pool-contract.md).
