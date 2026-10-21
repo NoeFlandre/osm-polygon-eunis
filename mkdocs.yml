@@ -10,6 +10,7 @@ nav:
   - Python API: api.md
   - Operations: operations.md
   - Polygon-label pool contract: polygon-label-pool-contract.md
+  - Source-wide WorldCover and LUCAS adapters: pool-adapters.md
   - Mutation testing: mutation-testing.md
   - Glossary: glossary.md
   - Architecture decisions:
