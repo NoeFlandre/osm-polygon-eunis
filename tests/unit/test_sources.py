@@ -1,3 +1,4 @@
+import gzip
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -121,6 +122,27 @@ def test_download_to_temp_streams_and_verifies_length(tmp_path: Path, monkeypatc
     )
 
     assert local_path.read_bytes() == b"abcdef"
+
+
+def test_download_to_temp_accepts_httpx_gzip_stream(tmp_path: Path) -> None:
+    decoded = b"decoded polygon data " * 100
+    encoded = gzip.compress(decoded)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={
+                "content-encoding": "gzip",
+                "content-length": str(len(encoded)),
+            },
+            stream=httpx.ByteStream(encoded),
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        local_path = _download(tmp_path, client=client)
+
+    assert len(encoded) != len(decoded)
+    assert local_path.read_bytes() == decoded
 
 
 def test_download_to_temp_rejects_wrong_length(tmp_path: Path, monkeypatch) -> None:
