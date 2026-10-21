@@ -909,17 +909,25 @@ def _assert_lucas_reader_resource_limits(
         (
             LucasResourceLimits(max_geometry_blob_bytes=1),
             "partial:reference_geometry_blob_limit_exceeded",
+            None,
         ),
         (
             LucasResourceLimits(max_footprint_coordinates=4),
             "partial:reference_geometry_coordinate_limit_exceeded",
+            None,
         ),
         (
             LucasResourceLimits(max_union_coordinates=1),
             "lucas_resource_limit:retained union coordinate limit exceeded",
+            None,
+        ),
+        (
+            LucasResourceLimits(max_overlay_operand_coordinates=9),
+            "lucas_resource_limit:footprint clip operand coordinate limit exceeded",
+            ("1", "2"),
         ),
     )
-    for limits, reason_prefix in limits_and_reasons:
+    for limits, reason_prefix, expected_ids in limits_and_reasons:
         reader = LucasGeoPackageReader(
             path, taxonomy_path, manifest, taxonomy, resource_limits=limits
         )
@@ -929,6 +937,8 @@ def _assert_lucas_reader_resource_limits(
         assert query.partial_reason is not None and query.partial_reason.startswith(reason_prefix)
         assert not query.preaggregated_supports
         assert attempted_ids
+        if expected_ids is not None:
+            assert attempted_ids == expected_ids
 
 
 def _create_lucas_fixture(path: Path) -> None:
@@ -1002,7 +1012,27 @@ def _create_lucas_fixture(path: Path) -> None:
     connection.close()
 
 
-def test_lucas_reader_uses_exact_file_pins_and_records_feature_ids(tmp_path: Path) -> None:
+def _record_lucas_fetch_sizes(monkeypatch) -> list[int]:
+    fetch_sizes: list[int] = []
+    query_candidates = lucas_module._query_rtree_candidates
+
+    def track_candidate_fetches(*args, **kwargs):
+        cursor = query_candidates(*args, **kwargs)
+
+        class FetchSizeRecorder:
+            def fetchmany(self, size: int):
+                fetch_sizes.append(size)
+                return cursor.fetchmany(size)
+
+        return FetchSizeRecorder()
+
+    monkeypatch.setattr(lucas_module, "_query_rtree_candidates", track_candidate_fetches)
+    return fetch_sizes
+
+
+def test_lucas_reader_uses_exact_file_pins_and_records_feature_ids(
+    tmp_path: Path, monkeypatch
+) -> None:
     path = tmp_path / "lucas-fixture.gpkg"
     taxonomy_path = tmp_path / "lucas-codebook.fixture"
     taxonomy_bytes = b"synthetic fixture taxonomy\n"
@@ -1028,7 +1058,8 @@ def test_lucas_reader_uses_exact_file_pins_and_records_feature_ids(tmp_path: Pat
             geometry_type="MULTISURFACE",
         ),
     )
-    reader = LucasGeoPackageReader(path, taxonomy_path, manifest, taxonomy, fetch_size=1)
+    fetch_sizes = _record_lucas_fetch_sizes(monkeypatch)
+    reader = LucasGeoPackageReader(path, taxonomy_path, manifest, taxonomy, fetch_size=512)
     attempted_ids = ()
     level_support_ids = {}
     first_adapter_attempt_ids = ()
@@ -1056,6 +1087,7 @@ def test_lucas_reader_uses_exact_file_pins_and_records_feature_ids(tmp_path: Pat
 
     assert result.attempted_feature_ids == ()
     assert attempted_ids == ("1", "2", "3", "4", "5", "6")
+    assert fetch_sizes and max(fetch_sizes) <= 2 and 2 in fetch_sizes
     assert result.attempt_reason == (
         "filtered:point_copernicus=1,survey_obs_type=1,survey_year=1,"
         "surveycprncando=1,surveycprnlc=1"
@@ -1406,6 +1438,8 @@ def test_lucas_file_pins_and_reader_preconditions_fail_closed(tmp_path: Path) ->
     reader_args = (tmp_path / "not-downloaded.gpkg", tmp_path / "codebook.pdf", manifest, taxonomy)
     with pytest.raises(ValueError, match="fetch size must be positive"):
         LucasGeoPackageReader(*reader_args, fetch_size=0)
+    with pytest.raises(ValueError, match="must fit one maximum-sized geometry blob"):
+        LucasResourceLimits(max_geometry_blob_bytes=16, max_fetch_batch_blob_bytes=15)
     with pytest.raises(ValueError, match="taxonomy ID"):
         LucasGeoPackageReader(
             reader_args[0], reader_args[1], manifest, replace(taxonomy, taxonomy_id="other")

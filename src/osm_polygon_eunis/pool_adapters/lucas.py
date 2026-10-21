@@ -372,6 +372,7 @@ class LucasResourceLimits:
     max_total_input_coordinates: int = 2_000_000
     max_union_coordinates: int = 2_000_000
     max_overlay_operand_coordinates: int = 500_000
+    max_fetch_batch_blob_bytes: int = 32 * 1024 * 1024
 
     def __post_init__(self) -> None:
         """Reject zero or negative ceilings before any reference is queried."""
@@ -384,9 +385,14 @@ class LucasResourceLimits:
                 self.max_total_input_coordinates,
                 self.max_union_coordinates,
                 self.max_overlay_operand_coordinates,
+                self.max_fetch_batch_blob_bytes,
             )
         ):
             raise ValueError("LUCAS resource limits must be positive")
+        if self.max_fetch_batch_blob_bytes < self.max_geometry_blob_bytes:
+            raise ValueError(
+                "LUCAS fetch batch byte limit must fit one maximum-sized geometry blob"
+            )
 
 
 class LucasResourceLimitError(RuntimeError):
@@ -729,7 +735,16 @@ class _LucasScanState:
 
     def next_fetch_size(self) -> int:
         remaining = self.context.resource_limits.max_candidate_features - self.scanned_features
-        return min(self.context.fetch_size, remaining + 1)
+        limits = self.context.resource_limits
+        geometry_rows_per_batch = (
+            limits.max_fetch_batch_blob_bytes // limits.max_geometry_blob_bytes
+        )
+        return min(self.context.fetch_size, remaining + 1, geometry_rows_per_batch)
+
+    def record_prefetched_ids(self, rows: Sequence[tuple[object, ...]]) -> None:
+        """Retain IDs already fetched when a resource failure stops row processing."""
+        for row in rows:
+            self.attempted_writer.write_id(str(row[0]))
 
     def process(self, row: tuple[object, ...]) -> bool:
         """Process one row, returning false if the candidate scan must stop."""
@@ -800,9 +815,20 @@ def _scan_rtree_candidates(cursor: sqlite3.Cursor, context: _LucasScanContext) -
             break
         if not rows:
             break
-        if any(not state.process(row) for row in rows):
+        continue_scan = _process_candidate_batch(state, rows)
+        del rows
+        if not continue_scan:
             break
     return state.finish(scan_failed=scan_failed)
+
+
+def _process_candidate_batch(state: _LucasScanState, rows: Sequence[tuple[object, ...]]) -> bool:
+    """Process a fetched batch and retain IDs for rows after an early stop."""
+    for row_index, row in enumerate(rows):
+        if not state.process(row):
+            state.record_prefetched_ids(rows[row_index + 1 :])
+            return False
+    return True
 
 
 def _parse_reference_row(
