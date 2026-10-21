@@ -21,7 +21,7 @@ typecheck:
 	$(UV) run ty check src tests scripts benchmarks
 
 test:
-	HYPOTHESIS_PROFILE=ci $(UV) run pytest -p no:cacheprovider --cov
+	HYPOTHESIS_PROFILE=ci $(UV) run pytest -p no:cacheprovider --cov --cov-fail-under=0
 	HYPOTHESIS_PROFILE=ci $(UV) run pytest -p no:cacheprovider -m slow --cov --cov-append --cov-report=json:"$(COVERAGE_JSON)" --cov-report=term-missing
 
 architecture:
