@@ -23,6 +23,7 @@ from osm_polygon_eunis.pool_runner import (
 from osm_polygon_eunis.raster_reference import RasterReference
 from osm_polygon_eunis.reference_staging import open_reference_group
 from osm_polygon_eunis.pool_adapters.lucas import LucasTaxonomy
+from osm_polygon_eunis.pool_adapters.controller import canonical_adapter_checkpoint_rows
 from osm_polygon_eunis.pool_adapters.source_pins import SourceTreeFile
 from osm_polygon_eunis.pool_contract.export import ExportReceipt
 from osm_polygon_eunis.pool_contract.streaming import (
@@ -122,6 +123,7 @@ PoolStreamSpec.from_build_input
 # Public constructors and raw-file metadata are consumed by source adapters downstream.
 LucasTaxonomy.from_records
 LucasTaxonomy.lucas_2022_c3
+canonical_adapter_checkpoint_rows
 SourceTreeFile.lfs_oid
 SourceTreeFile.lfs_size_bytes
 PoolArtifactReader.iter_parquet_rows

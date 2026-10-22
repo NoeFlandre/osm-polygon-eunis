@@ -51,6 +51,7 @@ from .streaming import (
     export_polygon_attempts,
     iter_labeled_polygon_batches,
     iter_polygon_batches,
+    persist_measurement_sidecars,
 )
 from .worldcover import (
     WORLDCOVER_AREA_MEASUREMENT,
@@ -103,6 +104,7 @@ __all__ = [
     "lucas_2022_reference_pin",
     "lucas_area_measurement_pin",
     "measure_lucas_supports",
+    "persist_measurement_sidecars",
     "polygon_geometry_tree_pins",
     "raw_source_tree_pins",
     "source_join_contract",

@@ -13,6 +13,7 @@ nav:
   - EUNIS source-wide pool adapter: eunis-sourcewide-pool-adapter.md
   - EUNIS original-source verification: eunis-original-source-verification-20261022.md
   - Source-wide WorldCover and LUCAS adapters: pool-adapters.md
+  - Bounded pool controller: pool-controller.md
   - Mutation testing: mutation-testing.md
   - Glossary: glossary.md
   - Architecture decisions:
