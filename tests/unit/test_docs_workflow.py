@@ -66,6 +66,7 @@ def test_contributor_quality_task_is_shared_by_pre_commit_and_ci() -> None:
         step.get("run", "") for step in qa_workflow["jobs"]["deterministic-quality"]["steps"]
     ]
     assert "make quality" in quality_steps
+    assert any("pytest -p no:cov --durations=20" in command for command in quality_steps)
     assert {hook["id"] for hook in hooks} == {
         "check-added-large-files",
         "check-yaml",
