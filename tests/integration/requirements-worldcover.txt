@@ -1,0 +1,1 @@
+osm-worldcover @ git+https://github.com/NoeFlandre/osm-worldcover.git@18c75517c74be22ab2f90edce2b65d3600461048

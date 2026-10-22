@@ -6,6 +6,7 @@ Use Python 3.12 or 3.13. Install the locked development dependencies:
 
 ```bash
 uv sync --locked --group dev
+uv pip install --python .venv/bin/python --no-deps -r tests/integration/requirements-worldcover.txt
 uvx pre-commit install
 ```
 

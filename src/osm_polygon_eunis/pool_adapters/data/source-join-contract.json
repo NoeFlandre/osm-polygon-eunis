@@ -1,0 +1,140 @@
+{
+  "metadata_handoff": {
+    "library_file_id": "libfile_ad353aad8ec081919f71859ca2c47f75",
+    "filename": "eunis-adapter-metadata-handoff-20261021-v2.json",
+    "sha256": "d1c4bf9e60468a85b17c535be17ae4efeba7284b718d60235e19a39a9e65a072"
+  },
+  "inventory_status": {
+    "unique_raw_polygon_keys": "not_computed",
+    "rule": "Parquet footer row counts and shard counts are not unique native polygon counts."
+  },
+  "sources": {
+    "website": {
+      "raw_repository": "NoeFlandre/osm-polygon-website-tag",
+      "raw_revision": "4cbddf95ce614e68d5ada8b94ca21bf9e48d39dd",
+      "raw_geometry_tree": {
+        "path": "polygons/",
+        "file_count": 386,
+        "total_size_bytes": 3943775497,
+        "inventory_sha256": "5ef66bc56532914428d800a1671bd1fd1b33cf54966617197e6e1c548788ca9d"
+      },
+      "relevance_repository": "NoeFlandre/osm-polygon-website-tag-landuse",
+      "relevance_revision": "e6524c711ee0033c3cd5990e5fdbbe4b89992dfb",
+      "relevance_tree": {
+        "path": "labels/polygons/",
+        "file_count": 386,
+        "total_size_bytes": 3299123482,
+        "inventory_sha256": "0a2c112b0d4198fddaf0c20153f0f1fc8f0f661c265446f741da787fa867ee96"
+      },
+      "join": {
+        "raw_path": "polygons/<region>-latest.parquet",
+        "label_path": "labels/polygons/<region>-latest.parquet",
+        "label_key": ["polygon_id", "field", "sentence_index"],
+        "decision_column": "decision",
+        "decision_values": ["yes", "no"],
+        "text_integrity_column": "text_sha256",
+        "field_to_text_column": {
+          "website": "website_sentences",
+          "contact_website": "contact_website_sentences"
+        },
+        "duckdb_sentence_index": "sentence_index + 1"
+      }
+    },
+    "description": {
+      "raw_repository": "NoeFlandre/osm-polygon-description-tag",
+      "raw_revision": "b4706eb315c66a8a57135289e7612dca8e03caf8",
+      "raw_geometry_tree": {
+        "path": "data/",
+        "file_count": 386,
+        "total_size_bytes": 746727545,
+        "inventory_sha256": "cfedbc2235eecda19e52527dc45efee043af5909ac483976db8b844dd4a0f599"
+      },
+      "derived_text_tree": {
+        "path": "language-v1/data/",
+        "file_count": 386,
+        "total_size_bytes": 103449770,
+        "inventory_sha256": "d76a3a42708307d1932c55c24499f39c2fd48c5fec712d15f0b65b0cb6c60f53"
+      },
+      "relevance_repository": "NoeFlandre/osm-polygon-description-tag-landuse",
+      "relevance_revision": "ce98b328f3c6543800a3d931877b51eb3f0cf768",
+      "relevance_tree": {
+        "path": "labels/language-v1/data/",
+        "file_count": 386,
+        "total_size_bytes": 100444539,
+        "inventory_sha256": "79ef71e658e6ac666a2a23ccdd3746220b525e0bb9ef6294ab8ceda9767a7768"
+      },
+      "join": {
+        "raw_geometry_path": "data/<region>-latest.parquet",
+        "raw_native_key": ["source_pbf", "osm_type", "osm_id"],
+        "derived_text_path": "language-v1/data/<region>-latest.parquet",
+        "derived_to_geometry_key": ["source_pbf", "osm_type", "osm_id"],
+        "derived_text_key": ["description_identity", "tag_key"],
+        "relevance_to_derived_key": ["description_identity", "tag_key"]
+      },
+      "inventory_rule": "Count data/ as raw geometry; language-v1/data/ is a derived text layer and must not be counted as a second polygon inventory."
+    },
+    "wiki": {
+      "raw_repository": "NoeFlandre/osm-polygon-wikidata-and-wikipedia",
+      "raw_revision": "d6fc058ccf4643bc5fe5bfd5c1c0bc403d3da801",
+      "raw_geometry_tree": {
+        "path": "polygons/",
+        "file_count": 386,
+        "total_size_bytes": 2203317876,
+        "inventory_sha256": "1628f43bf1d42041d0e41b18156abbb1f52420fd7f138027ad4b96fcfa0c9dd6"
+      },
+      "link_tree": {
+        "path": "polygon_document_links/",
+        "file_count": 386,
+        "total_size_bytes": 112581825,
+        "inventory_sha256": "0098e51b187d0d916479126d7eddff69bca6b51281778e4c1e951952794fdf12"
+      },
+      "document_trees": [
+        {
+          "path": "wikipedia/documents/",
+          "file_count": 386,
+          "total_size_bytes": 8739038060,
+          "inventory_sha256": "9382b4ba192618b612cd2aed46a91d222f182c68ea68d681070bf945543c3050"
+        },
+        {
+          "path": "wikivoyage/documents/",
+          "file_count": 375,
+          "total_size_bytes": 80078157,
+          "inventory_sha256": "cbb38750e68e7228784ed4b8736fafa24988cea8054e889298c66a25d5ed0022"
+        }
+      ],
+      "alternate_language_link_tree": {
+        "path": "language_splits/polygon_document_links_by_language/",
+        "file_count": 356,
+        "total_size_bytes": 154309530,
+        "inventory_sha256": "1e3b94d1e723fd68c5b980128e1e408ac4201783288b60900a212a73e584464a"
+      },
+      "relevance_repository": "NoeFlandre/osm-polygon-wikidata-and-wikipedia-landuse",
+      "relevance_revision": "49307aeb05b6dcc8a5d393f77f59a1e6d13a967a",
+      "relevance_trees": [
+        {
+          "path": "labels/wikipedia/sentences/",
+          "file_count": 386,
+          "total_size_bytes": 8191284820,
+          "inventory_sha256": "310214740d4c0d10b4228583992c0e0842df680ef68996f8cc019f9cdcb4268f"
+        },
+        {
+          "path": "labels/wikivoyage/sentences/",
+          "file_count": 375,
+          "total_size_bytes": 189959172,
+          "inventory_sha256": "3cdd0e4f0fa8b6588e578ff077467a3e4516e676d7a4abd30cb622477cf8245d"
+        }
+      ],
+      "join": {
+        "polygon_path": "polygons/<region>-latest.parquet",
+        "primary_link_path": "polygon_document_links/<region>-latest.parquet",
+        "link_key": ["polygon_id", "document_id", "project", "language"],
+        "document_key": "document_id",
+        "document_paths": [
+          "wikipedia/documents/<region>-latest.parquet",
+          "wikivoyage/documents/<region>-latest.parquet"
+        ],
+        "language_split_rule": "Primary and per-language link layouts are separate. Do not union them without deduplication and explicit scope."
+      }
+    }
+  }
+}
