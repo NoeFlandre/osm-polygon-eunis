@@ -37,6 +37,10 @@ from osm_polygon_eunis.pool_adapters.streaming import (
     AdapterStreamingOptions,
     export_labeled_polygons,
 )
+from osm_polygon_eunis.pool_adapters.workers import (
+    _load_pinned_worldcover_producer,
+    _worldcover_install_revision,
+)
 from osm_polygon_eunis.pool_contract import (
     ArtifactManifestPin,
     FilesystemArtifactReader,
@@ -419,6 +423,22 @@ def test_pinned_worldcover_iterator_adapter_and_export_contract(tmp_path: Path) 
     assert any("FAILED polygon attempts" in issue for issue in issues)
     unresolved_id = fixture.pool_polygons[2].inventory.inventory_row_id
     assert any(unresolved_id in issue for issue in issues)
+
+
+def test_builtin_worker_accepts_only_the_live_pinned_worldcover_producer() -> None:
+    producer = _load_pinned_worldcover_producer()
+
+    assert _worldcover_install_revision() == _PRODUCER_REVISION
+    assert all(
+        callable(function)
+        for function in (
+            producer.iter_sourcewide_coverage,
+            producer.is_usable_polygon,
+            producer.tiles_for_bbox,
+        )
+    )
+    assert producer.tile_not_published_error.__name__ == "TileNotPublishedError"
+    assert len(producer.taxonomy_sha256) == 64
 
 
 def test_v12_readiness_accepts_fully_pinned_completed_worldcover_attempts(

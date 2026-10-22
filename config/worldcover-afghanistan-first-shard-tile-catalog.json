@@ -1,0 +1,110 @@
+{
+  "coverage_scope": {
+    "shard_content_sha256": "796965a9013b2ed590d1797a77a1dfa86dcda60e75fceb8d05d460d37e70c1b2",
+    "shard_git_blob_id": "702eb4afb4c63502f7f598141c7f97f120a57f02",
+    "shard_path": "polygons/afghanistan-latest.parquet",
+    "shard_row_count": 42,
+    "shard_size_bytes": 145293,
+    "source_repository": "NoeFlandre/osm-polygon-website-tag",
+    "source_revision": "4cbddf95ce614e68d5ada8b94ca21bf9e48d39dd",
+    "text_source": "website",
+    "tile_requests_by_usable_geometry": {
+      "N30E063": 5,
+      "N33E060": 4,
+      "N33E066": 2,
+      "N33E069": 24,
+      "N36E063": 1,
+      "N36E066": 6
+    },
+    "usable_geometry_count": 42
+  },
+  "entries": [
+    {
+      "filename": "ESA_WorldCover_10m_2021_v200_N30E063_Map.tif",
+      "last_modified": "2022-10-26",
+      "relative_path": "ESA_WorldCover_10m_2021_v200_N30E063_Map.tif",
+      "s3_etag": "ac2311c9095c44b7f6b040c2a5a000ad-5",
+      "sha256": "d35ec0ed7c0788b62436bb26355c028187e6d1b7becbc731bb5ae7efaaf942b2",
+      "size_bytes": 37298427,
+      "source_uri": "https://esa-worldcover.s3.eu-central-1.amazonaws.com/v200/2021/map/ESA_WorldCover_10m_2021_v200_N30E063_Map.tif",
+      "state": "published",
+      "tile_id": "N30E063"
+    },
+    {
+      "filename": "ESA_WorldCover_10m_2021_v200_N33E060_Map.tif",
+      "last_modified": "2022-10-26",
+      "relative_path": "ESA_WorldCover_10m_2021_v200_N33E060_Map.tif",
+      "s3_etag": "702ee32d9789e24d0499ab0a83f256e0-8",
+      "sha256": "175fef3a3568b0beb90b3395bb497a9609e39c3de5cc0344433b73c4872e44a5",
+      "size_bytes": 64149724,
+      "source_uri": "https://esa-worldcover.s3.eu-central-1.amazonaws.com/v200/2021/map/ESA_WorldCover_10m_2021_v200_N33E060_Map.tif",
+      "state": "published",
+      "tile_id": "N33E060"
+    },
+    {
+      "filename": "ESA_WorldCover_10m_2021_v200_N33E066_Map.tif",
+      "last_modified": "2022-10-26",
+      "relative_path": "ESA_WorldCover_10m_2021_v200_N33E066_Map.tif",
+      "s3_etag": "78abfe99cae8790ad2134aa7cab25be5-15",
+      "sha256": "6a610c4c775888d24920d54cefca7ebeaf29cc4fe6cbf8177d1a379760f90ffc",
+      "size_bytes": 123999964,
+      "source_uri": "https://esa-worldcover.s3.eu-central-1.amazonaws.com/v200/2021/map/ESA_WorldCover_10m_2021_v200_N33E066_Map.tif",
+      "state": "published",
+      "tile_id": "N33E066"
+    },
+    {
+      "filename": "ESA_WorldCover_10m_2021_v200_N33E069_Map.tif",
+      "last_modified": "2022-10-26",
+      "relative_path": "ESA_WorldCover_10m_2021_v200_N33E069_Map.tif",
+      "s3_etag": "10006df609af393d63db199757cb23a0-19",
+      "sha256": "6702a032b3a9df67041b566f6a96094bc69c822507dcf041874e61bce37578b4",
+      "size_bytes": 155712630,
+      "source_uri": "https://esa-worldcover.s3.eu-central-1.amazonaws.com/v200/2021/map/ESA_WorldCover_10m_2021_v200_N33E069_Map.tif",
+      "state": "published",
+      "tile_id": "N33E069"
+    },
+    {
+      "filename": "ESA_WorldCover_10m_2021_v200_N36E063_Map.tif",
+      "last_modified": "2022-10-26",
+      "relative_path": "ESA_WorldCover_10m_2021_v200_N36E063_Map.tif",
+      "s3_etag": "f9a8aa08fa4e77df8c6706e6a579f3c4-11",
+      "sha256": "518373e0ca81dd1668ae949c9e25da0b204552553c072047d188eef0b3d05366",
+      "size_bytes": 88312375,
+      "source_uri": "https://esa-worldcover.s3.eu-central-1.amazonaws.com/v200/2021/map/ESA_WorldCover_10m_2021_v200_N36E063_Map.tif",
+      "state": "published",
+      "tile_id": "N36E063"
+    },
+    {
+      "filename": "ESA_WorldCover_10m_2021_v200_N36E066_Map.tif",
+      "last_modified": "2022-10-26",
+      "relative_path": "ESA_WorldCover_10m_2021_v200_N36E066_Map.tif",
+      "s3_etag": "8c2b6eb8b4446f16d9e5b032c8ebfb61-13",
+      "sha256": "32dcf1dc519b58523ba591ac350a3bfc524a3502f440b58a4b2b9d199ae3ba14",
+      "size_bytes": 105253000,
+      "source_uri": "https://esa-worldcover.s3.eu-central-1.amazonaws.com/v200/2021/map/ESA_WorldCover_10m_2021_v200_N36E066_Map.tif",
+      "state": "published",
+      "tile_id": "N36E066"
+    }
+  ],
+  "format_version": "worldcover-tile-catalog-v1",
+  "producer_revision": "18c75517c74be22ab2f90edce2b65d3600461048",
+  "product": {
+    "band_count": 1,
+    "class_map": "Map",
+    "crs": "EPSG:4326",
+    "dtype": "uint8",
+    "height": 36000,
+    "nodata": 0,
+    "publisher": "ESA WorldCover",
+    "tile_grid_degrees": 3,
+    "version": "v200",
+    "width": 36000,
+    "year": 2021
+  },
+  "resource_limits": {
+    "max_entries": 6,
+    "max_tile_bytes": 160000000,
+    "max_total_bytes": 600000000
+  },
+  "verified_at": "2026-10-22"
+}

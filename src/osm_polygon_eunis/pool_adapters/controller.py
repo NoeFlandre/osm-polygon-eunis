@@ -19,6 +19,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import unquote, urlparse
 
 from osm_polygon_eunis.pool_adapters.source_pins import (
     RawSourceTreePin,
@@ -954,6 +955,7 @@ def _write_map_checkpoint(
         temporary.unlink(missing_ok=True)
         raise
     checkpoint_sha = _sha256_file(checkpoint_path)
+    _validate_map_checkpoint_artifacts(checkpoint_path)
     _write_receipt(
         receipt_path,
         {
@@ -976,8 +978,14 @@ def _write_map_attempt_rows(context: MapCheckpointContext, temporary: Path) -> i
     raw_iter = read_raw_checkpoint(context.raw_path)
     expected = next(raw_iter, None)
     row_count = 0
+    checkpoint_runner = getattr(context.worker, "run_checkpoint", None)
+    results = (
+        checkpoint_runner(context.raw_path)
+        if callable(checkpoint_runner)
+        else context.worker(read_raw_checkpoint(context.raw_path))
+    )
     with temporary.open("wb") as output:
-        for result in context.worker(read_raw_checkpoint(context.raw_path)):
+        for result in results:
             wrapper = _map_attempt_record(result, expected, context.map_name)
             expected = next(raw_iter, None)
             _write_bounded_line(
@@ -1231,6 +1239,11 @@ def _source_hash_matches(
     git_blob_sha1: str,
     content_sha256: str,
 ) -> bool:
+    if file_pin.verified_lfs_content_sha256 is not None:
+        return (
+            size_bytes == file_pin.lfs_size_bytes
+            and content_sha256 == file_pin.verified_lfs_content_sha256
+        )
     if file_pin.lfs_oid is None:
         return size_bytes == file_pin.size_bytes and git_blob_sha1 == file_pin.blob_id
     expected = file_pin.lfs_oid.removeprefix("sha256:")
@@ -1253,7 +1266,77 @@ def _valid_map_receipt(
     digest = _validate_map_checkpoint_digest(checkpoint, receipt.get("checkpoint_sha256"))
     _validate_map_receipt_scope(receipt, expected_rows)
     _validate_jsonl_checkpoint(checkpoint, expected_rows, max_row_bytes)
+    _validate_map_checkpoint_artifacts(checkpoint)
     return digest
+
+
+def _validate_map_checkpoint_artifacts(checkpoint: Path) -> None:
+    """Revalidate geometry and streamed evidence files before checkpoint reuse."""
+
+    with checkpoint.open("rb") as stream:
+        for line_number, line in enumerate(stream, start=1):
+            record = json.loads(line)
+            if not isinstance(record, dict):
+                raise TypeError("map checkpoint rows must be JSON objects")
+            result = record.get("result")
+            if isinstance(result, dict):
+                _verify_artifacts_recursive(result, f"map checkpoint row {line_number}")
+
+
+def _verify_artifacts_recursive(value: Any, context: str) -> None:
+    if isinstance(value, dict):
+        if "geometry_uri" in value and "geometry_sha256" in value:
+            _verify_local_artifact(
+                value["geometry_uri"], value["geometry_sha256"], context, expected_records=None
+            )
+        if {"uri", "sha256", "record_count"}.issubset(value) and value.get("uri") is not None:
+            _verify_local_artifact(
+                value["uri"],
+                value["sha256"],
+                context,
+                expected_records=value["record_count"],
+            )
+        for child in value.values():
+            _verify_artifacts_recursive(child, context)
+    elif isinstance(value, list):
+        for child in value:
+            _verify_artifacts_recursive(child, context)
+
+
+def _verify_local_artifact(
+    uri: object,
+    expected_sha256: object,
+    context: str,
+    *,
+    expected_records: object,
+) -> None:
+    if (
+        not isinstance(uri, str)
+        or not isinstance(expected_sha256, str)
+        or not _SHA256_RE.fullmatch(expected_sha256)
+    ):
+        raise ValueError(f"{context} artifact has invalid URI or SHA-256 metadata")
+    parsed = urlparse(uri)
+    if parsed.scheme != "file" or parsed.netloc not in {"", "localhost"}:
+        raise ValueError(f"{context} artifact URI is not a local file URI")
+    path = Path(unquote(parsed.path))
+    if not path.is_file() or _sha256_file(path) != expected_sha256:
+        raise ValueError(f"{context} artifact bytes differ from their checkpoint pin")
+    if expected_records is None:
+        return
+    if (
+        isinstance(expected_records, bool)
+        or not isinstance(expected_records, int)
+        or expected_records <= 0
+    ):
+        raise ValueError(f"{context} sidecar record count is invalid")
+    count = 0
+    with path.open("rb") as stream:
+        for line in stream:
+            json.loads(line)
+            count += 1
+    if count != expected_records:
+        raise ValueError(f"{context} sidecar record count differs from its checkpoint pin")
 
 
 def _validate_map_receipt_signature(receipt: Mapping[str, Any], signature: str) -> None:
@@ -1364,7 +1447,7 @@ def _source_file(source_pin: RawSourceTreePin, path: str) -> SourceTreeFile:
 
 
 def _expected_local_size(file_pin: SourceTreeFile) -> int:
-    if file_pin.lfs_oid is not None:
+    if file_pin.lfs_oid is not None or file_pin.verified_lfs_content_sha256 is not None:
         if file_pin.lfs_size_bytes is None:
             raise ValueError("pinned Git LFS source file has no content size")
         return file_pin.lfs_size_bytes
@@ -1549,10 +1632,13 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--inventory-sha256", required=True)
         command.add_argument("--workspace", type=Path, required=True)
         command.add_argument("--max-workspace-bytes", type=int, required=True)
+        command.add_argument("--max-row-bytes", type=int, default=_MAX_ROW_BYTES)
         command.add_argument("--max-shards-per-invocation", type=int, default=1)
         command.add_argument(
             "--worker-factory", help="module.path:callable returning workers and raw-row reader"
         )
+        command.add_argument("--worker-config", type=Path)
+        command.add_argument("--worker-config-sha256")
         command.add_argument("--dry-run", action="store_true")
     return parser
 
@@ -1569,6 +1655,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _validate_cli_limits(args: argparse.Namespace) -> None:
     if args.max_workspace_bytes <= 0 or args.max_shards_per_invocation <= 0:
         raise SystemExit("workspace and shard limits must be positive")
+    if not 0 < args.max_row_bytes <= _MAX_ROW_BYTES:
+        raise SystemExit(f"row byte limit must be between 1 and {_MAX_ROW_BYTES}")
 
 
 def _dispatch_cli(
@@ -1611,6 +1699,7 @@ def _resolve_cli_plan(
         maps=tuple(args.maps),
         max_workspace_bytes=args.max_workspace_bytes,
         max_shards_per_invocation=args.max_shards_per_invocation,
+        max_row_bytes=args.max_row_bytes,
     )
     plan = plan_run(request, census, source_pin, args.input_root)
     return census, source_pin, request, plan

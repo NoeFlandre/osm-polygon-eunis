@@ -1014,7 +1014,11 @@ def _assert_lucas_reader_resource_limits(
     )
     for limits, reason_prefix, expected_ids in limits_and_reasons:
         reader = LucasGeoPackageReader(
-            path, taxonomy_path, manifest, taxonomy, resource_limits=limits
+            path,
+            taxonomy_path,
+            manifest,
+            taxonomy,
+            config=lucas_module.LucasReaderConfig(resource_limits=limits),
         )
         with reader:
             query = reader.query(box(0, 0, 10, 10))
@@ -1144,7 +1148,13 @@ def test_lucas_reader_uses_exact_file_pins_and_records_feature_ids(
         ),
     )
     fetch_sizes = _record_lucas_fetch_sizes(monkeypatch)
-    reader = LucasGeoPackageReader(path, taxonomy_path, manifest, taxonomy, fetch_size=512)
+    reader = LucasGeoPackageReader(
+        path,
+        taxonomy_path,
+        manifest,
+        taxonomy,
+        config=lucas_module.LucasReaderConfig(fetch_size=512),
+    )
     attempted_ids = ()
     level_support_ids = {}
     first_adapter_attempt_ids = ()
@@ -1199,8 +1209,10 @@ def test_lucas_reader_uses_exact_file_pins_and_records_feature_ids(
         taxonomy_path,
         manifest,
         taxonomy,
-        fetch_size=1,
-        resource_limits=LucasResourceLimits(max_candidate_features=2),
+        config=lucas_module.LucasReaderConfig(
+            fetch_size=1,
+            resource_limits=LucasResourceLimits(max_candidate_features=2),
+        ),
     )
     with limited_reader:
         partial = limited_reader.query(box(0, 0, 10, 10))
@@ -1283,7 +1295,13 @@ def test_lucas_streamed_id_sidecars_are_persisted_through_pool_export(tmp_path: 
     )
     metadata = _with_v12_fixture_provenance(metadata, tmp_path, (path, taxonomy_path))
     sink = FilesystemStreamingSink(tmp_path / "artifacts")
-    with LucasGeoPackageReader(path, taxonomy_path, manifest, taxonomy, fetch_size=2) as reader:
+    with LucasGeoPackageReader(
+        path,
+        taxonomy_path,
+        manifest,
+        taxonomy,
+        config=lucas_module.LucasReaderConfig(fetch_size=2),
+    ) as reader:
         query = reader.query(box(0, 0, 10, 10))
         record = measure_lucas_supports(
             polygon, query, taxonomy, _reference_pin(ReferenceSystem.LUCAS)
@@ -1549,7 +1567,7 @@ def test_lucas_file_pins_and_reader_preconditions_fail_closed(tmp_path: Path) ->
     manifest = lucas_2022_copernicus_manifest()
     reader_args = (tmp_path / "not-downloaded.gpkg", tmp_path / "codebook.pdf", manifest, taxonomy)
     with pytest.raises(ValueError, match="fetch size must be positive"):
-        LucasGeoPackageReader(*reader_args, fetch_size=0)
+        LucasGeoPackageReader(*reader_args, config=lucas_module.LucasReaderConfig(fetch_size=0))
     with pytest.raises(ValueError, match="must fit one maximum-sized geometry blob"):
         LucasResourceLimits(max_geometry_blob_bytes=16, max_fetch_batch_blob_bytes=15)
     with pytest.raises(ValueError, match="taxonomy ID"):
