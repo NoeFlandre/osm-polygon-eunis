@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from osm_polygon_eunis.pool_adapters.workspace_quota import (
     WorkspaceQuota,
     WorkspaceQuotaExceededError,
@@ -45,6 +47,7 @@ def _crash_with_owned_partial(workspace_text: str, ready: Any) -> None:
     os._exit(0)
 
 
+@pytest.mark.slow
 def test_distinct_processes_cannot_spend_the_same_workspace_capacity(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -72,6 +75,7 @@ def test_distinct_processes_cannot_spend_the_same_workspace_capacity(tmp_path: P
     assert workspace_size(workspace) == 0
 
 
+@pytest.mark.slow
 def test_crashed_lease_removes_only_its_partial_and_releases_capacity(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
