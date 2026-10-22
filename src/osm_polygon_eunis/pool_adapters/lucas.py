@@ -28,6 +28,8 @@ from shapely.wkb import loads as load_wkb
 
 from osm_polygon_eunis.geopackage_sql import sql_identifier
 from osm_polygon_eunis.pool_contract import (
+    AreaMeasurementPin,
+    AreaMeasureSpec,
     AssignmentKind,
     LabelLevel,
     ReferencePin,
@@ -65,6 +67,7 @@ LUCAS_TAXONOMY_REVISION = (
     f"source-sha256={LUCAS_TAXONOMY_SOURCE_SHA256}"
 )
 LUCAS_2022_LAYER = "l2022_cop_radpoly_radqs_allatr_wcol"
+LUCAS_AREA_MEASUREMENT_ID = "lucas-epsg3035-class-union-intersection-area-v1"
 
 _LUCAS_C3_ROWS = (
     ("A00", "A10", ("A11", "A12", "A13")),
@@ -335,6 +338,48 @@ def lucas_2022_reference_pin(
         support_unit="m^2",
         threshold=0.8,
         support_union_policy="independent_union_per_level_and_class:v1",
+        area_measurement=lucas_area_measurement_pin(),
+    )
+
+
+def lucas_area_measurement_pin() -> AreaMeasurementPin:
+    """Describe LUCAS's projected same-class union and full-polygon area method."""
+    parameters = json.dumps({"method": "none"}, sort_keys=True, separators=(",", ":"))
+    errors = json.dumps(
+        {
+            "total_error_bound": "not_certified",
+            "resource_limit_policy": "fail_closed",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    numerator = AreaMeasureSpec(
+        method_id=LUCAS_AREA_MEASUREMENT_ID,
+        coordinate_system="EPSG:3035",
+        ellipsoid=None,
+        boundary_convention="within-class footprint union clipped to the unchanged source polygon",
+        densification_method="none; source and footprint coordinates are already in EPSG:3035",
+        densification_parameters_json=parameters,
+        error_settings_json=errors,
+        output_unit="m^2",
+    )
+    denominator = AreaMeasureSpec(
+        method_id=LUCAS_AREA_MEASUREMENT_ID,
+        coordinate_system="EPSG:3035",
+        ellipsoid=None,
+        boundary_convention="unchanged source polygon in EPSG:3035",
+        densification_method="none; source coordinates are already in EPSG:3035",
+        densification_parameters_json=parameters,
+        error_settings_json=errors,
+        output_unit="m^2",
+    )
+    return AreaMeasurementPin(
+        implementation="shapely.unary_union and GEOS intersection/area",
+        implementation_version=(
+            f"shapely-{shapely.__version__};geos-{shapely.geos_version_string}"
+        ),
+        numerator=numerator,
+        denominator=denominator,
     )
 
 

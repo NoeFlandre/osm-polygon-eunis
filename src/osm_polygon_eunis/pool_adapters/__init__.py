@@ -11,6 +11,7 @@ from .common import (
     label_polygon,
 )
 from .lucas import (
+    LUCAS_AREA_MEASUREMENT_ID,
     LUCAS_LEVELS,
     LucasCode,
     LucasFeatureQuery,
@@ -22,6 +23,7 @@ from .lucas import (
     LucasTaxonomy,
     lucas_2022_copernicus_manifest,
     lucas_2022_reference_pin,
+    lucas_area_measurement_pin,
     measure_lucas_supports,
     verify_lucas_file,
     verify_lucas_taxonomy_file,
@@ -55,10 +57,12 @@ from .worldcover import (
     WORLDCOVER_CODES,
     WORLDCOVER_LEVELS,
     WorldCoverEvidence,
+    worldcover_area_measurement_pin,
     worldcover_supports,
 )
 
 __all__ = [
+    "LUCAS_AREA_MEASUREMENT_ID",
     "LUCAS_LEVELS",
     "WORLDCOVER_AREA_MEASUREMENT",
     "WORLDCOVER_CODES",
@@ -97,11 +101,13 @@ __all__ = [
     "label_polygon",
     "lucas_2022_copernicus_manifest",
     "lucas_2022_reference_pin",
+    "lucas_area_measurement_pin",
     "measure_lucas_supports",
     "polygon_geometry_tree_pins",
     "raw_source_tree_pins",
     "source_join_contract",
     "verify_lucas_file",
     "verify_lucas_taxonomy_file",
+    "worldcover_area_measurement_pin",
     "worldcover_supports",
 ]

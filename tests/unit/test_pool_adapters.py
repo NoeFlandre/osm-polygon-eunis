@@ -42,17 +42,20 @@ from osm_polygon_eunis.pool_adapters import (
     label_polygon,
     lucas_2022_copernicus_manifest,
     lucas_2022_reference_pin,
+    lucas_area_measurement_pin,
     measure_lucas_supports,
     polygon_geometry_tree_pins,
     raw_source_tree_pins,
     source_join_contract,
     verify_lucas_file,
     verify_lucas_taxonomy_file,
+    worldcover_area_measurement_pin,
     worldcover_supports,
 )
 from osm_polygon_eunis.pool_adapters import lucas as lucas_module
 from osm_polygon_eunis.pool_adapters import source_pins as source_pins_module
 from osm_polygon_eunis.pool_contract import (
+    ArtifactManifestPin,
     AssignmentKind,
     AttemptStatus,
     BodyStatus,
@@ -146,6 +149,83 @@ def _reference_pin(reference: ReferenceSystem) -> ReferencePin:
         support_unit=unit,
         threshold=0.8,
         support_union_policy="union_by_class",
+    )
+
+
+def _artifact_manifest_pin(
+    tmp_path: Path,
+    name: str,
+    artifact_paths: tuple[Path, ...],
+) -> ArtifactManifestPin:
+    rows = [
+        {
+            "artifact_uri": path.as_uri(),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+        for path in sorted(artifact_paths, key=lambda item: item.as_uri())
+    ]
+    content = b"".join(
+        json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        for row in rows
+    )
+    manifest_path = tmp_path / f"{name}-artifact-manifest.jsonl"
+    manifest_path.write_bytes(content)
+    return ArtifactManifestPin(
+        format_version="artifact-list-jsonl-v1",
+        manifest_uri=manifest_path.as_uri(),
+        manifest_sha256=hashlib.sha256(content).hexdigest(),
+        expected_artifact_count=len(rows),
+    )
+
+
+def _fixture_area_measurement(reference: ReferenceSystem):
+    if reference is ReferenceSystem.WORLDCOVER:
+        return worldcover_area_measurement_pin("reference-commit-1")
+    return lucas_area_measurement_pin()
+
+
+def _with_v12_fixture_provenance(
+    metadata: PoolBuildInput,
+    tmp_path: Path,
+    reference_artifacts: tuple[Path, ...] = (),
+) -> PoolBuildInput:
+    source_path = tmp_path / f"{metadata.pool_key.name}-raw-source-fixture.json"
+    source_path.write_text(
+        json.dumps(
+            {
+                "pool": metadata.pool_key.name,
+                "expected_key_count": metadata.raw_inventory_evidence.expected_key_count,
+                "expected_keyset_sha256": metadata.raw_inventory_evidence.expected_keyset_sha256,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+    references = reference_artifacts
+    if not references:
+        reference_path = tmp_path / f"{metadata.pool_key.reference_system.value}-fixture.bin"
+        reference_path.write_bytes(
+            f"synthetic {metadata.pool_key.reference_system.value} reference".encode()
+        )
+        references = (reference_path,)
+    return replace(
+        metadata,
+        source_snapshot=replace(
+            metadata.source_snapshot,
+            pbf_uri=None,
+            pbf_sha256=None,
+            source_artifact_manifest=_artifact_manifest_pin(
+                tmp_path, f"{metadata.pool_key.name}-source", (source_path,)
+            ),
+        ),
+        reference_pin=replace(
+            metadata.reference_pin,
+            reference_artifact_manifest=_artifact_manifest_pin(
+                tmp_path, f"{metadata.pool_key.name}-reference", references
+            ),
+            area_measurement=_fixture_area_measurement(metadata.pool_key.reference_system),
+        ),
     )
 
 
@@ -1196,6 +1276,7 @@ def test_lucas_streamed_id_sidecars_are_persisted_through_pool_export(tmp_path: 
         label_candidates=(),
         label_outcomes=(),
     )
+    metadata = _with_v12_fixture_provenance(metadata, tmp_path, (path, taxonomy_path))
     sink = FilesystemStreamingSink(tmp_path / "artifacts")
     with LucasGeoPackageReader(path, taxonomy_path, manifest, taxonomy, fetch_size=2) as reader:
         query = reader.query(box(0, 0, 10, 10))
@@ -1331,6 +1412,32 @@ def test_bounded_export_preserves_adapter_rows_and_unmatched_text_link(tmp_path:
         documents=(),
         text_polygon_links=(),
     )
+    reference_fixture = tmp_path / "synthetic-worldcover-reference.bin"
+    reference_fixture.write_bytes(b"synthetic WorldCover reference artifact")
+    metadata = _with_v12_fixture_provenance(metadata, tmp_path, (reference_fixture,))
+
+    broken_metadata = replace(
+        metadata,
+        source_snapshot=replace(metadata.source_snapshot, source_artifact_manifest=None),
+        reference_pin=replace(
+            metadata.reference_pin,
+            reference_artifact_manifest=None,
+            area_measurement=None,
+        ),
+    )
+    output_sink = FilesystemStreamingSink(tmp_path / "missing-provenance-output")
+
+    def unconsumed_rows():
+        raise AssertionError("adapter consumed rows before provenance preflight")
+        yield
+
+    with pytest.raises(ValueError) as error:
+        export_labeled_polygons(broken_metadata, unconsumed_rows(), output_sink)
+    assert "source_snapshot.source_artifact_manifest" in str(error.value)
+    assert "reference_pin.reference_artifact_manifest" in str(error.value)
+    assert "reference_pin.area_measurement" in str(error.value)
+    assert not output_sink.root.exists()
+
     receipt = export_labeled_polygons(
         metadata,
         iter_worldcover_rows(

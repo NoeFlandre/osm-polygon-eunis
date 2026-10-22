@@ -31,12 +31,15 @@ from osm_polygon_eunis.pool_adapters import (
     PoolPolygonInput,
     build_raw_inventory_evidence,
     iter_worldcover_source_rows,
+    worldcover_area_measurement_pin,
 )
 from osm_polygon_eunis.pool_adapters.streaming import (
     AdapterStreamingOptions,
     export_labeled_polygons,
 )
 from osm_polygon_eunis.pool_contract import (
+    ArtifactManifestPin,
+    FilesystemArtifactReader,
     FilesystemStreamingSink,
     GeometryStatus,
     OutcomeStatus,
@@ -52,6 +55,7 @@ from osm_polygon_eunis.pool_contract import (
     TextSource,
     canonical_native_key,
     native_keyset_sha256,
+    validate_nine_streamed_evaluation_ready_gate,
 )
 from osm_polygon_eunis.pool_contract.builder import (
     inventory_row_identifier,
@@ -110,7 +114,13 @@ def _canonical_attempt(source_id: str, geometry, raster: Path):
     return attempt
 
 
-def _pool_polygon(index: int, source_id: str, geometry, area_m2: float) -> PoolPolygonInput:
+def _pool_polygon(
+    tmp_path: Path,
+    index: int,
+    source_id: str,
+    geometry,
+    area_m2: float,
+) -> PoolPolygonInput:
     native_key = canonical_native_key(
         {"source_pbf": "tiny-worldcover.osm.pbf", "osm_type": "way", "osm_id": index}
     )
@@ -123,11 +133,13 @@ def _pool_polygon(index: int, source_id: str, geometry, area_m2: float) -> PoolP
         source_row_locator=f"polygons/tiny-worldcover.parquet#row={index - 1}",
         polygon_snapshot_id=snapshot_id,
     )
+    geometry_path = tmp_path / f"worldcover-fixture-{index}.wkb"
+    geometry_path.write_bytes(shapely.to_wkb(geometry))
     snapshot = PolygonSnapshot(
         polygon_snapshot_id=snapshot_id,
         inventory_row_id=inventory_id,
         native_key=native_key,
-        geometry_uri=f"https://artifacts.example/worldcover-fixture/{index}.wkb",
+        geometry_uri=geometry_path.as_uri(),
         geometry_sha256=geometry_sha256,
         geometry_format="WKB",
         crs="EPSG:4326",
@@ -153,18 +165,70 @@ def _reference_pin() -> ReferencePin:
     )
 
 
-def _metadata(tmp_path: Path, polygons: tuple[PoolPolygonInput, ...]) -> PoolBuildInput:
+def _artifact_manifest_pin(
+    tmp_path: Path,
+    name: str,
+    artifact_paths: tuple[Path, ...],
+) -> ArtifactManifestPin:
+    rows = [
+        {
+            "artifact_uri": path.as_uri(),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+        for path in sorted(artifact_paths, key=lambda item: item.as_uri())
+    ]
+    content = b"".join(
+        json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        for row in rows
+    )
+    manifest_path = tmp_path / f"{name}-artifact-manifest.jsonl"
+    manifest_path.write_bytes(content)
+    return ArtifactManifestPin(
+        format_version="artifact-list-jsonl-v1",
+        manifest_uri=manifest_path.as_uri(),
+        manifest_sha256=hashlib.sha256(content).hexdigest(),
+        expected_artifact_count=len(rows),
+    )
+
+
+def _metadata(
+    tmp_path: Path,
+    polygons: tuple[PoolPolygonInput, ...],
+    reference_artifacts: tuple[Path, ...],
+) -> PoolBuildInput:
     scan_report = b"tiny raster integration raw polygon inventory\n"
     scan_path = tmp_path / "raw-inventory.json"
     scan_path.write_bytes(scan_report)
+    source_path = tmp_path / "tiny-source-inventory.jsonl"
+    source_inventory_rows = []
+    for polygon in polygons:
+        if polygon.snapshot is None:
+            raise ValueError("WorldCover source fixture needs a pinned polygon snapshot")
+        source_inventory_rows.append(
+            json.dumps(
+                {
+                    "native_key": polygon.inventory.native_key,
+                    "geometry_sha256": polygon.snapshot.geometry_sha256,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+    source_path.write_text("\n".join(source_inventory_rows) + "\n", encoding="utf-8")
+    source_manifest = _artifact_manifest_pin(tmp_path, "source", (source_path,))
+    reference_manifest = _artifact_manifest_pin(tmp_path, "reference", reference_artifacts)
+    reference_pin = replace(
+        _reference_pin(),
+        reference_artifact_manifest=reference_manifest,
+        area_measurement=worldcover_area_measurement_pin(_PRODUCER_REVISION),
+    )
     return PoolBuildInput(
         pool_key=PoolKey(TextSource.DESCRIPTION, ReferenceSystem.WORLDCOVER),
         source_snapshot=SourceSnapshot(
             snapshot_id=_SOURCE_SNAPSHOT_ID,
             repository="NoeFlandre/osm-polygon-eunis",
             revision="tiny-fixture-source-v1",
-            pbf_uri="https://artifacts.example/tiny-worldcover.osm.pbf",
-            pbf_sha256="a" * 64,
+            source_artifact_manifest=source_manifest,
         ),
         raw_inventory_evidence=build_raw_inventory_evidence(
             enumeration_rule="enumerate every raw polygon before text and evaluation joins",
@@ -175,7 +239,7 @@ def _metadata(tmp_path: Path, polygons: tuple[PoolPolygonInput, ...]) -> PoolBui
                 polygon.inventory.native_key for polygon in polygons
             ),
         ),
-        reference_pin=_reference_pin(),
+        reference_pin=reference_pin,
         adapter_id="osm-polygon-eunis/worldcover-integration-fixture",
         adapter_revision="fixture-adapter-v1",
         builder_revision="fixture-builder-v1",
@@ -194,7 +258,11 @@ def _exported_table(receipt, sink_root: Path, table_name: str) -> pa.Table:
     return pq.read_table(sink_root / shard["path"])
 
 
-def _export_fixture(tmp_path: Path) -> _ExportFixture:
+def _export_fixture(
+    tmp_path: Path,
+    *,
+    include_unresolved: bool = True,
+) -> _ExportFixture:
     raster = tmp_path / "four_of_five_cells.tif"
     _write_raster(
         raster,
@@ -221,21 +289,27 @@ def _export_fixture(tmp_path: Path) -> _ExportFixture:
     below_area = attempts[1].polygon_area_m2
     assert exact_area is not None and below_area is not None
     pool_polygons = (
-        _pool_polygon(1, "way/1", exact_geometry, exact_area),
-        _pool_polygon(2, "way/2", below_geometry, below_area),
+        _pool_polygon(tmp_path, 1, "way/1", exact_geometry, exact_area),
+        _pool_polygon(tmp_path, 2, "way/2", below_geometry, below_area),
         _pool_polygon(
+            tmp_path,
             3,
             "way/3",
             unresolved_geometry,
             float(shapely.area(_equal_area_geometry(unresolved_geometry, densify_degrees=0.0001))),
         ),
     )
-    source_rows = iter_worldcover_source_rows(pool_polygons, attempts, _reference_pin())
+    if not include_unresolved:
+        attempts = attempts[:2]
+        pool_polygons = pool_polygons[:2]
     sink_root = tmp_path / "exported"
+    sink = FilesystemStreamingSink(sink_root)
+    metadata = _metadata(tmp_path, pool_polygons, (raster, all_nodata_raster))
+    source_rows = iter_worldcover_source_rows(pool_polygons, attempts, metadata.reference_pin)
     receipt = export_labeled_polygons(
-        _metadata(tmp_path, pool_polygons),
+        metadata,
         source_rows,
-        FilesystemStreamingSink(sink_root),
+        sink,
         options=AdapterStreamingOptions(staging_directory=tmp_path),
     )
     return _ExportFixture(attempts, pool_polygons, exact_area, below_area, receipt, sink_root)
@@ -325,3 +399,37 @@ def test_pinned_worldcover_iterator_adapter_and_export_contract(tmp_path: Path) 
     _assert_label_decisions(fixture, candidate_by_id, outcome_by_id)
     _assert_unresolved_is_excluded(fixture, candidate_by_id, outcome_by_id, attempt_by_id)
     _assert_diagnostics_and_stale_version_are_preserved(fixture)
+
+    readiness = validate_nine_streamed_evaluation_ready_gate(
+        (fixture.receipt,), FilesystemArtifactReader()
+    )
+    assert readiness.missing_pools == tuple(
+        sorted(
+            f"{text_source.value}-{reference_system.value}"
+            for text_source in TextSource
+            for reference_system in ReferenceSystem
+            if (text_source, reference_system)
+            != (TextSource.DESCRIPTION, ReferenceSystem.WORLDCOVER)
+        )
+    )
+    assert readiness.duplicate_pools == ()
+    assert len(readiness.invalid_pools) == 1
+    failed_pool, issues = readiness.invalid_pools[0]
+    assert failed_pool == "description-worldcover"
+    assert any("FAILED polygon attempts" in issue for issue in issues)
+    unresolved_id = fixture.pool_polygons[2].inventory.inventory_row_id
+    assert any(unresolved_id in issue for issue in issues)
+
+
+def test_v12_readiness_accepts_fully_pinned_completed_worldcover_attempts(
+    tmp_path: Path,
+) -> None:
+    fixture = _export_fixture(tmp_path, include_unresolved=False)
+
+    readiness = validate_nine_streamed_evaluation_ready_gate(
+        (fixture.receipt,), FilesystemArtifactReader()
+    )
+
+    assert len(readiness.missing_pools) == 8
+    assert readiness.duplicate_pools == ()
+    assert readiness.invalid_pools == ()

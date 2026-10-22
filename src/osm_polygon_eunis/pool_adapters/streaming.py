@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import re
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from urllib.parse import urlparse
 
 from osm_polygon_eunis.pool_contract import (
+    AreaMeasureSpec,
     AttemptStatus,
     FileArtifactSink,
     LabelSupportEvidence,
@@ -15,6 +19,7 @@ from osm_polygon_eunis.pool_contract import (
     PoolBatch,
     PoolBuildInput,
     PoolStreamSpec,
+    ReferenceSystem,
     StreamingExportReceipt,
     StreamingLimits,
     export_pool_batches,
@@ -25,6 +30,13 @@ from .common import (
     PoolPolygonInput,
     PoolPolygonLabelRecords,
 )
+from .lucas import LUCAS_AREA_MEASUREMENT_ID
+from .worldcover import WORLDCOVER_AREA_MEASUREMENT
+
+_AREA_METHOD_BY_REFERENCE = {
+    ReferenceSystem.WORLDCOVER: WORLDCOVER_AREA_MEASUREMENT,
+    ReferenceSystem.LUCAS: LUCAS_AREA_MEASUREMENT_ID,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +82,7 @@ def export_labeled_polygons(
     _require_metadata_only(metadata_input)
     stream_options = options or AdapterStreamingOptions()
     spec = PoolStreamSpec.from_build_input(metadata_input)
+    _require_contract_v12_provenance(spec)
     batches = iter_labeled_polygon_batches(
         _persist_measurement_sidecars(labeled_polygons, sink, metadata_input.pool_key.name),
         max_batch_rows=stream_options.limits.max_batch_rows,
@@ -344,3 +357,126 @@ def _require_metadata_only(metadata_input: PoolBuildInput) -> None:
     )
     if any(row_groups):
         raise ValueError("stream metadata input must not contain materialized pool table rows")
+
+
+def _require_contract_v12_provenance(spec: PoolStreamSpec) -> None:
+    """Refuse adapter exports that cannot pass the v1.2 readiness gate."""
+    if spec.contract_version != "1.2.0":
+        raise ValueError("pool adapters require contract version 1.2.0")
+    _require_raw_inventory_evidence(spec)
+    _require_artifact_manifest_pins(spec)
+    _require_area_measurement(spec)
+
+
+def _require_raw_inventory_evidence(spec: PoolStreamSpec) -> None:
+    evidence = spec.raw_inventory_evidence
+    if evidence.expected_key_count <= 0:
+        raise ValueError("contract 1.2 adapter export needs a verified non-empty raw inventory")
+    if not _valid_sha256(evidence.expected_keyset_sha256):
+        raise ValueError("contract 1.2 adapter export needs the raw inventory key-set SHA-256")
+    if not _valid_uri(evidence.scan_report_uri) or not _valid_sha256(evidence.scan_report_sha256):
+        raise ValueError("contract 1.2 adapter export needs a pinned raw inventory scan report")
+
+
+def _require_artifact_manifest_pins(spec: PoolStreamSpec) -> None:
+    artifact_pins = (
+        (
+            "source_snapshot.source_artifact_manifest",
+            spec.source_snapshot.source_artifact_manifest,
+        ),
+        (
+            "reference_pin.reference_artifact_manifest",
+            spec.reference_pin.reference_artifact_manifest,
+        ),
+    )
+    missing = [
+        name
+        for name, pin in (
+            *artifact_pins,
+            ("reference_pin.area_measurement", spec.reference_pin.area_measurement),
+        )
+        if pin is None
+    ]
+    if missing:
+        fields = ", ".join(missing)
+        raise ValueError(
+            "contract 1.2 adapter export requires declared provenance pins before scanning: "
+            f"{fields}"
+        )
+    for label, pin in artifact_pins:
+        if pin is None:
+            continue
+        if (
+            pin.format_version != "artifact-list-jsonl-v1"
+            or not _valid_uri(pin.manifest_uri)
+            or not _valid_sha256(pin.manifest_sha256)
+            or pin.expected_artifact_count <= 0
+        ):
+            raise ValueError(f"contract 1.2 {label} pin is incomplete")
+
+
+def _require_area_measurement(spec: PoolStreamSpec) -> None:
+    area_pin = spec.reference_pin.area_measurement
+    if area_pin is None:
+        raise ValueError("contract 1.2 adapter export requires reference_pin.area_measurement")
+    expected_method = _AREA_METHOD_BY_REFERENCE.get(spec.pool_key.reference_system)
+    if expected_method is None:
+        raise ValueError(
+            "WorldCover/LUCAS adapter export cannot declare area provenance for "
+            f"{spec.pool_key.reference_system.value}"
+        )
+    if any(
+        not _area_spec_matches(measure, expected_method, spec.reference_pin.support_unit)
+        for measure in (area_pin.numerator, area_pin.denominator)
+    ):
+        raise ValueError(
+            "contract 1.2 area method pins do not match the adapter's exact "
+            f"{spec.pool_key.reference_system.value} method"
+        )
+    if (
+        spec.pool_key.reference_system is ReferenceSystem.WORLDCOVER
+        and area_pin.implementation_version != spec.reference_pin.source_revision
+    ):
+        raise ValueError(
+            "WorldCover area method implementation version must match the pinned producer revision"
+        )
+
+
+def _area_spec_matches(
+    measure: AreaMeasureSpec,
+    expected_method: str,
+    expected_unit: str,
+) -> bool:
+    return (
+        measure.method_id == expected_method
+        and measure.output_unit == expected_unit
+        and bool(measure.boundary_convention.strip())
+        and bool(measure.densification_method.strip())
+        and _has_canonical_json_object(measure.densification_parameters_json)
+        and _has_canonical_json_object(measure.error_settings_json)
+        and bool(measure.coordinate_system or measure.ellipsoid)
+    )
+
+
+def _valid_uri(value: str) -> bool:
+    parsed = urlparse(value)
+    return bool(parsed.scheme and (parsed.netloc or parsed.path))
+
+
+def _valid_sha256(value: str) -> bool:
+    return re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _has_canonical_json_object(value: str) -> bool:
+    try:
+        parsed = json.loads(value)
+        canonical = json.dumps(
+            parsed,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (json.JSONDecodeError, ValueError):
+        return False
+    return isinstance(parsed, dict) and bool(parsed) and canonical == value

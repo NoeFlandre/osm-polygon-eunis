@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass
 from typing import Final
 
-from osm_polygon_eunis.pool_contract import AssignmentKind, LabelLevel, ReferencePin
+from osm_polygon_eunis.pool_contract import (
+    AreaMeasurementPin,
+    AreaMeasureSpec,
+    AssignmentKind,
+    LabelLevel,
+    ReferencePin,
+)
 
 from .common import (
     PoolPolygonInput,
@@ -26,6 +33,55 @@ WORLDCOVER_AREA_MEASUREMENT: Final[str] = (
     "are excluded; unresolved enclosures fail closed; v4"
 )
 WORLDCOVER_REFERENCE_ID_NAMESPACE: Final[str] = "worldcover-tile-id"
+
+
+def worldcover_area_measurement_pin(producer_revision: str) -> AreaMeasurementPin:
+    """Describe the exact v4 support and full-polygon area calculation."""
+    if not producer_revision.strip():
+        raise ValueError("WorldCover area measurement needs the pinned producer revision")
+    projection = "+proj=cea +lat_ts=30 +lon_0=0 +datum=WGS84 +units=m +no_defs +type=crs"
+    parameters = json.dumps(
+        {"base_segment_degrees": 0.01, "refinement_steps_degrees": [0.001, 0.0001]},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    errors = json.dumps(
+        {
+            "bound": "CEA curve-to-chord boundary area envelope",
+            "excludes": ["GEOS overlay error", "floating-point accumulation error"],
+            "unresolved_policy": "fail_closed",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    numerator = AreaMeasureSpec(
+        method_id=WORLDCOVER_AREA_MEASUREMENT,
+        coordinate_system=projection,
+        ellipsoid="WGS84",
+        boundary_convention=(
+            "straight lon/lat source edges; canonical full-polygon boundary clips class support"
+        ),
+        densification_method="maximum angular segment with threshold-driven refinement",
+        densification_parameters_json=parameters,
+        error_settings_json=errors,
+        output_unit="m^2",
+    )
+    denominator = AreaMeasureSpec(
+        method_id=WORLDCOVER_AREA_MEASUREMENT,
+        coordinate_system=projection,
+        ellipsoid="WGS84",
+        boundary_convention="straight lon/lat source edges; full polygon boundary measured in CEA",
+        densification_method="maximum angular segment with threshold-driven refinement",
+        densification_parameters_json=parameters,
+        error_settings_json=errors,
+        output_unit="m^2",
+    )
+    return AreaMeasurementPin(
+        implementation="osm-worldcover.adapters.worldcover.geodesic_coverage",
+        implementation_version=producer_revision,
+        numerator=numerator,
+        denominator=denominator,
+    )
 
 
 @dataclass(frozen=True, slots=True)
