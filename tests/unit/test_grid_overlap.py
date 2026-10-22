@@ -161,12 +161,19 @@ def test_weighted_cells_of_empty_windows_have_typed_empty_arrays(
     assert cells.areas.dtype == np.float64
 
 
-def _vectorized_areas(polygon, transform, shape) -> dict[tuple[int, int], float]:
+def _vectorized_cell_grid(transform, shape):
     rows, cols = np.meshgrid(np.arange(shape[0]), np.arange(shape[1]), indexing="ij")
     rows, cols = rows.ravel(), cols.ravel()
     x0 = transform.c + cols * transform.a
     y0 = transform.f + rows * transform.e
     boxes = shapely.box(x0, y0 + transform.e, x0 + transform.a, y0)
+    return rows, cols, boxes
+
+
+def _vectorized_areas(polygon, transform, shape, *, cell_grid=None) -> dict[tuple[int, int], float]:
+    if cell_grid is None:
+        cell_grid = _vectorized_cell_grid(transform, shape)
+    rows, cols, boxes = cell_grid
     # Exact per-cell areas without clipping every cell: a cell inside the polygon keeps its
     # full area, a cell outside has none, and only cells on the boundary need an intersection.
     shapely.prepare(polygon)
@@ -185,6 +192,7 @@ def test_weighted_cells_match_a_vectorized_overlay_across_strips_and_blocks() ->
     # 150 x 170 cells span three row strips (64) and eleven column blocks (16).
     shape = (150, 170)
     transform = from_origin(0.0, 15_000.0, 100.0, 100.0)
+    cell_grid = _vectorized_cell_grid(transform, shape)
     rng = np.random.default_rng(7)
     polygons = [
         Point(8_500, 7_500).buffer(6_000, quad_segs=24),
@@ -202,7 +210,7 @@ def test_weighted_cells_match_a_vectorized_overlay_across_strips_and_blocks() ->
     for polygon in polygons:
         cells = weighted_cells(polygon, transform, (0, shape[0]), (0, shape[1]))
         found = _cells(cells)
-        expected = _vectorized_areas(polygon, transform, shape)
+        expected = _vectorized_areas(polygon, transform, shape, cell_grid=cell_grid)
         assert found.keys() == expected.keys()
         assert all(found[key] == pytest.approx(expected[key], rel=1e-9) for key in expected)
 

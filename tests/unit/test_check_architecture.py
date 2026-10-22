@@ -79,12 +79,11 @@ def test_private_attributes_of_package_modules_are_detected(tmp_path: Path) -> N
 def test_package_modules_use_no_private_names_across_modules() -> None:
     root = Path(__file__).parents[2]
     architecture = run_path(str(root / "scripts" / "check_architecture.py"))
-    offenders = {
-        module: sorted(
-            architecture["_private_imports"](path) | architecture["_private_attributes"](path)
-        )
-        for module, path in architecture["MODULES"].items()
-        if architecture["_private_imports"](path) or architecture["_private_attributes"](path)
-    }
+    offenders = {}
+    for module, path in architecture["MODULES"].items():
+        private_imports = architecture["_private_imports"](path)
+        private_attributes = architecture["_private_attributes"](path)
+        if private_imports or private_attributes:
+            offenders[module] = sorted(private_imports | private_attributes)
 
     assert offenders == {}
