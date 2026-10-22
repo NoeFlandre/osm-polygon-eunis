@@ -1,9 +1,8 @@
-"""Read exact habitat overlaps from EEA probability rasters."""
+"""Read EEA score rasters for habitat reference queries."""
 
 from __future__ import annotations
 
 import logging
-import math
 import re
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping
@@ -14,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import rasterio
 import shapely
-from rasterio.windows import Window, WindowError, from_bounds
+from rasterio.windows import Window
 from shapely.geometry import box
 from shapely.geometry.base import BaseGeometry
 
@@ -29,10 +28,19 @@ from .grid_overlap import (
     weighted_cells,
 )
 from .matching import choose_winner
-from .raster_class_support import support_areas as _support_areas
+from .raster_class_support import (
+    ClassificationAreas,
+)
+from .raster_class_support import (
+    classification_areas as _classification_areas,
+)
+from .raster_class_support import (
+    support_areas as _support_areas,
+)
 from .raster_geometry import is_epsg_3035, wgs84_envelope  # noqa: F401
 from .raster_reference_helpers import RasterLayerLike
 from .raster_reference_helpers import code_order_on_shared_grid as _code_order_on_shared_grid
+from .raster_reference_helpers import outward_raster_window as _outward_raster_window
 from .raster_reference_helpers import (
     wgs84_dataset_extent as _wgs84_dataset_extent,
 )
@@ -48,7 +56,7 @@ _GDAL_CACHE_MAX_MB = 256
 
 @dataclass(frozen=True, slots=True)
 class RasterLayer:
-    """One EEA probability raster and its stable EUNIS metadata."""
+    """One EEA score raster and its stable EUNIS metadata."""
 
     code: str
     name: str
@@ -78,8 +86,8 @@ class RasterReference:
         """Prepare raster layers for exact overlap queries.
 
         Args:
-            layers: Probability rasters that share one source version.
-            threshold: Minimum raster value counted as habitat presence.
+            layers: EEA score rasters that share one source version.
+            threshold: Minimum source value for the legacy single-layer query.
             tile_cache_bytes: Maximum estimated memory retained for tile geometries.
 
         Raises:
@@ -162,12 +170,6 @@ class RasterReference:
 
         return self._source_version
 
-    @property
-    def presence_threshold(self) -> int:
-        """Return the strict-positive raster value cutoff used for support masks."""
-
-        return self._threshold
-
     def __enter__(self) -> RasterReference:
         """Open raster datasets and return this reference for overlap queries."""
         if self._stack is not None:
@@ -216,14 +218,23 @@ class RasterReference:
         polygon: BaseGeometry,
         classes: Mapping[tuple[str, str], Iterable[str]],
     ) -> dict[tuple[str, str], float]:
-        """Measure exact per-class support after unioning the class's raster masks.
+        """Measure highest-source-score class area at each hierarchy level.
 
-        ``classes`` maps ``(level, code)`` to direct map codes. NoData and
-        uncovered areas return zero support; invalid or incompatible queries
-        raise instead of becoming a legacy empty winner.
+        ``classes`` maps ``(level, code)`` to direct map codes. Only cells with
+        a known score for every competing map can receive a categorical label;
+        NoData and uncovered areas remain unknown in the full polygon denominator.
         """
 
         return _support_areas(self, polygon, classes)
+
+    def classification_areas(
+        self,
+        polygon: BaseGeometry,
+        classes: Mapping[tuple[str, str], Iterable[str]],
+    ) -> ClassificationAreas:
+        """Return categorical areas plus score, tie, and unknown-area diagnostics."""
+
+        return _classification_areas(self, polygon, classes)
 
     def _overlap_closed(self, polygon: BaseGeometry) -> EunisResult:
         with ExitStack() as stack:
@@ -354,7 +365,7 @@ class RasterReference:
     ) -> Window | None:
         if not polygon.intersects(box(*dataset.bounds)):
             return None
-        return self._window(dataset, polygon)
+        return _outward_raster_window(dataset, polygon)
 
     @staticmethod
     def _validate_crs(dataset: rasterio.DatasetReader, path: Path) -> None:
@@ -365,27 +376,6 @@ class RasterReference:
             valid = False
         if not valid:
             raise ValueError(f"reference raster {path} is not EPSG:3035")
-
-    @staticmethod
-    def _window(
-        dataset: rasterio.DatasetReader,
-        polygon: BaseGeometry,
-    ) -> Window | None:
-        try:
-            window = from_bounds(*polygon.bounds, transform=dataset.transform)
-        except WindowError as error:
-            logger.warning("raster window fallback after WindowError: %s", error)
-            return None
-        # Round outwards. Rounding to nearest can shrink the window inside the
-        # polygon's bounding box and silently drop the partially covered cells
-        # on its edges, which undercounts the overlap area.
-        col_off = max(0, math.floor(window.col_off))
-        row_off = max(0, math.floor(window.row_off))
-        col_end = min(dataset.width, math.ceil(window.col_off + window.width))
-        row_end = min(dataset.height, math.ceil(window.row_off + window.height))
-        if col_end <= col_off or row_end <= row_off:
-            return None
-        return Window.from_slices((row_off, row_end), (col_off, col_end))
 
     def _positive_mask(
         self,

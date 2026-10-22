@@ -29,7 +29,7 @@ class SupportSemantics(StrEnum):
 
     MAPPED_COVER = "mapped_cover"
     SURVEYED_FOOTPRINT = "surveyed_footprint"
-    MODELED_HABITAT_SUPPORT = "modeled_habitat_support"
+    MODELED_SCORE_DERIVED_CLASSIFICATION = "modeled_score_derived_classification"
 
 
 class GeometryStatus(StrEnum):

@@ -139,6 +139,11 @@ def _reference_pin(reference: ReferenceSystem) -> ReferencePin:
         if reference is ReferenceSystem.WORLDCOVER
         else SupportSemantics.SURVEYED_FOOTPRINT
     )
+    area_policy = (
+        "independent_union_per_level_and_class:v1"
+        if reference is ReferenceSystem.LUCAS
+        else "union_by_class"
+    )
     return ReferencePin(
         release_id=f"{reference.value}-release-1",
         source_repository="NoeFlandre/reference-data",
@@ -148,7 +153,7 @@ def _reference_pin(reference: ReferenceSystem) -> ReferencePin:
         support_semantics=semantics,
         support_unit=unit,
         threshold=0.8,
-        support_union_policy="union_by_class",
+        support_union_policy=area_policy,
     )
 
 

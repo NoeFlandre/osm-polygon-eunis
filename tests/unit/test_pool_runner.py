@@ -7,9 +7,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
+import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+import rasterio
+from rasterio.transform import from_origin
 from shapely.geometry import box, mapping
 
 from osm_polygon_eunis import eea, pool_runner
@@ -25,11 +28,13 @@ from osm_polygon_eunis.pool_adapter import (
     EunisTaxonomyPath,
     SourceTreeFile,
     SourceTreeGroupPin,
+    eunis_area_measurement_pin,
     make_eunis_taxonomy_from_classification,
     source_tree_inventory_sha256,
     validate_source_tree_group,
 )
 from osm_polygon_eunis.pool_contract import (
+    ArtifactManifestPin,
     FilesystemArtifactReader,
     FilesystemStreamingSink,
     ReferencePin,
@@ -57,6 +62,7 @@ from osm_polygon_eunis.pool_runner import (
     run_eunis_label_attempts,
     scan_raw_inventory,
 )
+from osm_polygon_eunis.raster_class_support import ClassificationAreas, ScoreDiagnostics
 from osm_polygon_eunis.raster_reference import RasterReference
 from osm_polygon_eunis.text_join import (
     BoundedJoinedTextRecords,
@@ -122,23 +128,32 @@ class FakeReference:
 
     fail: bool = False
     query_count: int = 0
-    presence_threshold: int = 0
     source_version: str = "EEA test map release"
 
     @property
     def layer_codes(self) -> tuple[str, ...]:
         return ("A11",)
 
-    def support_areas(
+    def classification_areas(
         self,
         polygon: Any,
         _classes: dict[tuple[str, str], tuple[str, ...]],
-    ) -> dict[tuple[str, str], float]:
+    ) -> ClassificationAreas:
         self.query_count += 1
         if self.fail:
             raise RuntimeError("fixture query error")
         support = float(polygon.area) * 0.8
-        return {("L1", "A"): support, ("L2", "A1"): support, ("L3", "A11"): support}
+        return ClassificationAreas(
+            {("L1", "A"): support, ("L2", "A1"): support, ("L3", "A11"): support},
+            ScoreDiagnostics(
+                unknown_area_m2=0.0,
+                zero_max_score_area_m2=float(polygon.area) * 0.2,
+                ambiguous_area_m2_by_level={"L1": 0.0, "L2": 0.0, "L3": 0.0},
+                maximum_source_score_min=0.8,
+                maximum_source_score_max=0.8,
+                maximum_source_score_area_weighted_mean=0.8,
+            ),
+        )
 
 
 def _source_row(osm_id: int, geometry: str | None, *, source_pbf: str = "region.osm.pbf") -> dict:
@@ -219,9 +234,17 @@ def _fixture_layout(shard: PinnedPolygonShard):
 
 def _frozen_source(tmp_path: Path, rows: list[dict]) -> FrozenPolygonSource:
     shard = _write_source_shard(tmp_path / "staged" / "region-a.parquet", rows)
+    source_artifact_manifest = _artifact_manifest_pin(
+        tmp_path,
+        "source-artifacts",
+        (shard.local_path,),
+    )
     return FrozenPolygonSource(
         layout=_fixture_layout(shard),
-        source_snapshot=_source_snapshot(),
+        source_snapshot=replace(
+            _source_snapshot(),
+            source_artifact_manifest=source_artifact_manifest,
+        ),
         manifest_uri="https://source.example/raw-source-manifest.json",
         manifest_sha256="b" * 64,
         manifest_paths=(shard.path_in_repo, "dataset-card.md"),
@@ -229,17 +252,69 @@ def _frozen_source(tmp_path: Path, rows: list[dict]) -> FrozenPolygonSource:
     )
 
 
-def _reference_pin() -> ReferencePin:
+def _artifact_manifest_pin(
+    tmp_path: Path,
+    name: str,
+    artifact_paths: tuple[Path, ...],
+) -> ArtifactManifestPin:
+    rows = [
+        {
+            "artifact_uri": path.resolve().as_uri(),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+        for path in sorted(artifact_paths, key=lambda item: item.resolve().as_uri())
+    ]
+    content = b"".join(
+        json.dumps(row, sort_keys=True, separators=(",", ":")).encode() + b"\n" for row in rows
+    )
+    manifest_path = tmp_path / f"{name}.jsonl"
+    manifest_path.write_bytes(content)
+    return ArtifactManifestPin(
+        format_version="artifact-list-jsonl-v1",
+        manifest_uri=manifest_path.resolve().as_uri(),
+        manifest_sha256=hashlib.sha256(content).hexdigest(),
+        expected_artifact_count=len(rows),
+    )
+
+
+def _reference_pin(tmp_path: Path | None = None) -> ReferencePin:
+    reference_artifact_manifest = None
+    if tmp_path is not None:
+        raster_path = tmp_path / "reference-fixture" / "Prob_A11_10m.tif"
+        raster_path.parent.mkdir(parents=True, exist_ok=True)
+        scores = np.asarray([[0.8]], dtype=np.float32)
+        with rasterio.open(
+            raster_path,
+            "w",
+            driver="GTiff",
+            height=1,
+            width=1,
+            count=1,
+            dtype=scores.dtype,
+            crs="EPSG:3035",
+            transform=from_origin(0, 10, 10, 10),
+            nodata=-9999.0,
+        ) as dataset:
+            dataset.write(scores, 1)
+            dataset.scales = (1.0,)
+            dataset.offsets = (0.0,)
+        reference_artifact_manifest = _artifact_manifest_pin(
+            tmp_path,
+            "reference-artifacts",
+            (raster_path,),
+        )
     return ReferencePin(
         release_id="EEA test map release",
         source_repository="https://reference.example/eunis",
         source_revision="reference-manifest-sha256:" + "d" * 64,
         taxonomy_id=_TAXONOMY.taxonomy_id,
         taxonomy_revision=_TAXONOMY.pinned_revision,
-        support_semantics=SupportSemantics.MODELED_HABITAT_SUPPORT,
+        support_semantics=SupportSemantics.MODELED_SCORE_DERIVED_CLASSIFICATION,
         support_unit="m2",
         threshold=0.8,
-        support_union_policy="union_by_class",
+        support_union_policy="highest_source_score_per_cell_then_unique_class_area_per_level:v1",
+        reference_artifact_manifest=reference_artifact_manifest,
+        area_measurement=eunis_area_measurement_pin(),
     )
 
 
@@ -348,11 +423,15 @@ def test_scan_and_code_pins_reject_nonpositive_limits_and_invalid_revisions(tmp_
     ("field", "value", "error"),
     [
         ("threshold", 0.7, "exact 0.8 area threshold"),
-        ("support_union_policy", "sum_by_class", "support union_by_class"),
+        (
+            "support_union_policy",
+            "sum_by_class",
+            "pinned highest-source-score area policy",
+        ),
         (
             "support_semantics",
             SupportSemantics.MAPPED_COVER,
-            "modeled habitat support",
+            "modeled score-derived classification",
         ),
         ("support_unit", "km2", "must use m2"),
     ],
@@ -364,6 +443,35 @@ def test_eunis_support_policy_rejects_each_unpinned_choice(
 ) -> None:
     with pytest.raises(ValueError, match=error):
         pool_runner._validate_eunis_support_policy(replace(_reference_pin(), **{field: value}))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("source_repository", " "),
+        ("source_revision", " "),
+        ("release_id", " "),
+        ("taxonomy_id", " "),
+        ("taxonomy_revision", " "),
+    ],
+)
+def test_eunis_reference_provenance_requires_every_pinned_field(field: str, value: str) -> None:
+    with pytest.raises(ValueError, match="must be pinned"):
+        pool_runner._validate_eunis_provenance(replace(_reference_pin(), **{field: value}))
+
+
+def test_eunis_reference_provenance_checks_optional_area_method() -> None:
+    reference_pin = _reference_pin()
+    area_pin = reference_pin.area_measurement
+    assert area_pin is not None
+    pool_runner._validate_eunis_provenance(replace(reference_pin, area_measurement=None))
+    bad_numerator = replace(area_pin.numerator, method_id="wrong-method")
+    bad_area_pin = replace(area_pin, numerator=bad_numerator)
+
+    with pytest.raises(ValueError, match="area measurement pin does not match"):
+        pool_runner._validate_eunis_provenance(
+            replace(reference_pin, area_measurement=bad_area_pin)
+        )
 
 
 @pytest.mark.parametrize(
@@ -610,7 +718,7 @@ def test_label_attempts_follow_raw_inventory_and_keep_missing_geometry_outcome(
     attempts = run_eunis_label_attempts(
         raw,
         cast(RasterReference, reference),
-        _reference_pin(),
+        _reference_pin(tmp_path),
         _TAXONOMY,
         root,
     )
@@ -638,6 +746,9 @@ def test_label_attempts_follow_raw_inventory_and_keep_missing_geometry_outcome(
     usable = next(row for row in rows if row["polygon"] is not None)
     assert usable["attempt_receipt"]["status"] == "completed"
     assert usable["attempt_receipt"]["attempted_reference_ids"] == ["A11"]
+    assert usable["score_diagnostics"]["method"] == ("highest-source-score-derived-classification")
+    assert usable["score_diagnostics"]["maximum_source_score_min"] == 0.8
+    assert usable["score_diagnostics"]["maximum_source_score_area_weighted_mean"] == 0.8
     assert len(usable["support_evidence"]) == len(usable["candidates"]) == 3
     assert {tuple(item["reference_ids"]) for item in usable["support_evidence"]} == {("A11",)}
     assert usable["polygon"]["geometry_uri"].startswith("file://")
@@ -662,7 +773,7 @@ def test_query_error_is_excluded_with_reason_at_every_supported_level(tmp_path: 
     attempts = run_eunis_label_attempts(
         raw,
         cast(RasterReference, FakeReference(fail=True)),
-        _reference_pin(),
+        _reference_pin(tmp_path),
         _TAXONOMY,
         root,
     )
@@ -686,7 +797,7 @@ def test_eunis_attempts_export_through_bounded_shared_streaming_contract(
     attempts = run_eunis_label_attempts(
         raw_scan,
         cast(RasterReference, FakeReference()),
-        _reference_pin(),
+        _reference_pin(tmp_path),
         _TAXONOMY,
         checkpoint_root,
     )
@@ -751,6 +862,120 @@ def test_eunis_attempts_export_through_bounded_shared_streaming_contract(
     assert support_metadata.schema == support_table.schema
 
 
+@pytest.mark.parametrize(
+    ("missing_pin", "expected"),
+    [
+        ("source_snapshot.source_artifact_manifest", "source_snapshot.source_artifact_manifest"),
+        ("reference_pin.reference_artifact_manifest", "reference_pin.reference_artifact_manifest"),
+        ("reference_pin.area_measurement", "reference_pin.area_measurement"),
+    ],
+)
+def test_contract_v12_export_fails_before_writes_without_required_provenance(
+    tmp_path: Path,
+    missing_pin: str,
+    expected: str,
+) -> None:
+    source = _frozen_source(tmp_path, [_source_row(11, _geojson_polygon())])
+    checkpoint_root = tmp_path / "checkpoints"
+    raw_scan = scan_raw_inventory(source, checkpoint_root, _code_pin())
+    attempts = run_eunis_label_attempts(
+        raw_scan,
+        cast(RasterReference, FakeReference()),
+        _reference_pin(tmp_path),
+        _TAXONOMY,
+        checkpoint_root,
+    )
+    if missing_pin == "source_snapshot.source_artifact_manifest":
+        raw_source = attempts.raw_scan.source
+        raw_source = replace(
+            raw_source,
+            source_snapshot=replace(raw_source.source_snapshot, source_artifact_manifest=None),
+        )
+        attempts = replace(attempts, raw_scan=replace(attempts.raw_scan, source=raw_source))
+    elif missing_pin == "reference_pin.reference_artifact_manifest":
+        attempts = replace(
+            attempts,
+            reference_pin=replace(attempts.reference_pin, reference_artifact_manifest=None),
+        )
+    else:
+        attempts = replace(
+            attempts,
+            reference_pin=replace(attempts.reference_pin, area_measurement=None),
+        )
+    sink_root = tmp_path / "missing-v12-provenance-pool"
+
+    with pytest.raises(ValueError) as error:
+        export_eunis_pool(attempts, FilesystemStreamingSink(sink_root))
+
+    assert expected in str(error.value)
+    assert not sink_root.exists()
+
+
+@pytest.mark.parametrize(
+    ("target", "field", "value", "expected"),
+    [
+        ("source", "format_version", "artifact-list-v2", "unsupported format"),
+        ("reference", "manifest_uri", " ", "needs a manifest URI"),
+        ("source", "expected_artifact_count", 0, "at least one artifact"),
+        ("reference", "manifest_sha256", "bad-digest", "must be lowercase hexadecimal"),
+        ("area", "method_id", "wrong-method", "area measurement pin does not match"),
+    ],
+)
+def test_contract_v12_export_rejects_incomplete_provenance_before_writes(
+    tmp_path: Path,
+    target: str,
+    field: str,
+    value: object,
+    expected: str,
+) -> None:
+    source = _frozen_source(tmp_path, [_source_row(11, _geojson_polygon())])
+    checkpoint_root = tmp_path / "checkpoints"
+    raw_scan = scan_raw_inventory(source, checkpoint_root, _code_pin())
+    attempts = run_eunis_label_attempts(
+        raw_scan,
+        cast(RasterReference, FakeReference()),
+        _reference_pin(tmp_path),
+        _TAXONOMY,
+        checkpoint_root,
+    )
+    if target == "source":
+        artifact_pin = attempts.raw_scan.source.source_snapshot.source_artifact_manifest
+        assert artifact_pin is not None
+        artifact_pin = replace(artifact_pin, **{field: value})
+        source_snapshot = replace(
+            attempts.raw_scan.source.source_snapshot,
+            source_artifact_manifest=artifact_pin,
+        )
+        source = replace(attempts.raw_scan.source, source_snapshot=source_snapshot)
+        attempts = replace(attempts, raw_scan=replace(attempts.raw_scan, source=source))
+    elif target == "reference":
+        artifact_pin = attempts.reference_pin.reference_artifact_manifest
+        assert artifact_pin is not None
+        artifact_pin = replace(artifact_pin, **{field: value})
+        attempts = replace(
+            attempts,
+            reference_pin=replace(attempts.reference_pin, reference_artifact_manifest=artifact_pin),
+        )
+    else:
+        area_pin = attempts.reference_pin.area_measurement
+        assert area_pin is not None
+        numerator = replace(area_pin.numerator, **{field: value})
+        attempts = replace(
+            attempts,
+            reference_pin=replace(
+                attempts.reference_pin,
+                area_measurement=replace(area_pin, numerator=numerator),
+            ),
+        )
+    sink_root = tmp_path / "invalid-v12-provenance-pool"
+
+    with pytest.raises(ValueError) as error:
+        export_eunis_pool(attempts, FilesystemStreamingSink(sink_root))
+
+    assert expected in str(error.value)
+    assert not sink_root.exists()
+
+
 def test_full_pool_export_streams_downstream_text_and_relevance_rows(tmp_path: Path) -> None:
     source = _frozen_source(tmp_path, [_source_row(11, _geojson_polygon())])
     checkpoint_root = tmp_path / "checkpoints"
@@ -758,7 +983,7 @@ def test_full_pool_export_streams_downstream_text_and_relevance_rows(tmp_path: P
     attempts = run_eunis_label_attempts(
         raw_scan,
         cast(RasterReference, FakeReference()),
-        _reference_pin(),
+        _reference_pin(tmp_path),
         _TAXONOMY,
         checkpoint_root,
     )
@@ -854,7 +1079,7 @@ def test_lazy_downstream_failure_leaves_attempt_evidence_without_completion_mani
     attempts = run_eunis_label_attempts(
         raw_scan,
         cast(RasterReference, FakeReference()),
-        _reference_pin(),
+        _reference_pin(tmp_path),
         _TAXONOMY,
         checkpoint_root,
     )
@@ -965,7 +1190,7 @@ def test_attempt_inventory_iteration_checks_shard_and_global_counts(tmp_path: Pa
     attempts = run_eunis_label_attempts(
         raw_scan,
         cast(RasterReference, FakeReference()),
-        _reference_pin(),
+        _reference_pin(tmp_path),
         _TAXONOMY,
         checkpoint_root,
     )
@@ -1012,7 +1237,7 @@ def test_invalid_attempt_signature_is_recomputed_from_cached_raw_inventory(
     first = run_eunis_label_attempts(
         raw,
         cast(RasterReference, first_reference),
-        _reference_pin(),
+        _reference_pin(tmp_path),
         _TAXONOMY,
         root,
     )
@@ -1020,7 +1245,7 @@ def test_invalid_attempt_signature_is_recomputed_from_cached_raw_inventory(
     second = run_eunis_label_attempts(
         raw,
         cast(RasterReference, next_reference),
-        _reference_pin(),
+        _reference_pin(tmp_path),
         _TAXONOMY,
         root,
     )
@@ -1130,11 +1355,10 @@ def test_raw_geometry_projection_preserves_each_invalid_reason(
 @pytest.mark.parametrize(
     ("reference", "error"),
     [
-        (FakeReference(presence_threshold=1), "greater than zero"),
         (FakeReference(source_version="another release"), "does not match the pinned"),
     ],
 )
-def test_map_inputs_must_match_threshold_and_release_pin(
+def test_map_inputs_must_match_release_pin(
     tmp_path: Path,
     reference: FakeReference,
     error: str,
@@ -1147,7 +1371,7 @@ def test_map_inputs_must_match_threshold_and_release_pin(
         run_eunis_label_attempts(
             raw,
             cast(RasterReference, reference),
-            _reference_pin(),
+            _reference_pin(tmp_path),
             _TAXONOMY,
             root,
         )

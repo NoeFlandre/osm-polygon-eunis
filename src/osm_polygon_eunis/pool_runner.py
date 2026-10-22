@@ -12,6 +12,7 @@ import hashlib
 import heapq
 import json
 import os
+import re
 import tempfile
 from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping
@@ -32,8 +33,10 @@ from shapely.geometry.base import BaseGeometry
 from .eea import EEA_2021_CLASSIFICATION_LINEAGE_PIN
 from .geometry import is_usable, parse_geometry, to_equal_area
 from .pool_adapter import (
+    EUNIS_AREA_MEASUREMENT_ID,
     EUNIS_ASSIGNMENT_RULE_VERSION,
     EUNIS_POOL_LEVELS,
+    EUNIS_SUPPORT_AREA_POLICY,
     EUNIS_THRESHOLD,
     EunisLabelAttempt,
     EunisPoolSourceLayout,
@@ -45,6 +48,8 @@ from .pool_adapter import (
 )
 from .pool_contract import (
     AmbiguityBasis,
+    AreaMeasurementPin,
+    ArtifactManifestPin,
     AssignmentKind,
     AttemptStatus,
     FileArtifactSink,
@@ -87,7 +92,7 @@ from .text_join import (
 _KEY_FIELDS = ("source_pbf", "osm_type", "osm_id")
 _GEOMETRY_FIELD = "geometry"
 _RAW_CHECKPOINT_VERSION = 1
-_ATTEMPT_CHECKPOINT_VERSION = 3
+_ATTEMPT_CHECKPOINT_VERSION = 4
 _EEA_REFERENCE_ID_NAMESPACE = "eea-eunis-2021-probability-map-l3-code"
 _ENUMERATION_RULE = (
     "enumerate every geometry row from every pinned polygon shard before any text, "
@@ -95,7 +100,7 @@ _ENUMERATION_RULE = (
 )
 _CHUNK_KEYS = 50_000
 _MERGE_FAN_IN = 64
-_SHA256_HEX_LENGTH = 64
+_SHA256_HEX_PATTERN = re.compile(r"[0-9a-f]{64}")
 _CHECKPOINT_URI_FRAGMENT_PARTS = 2
 _GEOMETRY_ERRORS = (
     ArithmeticError,
@@ -359,6 +364,7 @@ class _AttemptCheckpointData:
     outcomes: tuple[LabelOutcome, ...]
     receipt: PolygonAttemptReceipt
     support_evidence: tuple[LabelSupportEvidence, ...]
+    score_diagnostics: Mapping[str, object] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -531,8 +537,6 @@ def _validate_reference_release(
     reference: RasterReference,
     reference_pin: ReferencePin,
 ) -> None:
-    if reference.presence_threshold != 0:
-        raise ValueError("EEA support masks require source values greater than zero")
     if reference.source_version != reference_pin.release_id:
         raise ValueError("raster layer source version does not match the pinned reference release")
 
@@ -553,6 +557,11 @@ def _validate_attempt_taxonomy_inputs(
         or reference_pin.taxonomy_revision != taxonomy.pinned_revision
     ):
         raise ValueError("reference pin must match the hash-pinned EUNIS taxonomy mapping")
+    _require_eunis_v12_artifact_and_area_pins(
+        raw_scan.source.source_snapshot,
+        reference_pin,
+        purpose="label attempts",
+    )
 
 
 def _run_attempt_shards(
@@ -583,8 +592,8 @@ def export_eunis_pool(  # noqa: PLR0913
     *,
     limits: StreamingLimits | None = None,
     staging_directory: Path | None = None,
-    contract_version: str = "1.1.0",
-    pool_version: str = "1.0.0",
+    contract_version: str = "1.2.0",
+    pool_version: str = "2.0.0",
     downstream_records: Iterable[JoinedTextRecord] | None = None,
 ) -> EunisPoolExport:
     """Finalize one EUNIS source pool from bounded per-shard attempt records.
@@ -598,6 +607,7 @@ def export_eunis_pool(  # noqa: PLR0913
     performs evaluation sampling.
     """
 
+    _require_eunis_contract_v12_provenance(attempts, contract_version)
     selected_limits = limits or StreamingLimits()
     raw_report_bytes, attempt_report, checkpoint_paths = _preflight_export_evidence(attempts)
     artifact_root = _pool_artifact_root(
@@ -828,8 +838,8 @@ def export_eunis_full_pool(  # noqa: PLR0913
     *,
     limits: StreamingLimits | None = None,
     staging_directory: Path | None = None,
-    contract_version: str = "1.1.0",
-    pool_version: str = "1.0.0",
+    contract_version: str = "1.2.0",
+    pool_version: str = "2.0.0",
 ) -> EunisPoolExport:
     """Finalize a source-wide label pool together with its verified text joins."""
 
@@ -849,6 +859,75 @@ def export_eunis_full_pool(  # noqa: PLR0913
         pool_version=pool_version,
         downstream_records=downstream_records,
     )
+
+
+def _require_eunis_contract_v12_provenance(
+    attempts: EunisAttemptRun,
+    contract_version: str,
+) -> None:
+    """Reject incomplete v1.2 evidence before copying any export artifacts."""
+
+    if contract_version != "1.2.0":
+        raise ValueError("EUNIS pool exports require contract version 1.2.0")
+    evidence = attempts.raw_scan.evidence
+    if evidence.expected_key_count <= 0:
+        raise ValueError("contract 1.2 EUNIS export needs a verified non-empty raw inventory")
+    _require_sha256(evidence.expected_keyset_sha256, "raw inventory key-set SHA-256")
+    if not _has_uri(evidence.scan_report_uri):
+        raise ValueError("contract 1.2 EUNIS export needs a pinned raw inventory scan report URI")
+    _require_sha256(evidence.scan_report_sha256, "raw inventory scan report SHA-256")
+    _require_eunis_v12_artifact_and_area_pins(
+        attempts.raw_scan.source.source_snapshot,
+        attempts.reference_pin,
+        purpose="export",
+    )
+
+
+def _require_eunis_v12_artifact_and_area_pins(
+    source_snapshot: SourceSnapshot,
+    reference_pin: ReferencePin,
+    *,
+    purpose: str,
+) -> None:
+    """Require real source/reference artifact lists and the area method pin."""
+
+    _require_artifact_manifest_pin(
+        source_snapshot.source_artifact_manifest,
+        "source_snapshot.source_artifact_manifest",
+        purpose,
+    )
+    _require_artifact_manifest_pin(
+        reference_pin.reference_artifact_manifest,
+        "reference_pin.reference_artifact_manifest",
+        purpose,
+    )
+    _require_eunis_area_pin(reference_pin.area_measurement, purpose)
+
+
+def _require_artifact_manifest_pin(
+    pin: ArtifactManifestPin | None,
+    name: str,
+    purpose: str,
+) -> None:
+    if pin is None:
+        raise ValueError(f"contract 1.2 EUNIS {purpose} are missing {name}")
+    if pin.format_version != "artifact-list-jsonl-v1":
+        raise ValueError(f"contract 1.2 EUNIS {name} has an unsupported format")
+    if not _has_uri(pin.manifest_uri):
+        raise ValueError(f"contract 1.2 EUNIS {name} needs a manifest URI")
+    if pin.expected_artifact_count <= 0:
+        raise ValueError(f"contract 1.2 EUNIS {name} must include at least one artifact")
+    _require_sha256(pin.manifest_sha256, f"contract 1.2 EUNIS {name} digest")
+
+
+def _require_eunis_area_pin(area_pin: AreaMeasurementPin | None, purpose: str) -> None:
+    if area_pin is None:
+        raise ValueError(f"contract 1.2 EUNIS {purpose} are missing reference_pin.area_measurement")
+    if any(
+        spec.method_id != EUNIS_AREA_MEASUREMENT_ID or spec.output_unit != "m2"
+        for spec in (area_pin.numerator, area_pin.denominator)
+    ):
+        raise ValueError("contract 1.2 EUNIS area measurement pin does not match the adapter")
 
 
 def iter_attempt_checkpoint(uri: str) -> Iterator[dict[str, Any]]:
@@ -1446,7 +1525,7 @@ def _attempt_raw_row(
         exclusion_reason=geometry.exclusion_reason,
     )
     support_groups = hierarchy_support_groups(context.taxonomy)
-    support_areas, query_error = _attempt_support_areas(
+    support_areas, score_diagnostics, query_error = _attempt_support_areas(
         context.reference,
         geometry.projected,
         geometry.polygon,
@@ -1462,6 +1541,7 @@ def _attempt_raw_row(
             support_areas=support_areas,
             taxonomy=context.taxonomy,
             source_revision=context.reference_pin.source_revision,
+            score_diagnostics=score_diagnostics,
             query_error=query_error,
             exclusion_reason=geometry.exclusion_reason,
         )
@@ -1484,6 +1564,7 @@ def _attempt_raw_row(
             outcomes,
             attempt_receipt,
             support_evidence,
+            score_diagnostics,
         ),
     )
 
@@ -1569,13 +1650,14 @@ def _attempt_support_areas(
     projected: BaseGeometry | None,
     polygon: PolygonSnapshot | None,
     support_groups: Mapping[tuple[str, str], tuple[str, ...]],
-) -> tuple[Mapping[tuple[str, str], float] | None, str | None]:
+) -> tuple[Mapping[tuple[str, str], float] | None, Mapping[str, object] | None, str | None]:
     if polygon is None or projected is None:
-        return None, None
+        return None, None, None
     try:
-        return reference.support_areas(projected, support_groups), None
+        result = reference.classification_areas(projected, support_groups)
+        return result.areas_m2, result.diagnostics.as_dict(), None
     except _REFERENCE_ERRORS as error:
-        return None, f"reference_query_error:{type(error).__name__}"
+        return None, None, f"reference_query_error:{type(error).__name__}"
 
 
 def _attempt_receipt(
@@ -1626,10 +1708,8 @@ def _attempt_checkpoint_record(
     return {
         "inventory": _inventory_json(data.inventory),
         "polygon": _polygon_json(data.geometry.polygon),
-        "projected_geometry_wkb_base64": (
-            base64.b64encode(data.geometry.projected_wkb).decode("ascii")
-            if data.geometry.projected_wkb
-            else None
+        "projected_geometry_wkb_base64": _projected_geometry_wkb_base64(
+            data.geometry.projected_wkb
         ),
         "raw_geometry_checkpoint_uri": (
             f"{context.raw_checkpoint_uri}#row={raw_row['source_row_ordinal']}/geometry_payload"
@@ -1638,7 +1718,14 @@ def _attempt_checkpoint_record(
         "outcomes": [_outcome_json(outcome) for outcome in data.outcomes],
         "attempt_receipt": _attempt_receipt_json(data.receipt),
         "support_evidence": [_support_evidence_json(item) for item in data.support_evidence],
+        "score_diagnostics": (
+            dict(data.score_diagnostics) if data.score_diagnostics is not None else None
+        ),
     }
+
+
+def _projected_geometry_wkb_base64(payload: bytes | None) -> str | None:
+    return base64.b64encode(payload).decode("ascii") if payload else None
 
 
 def _attempt_summary(
@@ -2019,14 +2106,14 @@ def _validate_eunis_support_policy(reference_pin: ReferencePin) -> None:
         ),
         (
             reference_pin.support_union_policy,
-            "union_by_class",
-            "EUNIS full-pool labels require support union_by_class",
+            EUNIS_SUPPORT_AREA_POLICY,
+            "EUNIS full-pool labels require the pinned highest-source-score area policy",
             False,
         ),
         (
             reference_pin.support_semantics,
-            SupportSemantics.MODELED_HABITAT_SUPPORT,
-            "EUNIS full-pool labels must declare modeled habitat support",
+            SupportSemantics.MODELED_SCORE_DERIVED_CLASSIFICATION,
+            "EUNIS full-pool labels must declare a modeled score-derived classification",
             True,
         ),
         (
@@ -2046,6 +2133,11 @@ def _eunis_policy_values_match(actual: Any, expected: Any, require_identity: boo
 
 
 def _validate_eunis_provenance(reference_pin: ReferencePin) -> None:
+    _validate_reference_provenance_fields(reference_pin)
+    _validate_optional_eunis_area_pin(reference_pin.area_measurement)
+
+
+def _validate_reference_provenance_fields(reference_pin: ReferencePin) -> None:
     for field_name, value in (
         ("reference source repository", reference_pin.source_repository),
         ("reference source revision", reference_pin.source_revision),
@@ -2055,6 +2147,16 @@ def _validate_eunis_provenance(reference_pin: ReferencePin) -> None:
     ):
         if not value.strip():
             raise ValueError(f"{field_name} must be pinned")
+
+
+def _validate_optional_eunis_area_pin(area_pin: AreaMeasurementPin | None) -> None:
+    if area_pin is None:
+        return
+    if any(
+        measure.method_id != EUNIS_AREA_MEASUREMENT_ID or measure.output_unit != "m2"
+        for measure in (area_pin.numerator, area_pin.denominator)
+    ):
+        raise ValueError("EUNIS area measurement pin does not match the pinned EPSG:3035 method")
 
 
 def _native_key_from_row(row: dict[str, Any], shard_path: str, row_ordinal: int) -> NativeKey:
@@ -2247,10 +2349,8 @@ def _git_blob_sha1(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _require_sha256(value: str, description: str) -> None:
-    if len(value) != _SHA256_HEX_LENGTH or any(
-        character not in "0123456789abcdef" for character in value
-    ):
+def _require_sha256(value: str | None, description: str) -> None:
+    if not isinstance(value, str) or _SHA256_HEX_PATTERN.fullmatch(value) is None:
         raise ValueError(f"{description} must be lowercase hexadecimal")
 
 
@@ -2265,7 +2365,9 @@ def _matches_glob(path: str, pattern: str) -> bool:
     )
 
 
-def _has_uri(value: str) -> bool:
+def _has_uri(value: str | None) -> bool:
+    if not isinstance(value, str):
+        return False
     parsed = urlparse(value)
     return bool(parsed.scheme and (parsed.netloc or parsed.path))
 

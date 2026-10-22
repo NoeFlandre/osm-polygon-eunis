@@ -21,6 +21,7 @@ from shapely.wkb import dumps
 import osm_polygon_eunis.geopackage_reference as geopackage_module
 import osm_polygon_eunis.geopackage_tiles as tiles_module
 import osm_polygon_eunis.raster_reference as raster_module
+import osm_polygon_eunis.raster_reference_helpers as raster_helpers_module
 from osm_polygon_eunis.geopackage_reference import GeoPackageReference
 from osm_polygon_eunis.raster_reference import (
     RasterLayer,
@@ -192,12 +193,12 @@ def test_largest_actual_overlap_wins_across_raster_layers(tmp_path: Path) -> Non
     assert result.overlap_percentage == pytest.approx(9 * 8 / (17 * 8) * 100)
 
 
-def test_window_rounds_outwards_to_cover_polygon_bounds(tmp_path: Path) -> None:
+def test_outward_raster_window_covers_polygon_bounds(tmp_path: Path) -> None:
     raster = _write_raster(tmp_path / "Prob_R11_100m.tif", [[1, 1], [1, 1]])
     reference = RasterReference((RasterLayer("R11", "steppe", raster, "EEA-test"),))
     with reference as opened:
         _, dataset = opened._datasets[0]
-        window = opened._window(dataset, box(4.5, 4.5, 15.5, 15.5))
+        window = raster_helpers_module.outward_raster_window(dataset, box(4.5, 4.5, 15.5, 15.5))
 
     assert window is not None
     assert (window.col_off, window.row_off, window.width, window.height) == (0, 0, 2, 2)
@@ -681,14 +682,17 @@ def test_references_count_intersection_errors(tmp_path: Path, monkeypatch) -> No
 
 def test_raster_window_error_fallback_is_logged(monkeypatch, caplog) -> None:
     def broken(*_args, **_kwargs):
-        raise raster_module.WindowError("invalid bounds")
+        raise raster_helpers_module.WindowError("invalid bounds")
 
-    monkeypatch.setattr(raster_module, "from_bounds", broken)
+    monkeypatch.setattr(raster_helpers_module, "from_bounds", broken)
     dataset = SimpleNamespace(transform=from_origin(0, 10, 1, 1), width=10, height=10)
 
-    with caplog.at_level(logging.WARNING, logger=raster_module.__name__):
+    with caplog.at_level(logging.WARNING, logger=raster_helpers_module.__name__):
         assert (
-            RasterReference._window(cast(rasterio.DatasetReader, dataset), box(0, 0, 1, 1)) is None
+            raster_helpers_module.outward_raster_window(
+                cast(rasterio.DatasetReader, dataset), box(0, 0, 1, 1)
+            )
+            is None
         )
 
     assert any(

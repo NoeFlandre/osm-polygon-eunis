@@ -54,29 +54,60 @@ revisions match. The raw inventory evidence matches the shared core's
 
 ## EUNIS decisions
 
-`RasterReference.support_areas()` returns the exact polygon-intersection area
-for each `(level, class)` after unioning positive, non-NoData raster cells
-within that class. Separate classes may overlap. Each candidate keeps its
-measured numerator, the full projected polygon area denominator, ratio,
-threshold, map revision, taxonomy revision, and direct/ancestor-derived kind.
-NoData and areas outside map coverage have zero support and remain in the full
-area denominator.
+`RasterReference.classification_areas()` preserves the EEA numeric scores and
+derives a categorical reference per cell. Official EEA metadata describes the
+grid values as suitability scores from 0 to 1 and says the maps are proxies for
+geographical distribution, not the actual habitat distribution. Some EEA
+training-map products omit cells below a model-specific 10th-percentile
+training-presence threshold. The metadata does not establish that scores are
+calibrated across habitat models. The adapter therefore calls its result a
+**highest-source-score derived classification**; it does not call it the most
+probable habitat, observed habitat, or habitat ground truth. See the [EEA
+forest map metadata](https://doi.org/10.2909/f425a73e-dc6c-40be-93d6-9d234d4bbe1b)
+and [EEA salt-marsh map metadata](https://doi.org/10.2909/5b3e4da9-4c14-498c-b20e-bc514470eab5).
 
-The adapter resolves L1, L2, and L3 independently. L3 is direct map support;
-L1 and L2 are unions of their explicit descendant L3 map codes. Exactly one
-class at a level must reach 0.8 of the full polygon area. Positive candidates
-below 0.8 remain in the record. Multiple qualifying classes are ambiguous;
-no positive support and positive support below threshold are distinct
-unassigned reasons. Invalid geometry and reference-query failures produce
-excluded outcomes, with their reasons, at every supported level. L4-L8 are
-declared unsupported and receive no per-polygon outcomes.
+The classifier accepts one-band numeric rasters only with identity scale and
+offset and scores in the documented 0–1 range. It rejects undocumented scales,
+out-of-range values, duplicate or missing competitors, and incompatible grids;
+it performs no normalization or score calibration. A cell can receive a label
+only when every competing layer has a known score. Raster masks, NoData, and
+areas outside the common map coverage stay unknown; zero scores yield no
+positive winner and are not treated as observed habitat absence. Among known
+eligible positive scores, the maximal source score wins. A tie across L3 codes
+remains unknown at L3. At L1 or L2, tied codes resolve only when their explicit
+taxonomy paths share the same ancestor at that level. Child scores are never
+summed.
 
-`make_eunis_2021_reference_pin()` records the supplied verified EEA v1 2021
-reference manifest SHA-256, 136 assets/5,007,209,626 bytes, EPSG:3035, and the
-positive-value map cutoff of zero. The runner checks that raster source version,
-positive-value cutoff, layer codes, taxonomy revision, and code revisions match
-the pins before processing. Geometry and raw payloads remain recoverable
-through row-addressed checkpoint URIs.
+For each level, the numerator is the physical-area estimate of cells assigned
+to that unique categorical class. The denominator is the unchanged full
+projected polygon area; unknown, tied, zero-score, and uncovered area remain in
+that denominator. A label requires one unique class to cover at least 80% of
+the full area. The inclusive threshold and full-area rule are shared with the
+WorldCover and LUCAS adapters. Candidates below 80% remain recorded. Multiple
+qualifying classes are ambiguous. If unknown or tied score area prevents a
+unique decision, the unassigned reason records that uncertainty. Invalid
+geometry and failed raster queries remain excluded with reasons at each
+supported level. L4–L8 are declared unsupported and receive no per-polygon
+outcomes.
+
+Every EUNIS attempt checkpoint retains compact numeric diagnostics: unknown
+area, zero-maximum-score area, ambiguous area by level, and minimum, maximum,
+and area-weighted mean of pixel-wise maximum scores. These summaries do not
+replace or modify the original numeric map assets, which remain identified by
+their source manifest and required artifact manifest. The weighted mean is a
+diagnostic only and has no cross-model probability interpretation.
+
+`make_eunis_2021_reference_pin()` records the EEA v1 2021 native manifest
+SHA-256, 136 assets/5,007,209,626 bytes, EPSG:3035, the documented 0–1 score
+range, and the highest-source-score rule. A separately verified
+`artifact-list-jsonl-v1` pin for the actual raster files is required for a
+contract 1.2 export; the native-manifest digest is not silently substituted
+for that artifact list. The runner rejects incomplete scale, taxonomy, source,
+area-method, or code provenance before writing export artifacts. The area
+method uses the pinned EPSG:3035 geometry policy and discloses that its total
+area error is not certified; unresolved geometric/raster operations fail
+closed. Geometry and raw payloads remain recoverable through row-addressed
+checkpoint URIs.
 
 `parse_classification_taxonomy_rows()` parses explicit `Level`, `Code`, and
 `Name` rows. It links a code only to the longest proper code prefix present at
@@ -183,22 +214,43 @@ record can leave earlier evidence or attempt artifacts in the sink. A failed
 export does not write a completion manifest; only a finalized manifest marks a
 complete pool.
 
-This uses PR #165's streaming API at contract 1.1.0, including one attempt
-receipt per raw key, support evidence for every label candidate, disk-backed
-validation, and a bounded nine-pool gate. The filesystem sink and deterministic
-source fixtures exercise the downstream join and export path locally. No
-source-wide production export or Hub publication was run; raw snapshot key
-counts and key-set hashes are still unknown. The raw-first census and EUNIS
-label attempts do not use relevance to select keys.
+The adapter targets the shared streaming API at contract 1.2.0, including one
+attempt receipt per raw key, support evidence for every label candidate,
+disk-backed validation, and a bounded nine-pool gate. Contract 1.2 exports
+require independently verified raw-source and reference-artifact manifest
+pins plus the area-method pin; missing pins fail before the sink is written.
+The filesystem sink and deterministic source fixtures exercise the downstream
+join and export path locally. The raw-first census and EUNIS label attempts do
+not use relevance to select keys.
 
 ## Verification limits
 
 The implementation tests use deterministic local fixtures and do not download
-the 5 GB EEA raster set or source shards. The Description, Website, and Wiki
-raw, text, relevance, and required Wiki link/document groups have verified
-metadata pins, but unique raw row counts and key-set hashes are still unknown.
-The raw data blobs have not been staged or enumerated, so content and row-level
-integrity remain unverified. Production attempts and exports remain gated until
-the authoritative source manifests are verified, the taxonomy lineage is
-checked against the original workbook bytes, and all frozen raw shards pass the
-source-wide scan.
+the 5 GB EEA raster set or full raw geometry shards. EEA catalog metadata says
+the model outputs use values from 0 to 1 and describes them as a proxy for
+habitat distribution, not the actual distribution. The salt-marsh training-map
+files omit cells below an arbitrary 10th-percentile training-presence cutoff.
+The catalog lists GeoTIFF distribution for the forest maps and GeoPackage/GDB
+formats for the salt-marsh dataset. See the [EEA forest map metadata](https://doi.org/10.2909/f425a73e-dc6c-40be-93d6-9d234d4bbe1b)
+and [EEA salt-marsh map metadata](https://doi.org/10.2909/5b3e4da9-4c14-498c-b20e-bc514470eab5).
+
+Those catalog records do not verify the exact 136-file inventory used by this
+adapter, its complete output-family mix, each raster's band count, per-file
+scale/offset tags, NoData values, or pixel eligibility masks. The adapter
+requires one numeric band, identity scale/offset, and values in the catalog's
+0–1 range. These are input checks; identity tags and every asset's stored
+values remain unverified until the exact files are inspected. Masked, NoData,
+and uncovered cells stay unknown. No source ineligible mask is inferred from
+them.
+
+A separate raw-polygon inventory audit dated 2026-10-22 read footers and native
+key columns for all 1,158 shards across Description, Website, and Wiki. It
+verified 3,892,529 source rows and 3,825,143 distinct composite native keys
+across those sources, with no null or within-source duplicate composite keys.
+These counts do not establish valid geometries or globally unique OSM entities.
+The audit did not read geometry values, compute full Parquet-body SHA-256
+digests, verify the OSM PBF manifest URI/digest, or perform reference overlays.
+No source-wide pool export, overlay run, evaluation sampling, or Hub publication
+was performed. Production EUNIS attempts and exports still require actual raw
+and reference `artifact-list-jsonl-v1` manifests, a verified area-method pin,
+and the remaining source and taxonomy checks.

@@ -18,8 +18,12 @@ from .eea import (
     ClassificationTaxonomyLineagePin,
     VerifiedClassificationTaxonomy,
 )
+from .geometry import OVERLAP_KERNEL_VERSION, WGS84_MAX_SEGMENT_LENGTH_DEGREES
 from .pool_contract import (
     AmbiguityBasis,
+    AreaMeasurementPin,
+    AreaMeasureSpec,
+    ArtifactManifestPin,
     AssignmentKind,
     LabelCandidate,
     LabelLevel,
@@ -44,9 +48,11 @@ EUNIS_POOL_LEVELS = (
     LabelLevel("L7", False, "EEA probability maps directly support L3 only"),
     LabelLevel("L8", False, "EEA probability maps directly support L3 only"),
 )
-EUNIS_ASSIGNMENT_RULE_VERSION = "eea-positive-cell-union-80pct-v1"
+EUNIS_ASSIGNMENT_RULE_VERSION = "eea-highest-source-score-derived-80pct-full-area-v1"
 EUNIS_THRESHOLD = 0.8
-EUNIS_SUPPORT_SEMANTICS = SupportSemantics.MODELED_HABITAT_SUPPORT
+EUNIS_SUPPORT_SEMANTICS = SupportSemantics.MODELED_SCORE_DERIVED_CLASSIFICATION
+EUNIS_SUPPORT_AREA_POLICY = "highest_source_score_per_cell_then_unique_class_area_per_level:v1"
+EUNIS_AREA_MEASUREMENT_ID = "eunis-epsg3035-densified-source-boundary-v1"
 _EUNIS_DIRECT_MAP_LEVEL = 3
 EEA_2021_NATIVE_MANIFEST_SHA256 = "4a91e553b2e0271e7ca935e542dd092fe45288c5f9bb4a09f40f6b74da4eae22"
 EEA_2021_ASSET_COUNT = 136
@@ -633,7 +639,11 @@ def _validate_l123_map_path(code: str, ancestors_by_level: Mapping[int, str]) ->
         raise ValueError(f"EEA direct map code {code} lacks one L1-L2-L3 parent path")
 
 
-def make_eunis_2021_reference_pin(taxonomy: EunisTaxonomy) -> ReferencePin:
+def make_eunis_2021_reference_pin(
+    taxonomy: EunisTaxonomy,
+    *,
+    reference_artifact_manifest: ArtifactManifestPin | None = None,
+) -> ReferencePin:
     """Build the checked EEA v1 2021 pin from verified manifest digests."""
 
     if not taxonomy.production_eligible:
@@ -644,14 +654,71 @@ def make_eunis_2021_reference_pin(taxonomy: EunisTaxonomy) -> ReferencePin:
         source_revision=(
             f"native-manifest-sha256:{EEA_2021_NATIVE_MANIFEST_SHA256};"
             f"asset-count:{EEA_2021_ASSET_COUNT};asset-bytes:{EEA_2021_ASSET_BYTES};"
-            "crs:EPSG:3035;positive-map-value-threshold:0"
+            "crs:EPSG:3035;score-range:0..1;identity-scale-offset;"
+            "rule:highest-source-score-derived-classification-v1"
         ),
         taxonomy_id=taxonomy.taxonomy_id,
         taxonomy_revision=taxonomy.pinned_revision,
         support_semantics=EUNIS_SUPPORT_SEMANTICS,
         support_unit="m2",
         threshold=EUNIS_THRESHOLD,
-        support_union_policy="union_by_class",
+        support_union_policy=EUNIS_SUPPORT_AREA_POLICY,
+        reference_artifact_manifest=reference_artifact_manifest,
+        area_measurement=eunis_area_measurement_pin(),
+    )
+
+
+def eunis_area_measurement_pin() -> AreaMeasurementPin:
+    """Describe the EPSG:3035 area estimate and disclose its uncertified error."""
+
+    parameters = json.dumps(
+        {
+            "wgs84_max_segment_length_degrees": WGS84_MAX_SEGMENT_LENGTH_DEGREES,
+            "projected_crs": "EPSG:3035",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    errors = json.dumps(
+        {
+            "total_error_bound": "not_certified",
+            "unresolved_query_policy": "fail_closed",
+            "excluded_error_sources": [],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    common = {
+        "method_id": EUNIS_AREA_MEASUREMENT_ID,
+        "coordinate_system": "EPSG:3035",
+        "ellipsoid": "WGS84",
+        "densification_method": (
+            "segmentize straight WGS84 source edges before EPSG:3035 projection"
+        ),
+        "densification_parameters_json": parameters,
+        "error_settings_json": errors,
+        "output_unit": "m2",
+    }
+    numerator = AreaMeasureSpec(
+        **common,
+        boundary_convention=(
+            "projected class winner cells intersect the unchanged projected source polygon"
+        ),
+    )
+    denominator = AreaMeasureSpec(
+        **common,
+        boundary_convention=(
+            "full projected source polygon area after the pinned WGS84 edge densification"
+        ),
+    )
+    return AreaMeasurementPin(
+        implementation="osm-polygon-eunis weighted raster cells and Shapely intersections",
+        implementation_version=(
+            f"geometry-policy-v{OVERLAP_KERNEL_VERSION};"
+            f"maximum-segment-degrees:{WGS84_MAX_SEGMENT_LENGTH_DEGREES}"
+        ),
+        numerator=numerator,
+        denominator=denominator,
     )
 
 
@@ -665,6 +732,7 @@ class EunisLabelAttempt:
     support_areas: Mapping[tuple[str, str], float] | None
     taxonomy: EunisTaxonomy
     source_revision: str
+    score_diagnostics: Mapping[str, object] | None = None
     query_error: str | None = None
     exclusion_reason: str | None = None
     threshold: float = EUNIS_THRESHOLD
@@ -866,14 +934,41 @@ def _resolve_level(
         polygon_snapshot_id=attempt.polygon_snapshot_id,
         level=level.name,
         status=OutcomeStatus.UNASSIGNED,
-        reason=_unassigned_level_reason(candidates),
+        reason=_unassigned_level_reason(candidates, attempt.score_diagnostics, level.name),
     )
 
 
-def _unassigned_level_reason(candidates: list[LabelCandidate]) -> str:
+def _unassigned_level_reason(
+    candidates: list[LabelCandidate],
+    diagnostics: Mapping[str, object] | None,
+    level: str,
+) -> str:
+    uncertainty = _has_score_uncertainty(diagnostics, level)
     if candidates:
-        return "no_class_reaches_80_percent_of_full_polygon_area"
-    return "no_positive_reference_support"
+        return (
+            "no_class_reaches_80_percent_with_unknown_or_tied_source_scores"
+            if uncertainty
+            else "no_class_reaches_80_percent_of_full_polygon_area"
+        )
+    return (
+        "unknown_or_tied_source_scores_prevent_unique_classification"
+        if uncertainty
+        else "no_positive_source_score"
+    )
+
+
+def _has_score_uncertainty(diagnostics: Mapping[str, object] | None, level: str) -> bool:
+    if diagnostics is None:
+        return False
+    ambiguous = diagnostics.get("ambiguous_area_m2_by_level", {})
+    level_ambiguous = ambiguous.get(level, 0.0) if isinstance(ambiguous, Mapping) else 0.0
+    return _is_positive_area(diagnostics.get("unknown_area_m2", 0.0)) or _is_positive_area(
+        level_ambiguous
+    )
+
+
+def _is_positive_area(value: object) -> bool:
+    return isinstance(value, (int, float)) and value > 0.0
 
 
 @dataclass(frozen=True, slots=True)

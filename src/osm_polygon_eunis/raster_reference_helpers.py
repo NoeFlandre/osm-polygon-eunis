@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import logging
+import math
 from typing import Protocol
 
 import rasterio
+from rasterio.windows import Window, WindowError, from_bounds
+from shapely.geometry.base import BaseGeometry
 
 from .grid_overlap import is_square_north_up
 from .raster_geometry import wgs84_envelope
@@ -18,6 +22,28 @@ class _RasterLayerLike(Protocol):
 
 
 RasterLayerLike = _RasterLayerLike
+logger = logging.getLogger(__name__)
+
+
+def outward_raster_window(
+    dataset: rasterio.DatasetReader,
+    polygon: BaseGeometry,
+) -> Window | None:
+    """Return the raster window enclosing a polygon's bounding box."""
+
+    try:
+        window = from_bounds(*polygon.bounds, transform=dataset.transform)
+    except WindowError as error:
+        logger.warning("raster window fallback after WindowError: %s", error)
+        return None
+    # Round outwards so partial edge cells are not silently dropped.
+    col_off = max(0, math.floor(window.col_off))
+    row_off = max(0, math.floor(window.row_off))
+    col_end = min(dataset.width, math.ceil(window.col_off + window.width))
+    row_end = min(dataset.height, math.ceil(window.row_off + window.height))
+    if col_end <= col_off or row_end <= row_off:
+        return None
+    return Window.from_slices((row_off, row_end), (col_off, col_end))
 
 
 def shares_square_grid(

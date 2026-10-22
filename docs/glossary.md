@@ -20,7 +20,7 @@ documents.
 | No-op | A release run that finds all targets correct. It uploads nothing. |
 | OAR | The job scheduler of Grid'5000. |
 | Receipt | A file that records the result of one job. |
-| Reference | The EEA 2021 EUNIS habitat probability map. |
+| Reference | The EEA 2021 EUNIS model-score maps. The pool derives a highest-score categorical reference and does not claim observed habitat distribution. |
 | Shard | One Parquet file of a dataset. |
 | Sidecar | A compact file that stores the labels of a finished batch. |
 | Source | An input dataset. The sources are `website`, `wikidata`, and `description`. |
