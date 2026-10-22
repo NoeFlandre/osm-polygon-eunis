@@ -295,6 +295,10 @@ def _assert_diagnostics_and_stale_version_are_preserved(fixture: _ExportFixture)
 
 
 def test_pinned_worldcover_iterator_adapter_and_export_contract(tmp_path: Path) -> None:
+    producer_requirement = (
+        Path(__file__).with_name("requirements-worldcover.txt").read_text().strip()
+    )
+    assert producer_requirement.endswith(f"@{_PRODUCER_REVISION}")
     fixture = _export_fixture(tmp_path)
 
     assert AREA_MEASUREMENT == WORLDCOVER_AREA_MEASUREMENT

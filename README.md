@@ -145,6 +145,7 @@ osm-polygon-eunis grid5000 submit \
 
 ```bash
 uv sync --locked --group dev
+uv pip install --python .venv/bin/python --no-deps -r tests/integration/requirements-worldcover.txt
 uv run osm-polygon-eunis --help
 make quality
 ```
