@@ -57,11 +57,16 @@ from .models import (
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _CONTRACT_THRESHOLD = 0.8
 _SUPPORT_UNION_POLICY = "union_by_class"
+_SUPPORT_AREA_POLICY = {
+    ReferenceSystem.WORLDCOVER: _SUPPORT_UNION_POLICY,
+    ReferenceSystem.LUCAS: "independent_union_per_level_and_class:v1",
+    ReferenceSystem.EUNIS: "highest_source_score_per_cell_then_unique_class_area_per_level:v1",
+}
 _MIN_AMBIGUOUS_COUNT = 2
 _SUPPORT_SEMANTICS = {
     ReferenceSystem.WORLDCOVER: SupportSemantics.MAPPED_COVER,
     ReferenceSystem.LUCAS: SupportSemantics.SURVEYED_FOOTPRINT,
-    ReferenceSystem.EUNIS: SupportSemantics.MODELED_HABITAT_SUPPORT,
+    ReferenceSystem.EUNIS: SupportSemantics.MODELED_SCORE_DERIVED_CLASSIFICATION,
 }
 
 
@@ -236,8 +241,9 @@ def _validate_support_contract(bundle: PoolBundle, issues: list[str]) -> None:
     reference = bundle.manifest.reference_pin
     if reference.threshold != _CONTRACT_THRESHOLD:
         issues.append("reference threshold must be exactly 0.8")
-    if reference.support_union_policy != _SUPPORT_UNION_POLICY:
-        issues.append("reference support must declare within-class union_by_class")
+    expected_area_policy = _SUPPORT_AREA_POLICY[bundle.manifest.pool_key.reference_system]
+    if reference.support_union_policy != expected_area_policy:
+        issues.append(f"reference support area policy must be {expected_area_policy}")
     expected_semantics = _SUPPORT_SEMANTICS[bundle.manifest.pool_key.reference_system]
     if reference.support_semantics is not expected_semantics:
         issues.append(

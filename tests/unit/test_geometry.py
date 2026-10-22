@@ -173,7 +173,9 @@ def test_to_equal_area_densifies_large_wgs84_edges_before_projection() -> None:
 
     assert actual is not None
     assert len(actual.exterior.coords) > len(polygon.exterior.coords)
-    assert abs(actual.area - reference.area) / reference.area < 0.001
+    # This fixture checks the chosen segment length against a denser projection;
+    # it is not a bound on total production area error.
+    assert abs(actual.area - reference.area) / reference.area < 1e-6
 
 
 def test_to_equal_area_preserves_small_polygon_projection() -> None:

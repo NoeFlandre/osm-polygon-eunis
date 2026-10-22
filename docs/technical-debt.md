@@ -1,7 +1,10 @@
 # Known technical debt
 
-- The EEA source is a modelled probability raster. The raster resolution and the
-  threshold change the semantic precision of a label. The manifest records both.
+- EEA maps contain modelled suitability/probability scores, not observations of
+  actual habitat distribution. The source-wide label is a highest-source-score
+  derived classification. Scores are not verified as calibrated across habitat
+  models, and the exact raster scale, offset, band, and NoData metadata remain
+  to be checked against the pinned assets.
 - A future official vector habitat layer can replace the raster adapter behind
   the same reference interface. The pure matcher and the output contract must
   not change.

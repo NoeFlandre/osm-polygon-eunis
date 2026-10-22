@@ -88,8 +88,16 @@ def _support_semantics(reference_system: ReferenceSystem) -> SupportSemantics:
     return {
         ReferenceSystem.WORLDCOVER: SupportSemantics.MAPPED_COVER,
         ReferenceSystem.LUCAS: SupportSemantics.SURVEYED_FOOTPRINT,
-        ReferenceSystem.EUNIS: SupportSemantics.MODELED_HABITAT_SUPPORT,
+        ReferenceSystem.EUNIS: SupportSemantics.MODELED_SCORE_DERIVED_CLASSIFICATION,
     }[reference_system]
+
+
+def _support_area_policy(reference_system: ReferenceSystem) -> str:
+    if reference_system is ReferenceSystem.EUNIS:
+        return "highest_source_score_per_cell_then_unique_class_area_per_level:v1"
+    if reference_system is ReferenceSystem.LUCAS:
+        return "independent_union_per_level_and_class:v1"
+    return "union_by_class"
 
 
 def _pool_input(
@@ -114,7 +122,7 @@ def _pool_input(
         support_semantics=_support_semantics(reference_system),
         support_unit="m2",
         threshold=0.8,
-        support_union_policy="union_by_class",
+        support_union_policy=_support_area_policy(reference_system),
     )
     raw_keys = (
         canonical_native_key({"source_pbf": "source.osm.pbf", "osm_type": "way", "osm_id": 10}),

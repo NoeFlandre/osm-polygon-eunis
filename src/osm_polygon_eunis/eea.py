@@ -12,8 +12,11 @@ import time
 import xml.etree.ElementTree as ET  # types only; parsing goes through defusedxml
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from importlib.metadata import version
 from pathlib import Path
+from types import MappingProxyType
+from typing import cast
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 from zipfile import BadZipFile, ZipFile
 
@@ -43,6 +46,11 @@ _DEFAULT_CATALOG_API = "https://sdi.eea.europa.eu/catalogue/datahub/api/records"
 _DEFAULT_WEBDAV_HOST = "sdi.eea.europa.eu"
 _RASTER_SUFFIXES = (".tif", ".tiff")
 _VECTOR_SUFFIX = ".gpkg"
+EEA_2021_TAXONOMY_CACHE_SHA256 = "223aa3fb89ac48cb5095e443433412c085e66fc54602e2c29253537455a2424f"
+EEA_2021_CLASSIFICATION_RECORD_ID = "bfe4c237-e378-4a83-ab21-b3807f96c2e2"
+EEA_2021_CLASSIFICATION_WORKBOOK_SHA256 = (
+    "1427d22db8d77d1053ab1683aa60713bdec3d810605dd6b7bc16683b4ca14665"
+)
 _WEBDAV_DEPTH = "1"
 _XLSX_MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _HTTP_RETRY_ATTEMPTS = 3
@@ -51,11 +59,23 @@ _HTTP_TOO_MANY_REQUESTS = 429
 _HTTP_SERVER_ERROR_MIN = 500
 _HTTP_STATUS_CODE_LIMIT = 600
 __all__ = [
+    "EEA_2021_CLASSIFICATION_LINEAGE_PIN",
+    "EEA_2021_CLASSIFICATION_RECORD_ID",
+    "EEA_2021_CLASSIFICATION_WORKBOOK_SHA256",
+    "EEA_2021_TAXONOMY_CACHE_SHA256",
+    "ClassificationTaxonomy",
+    "ClassificationTaxonomyCacheLineage",
+    "ClassificationTaxonomyLineagePin",
     "EeaGroup",
     "RemoteAsset",
+    "VerifiedClassificationTaxonomy",
     "WebDavEntry",
+    "parse_classification_taxonomy_rows",
+    "parse_classification_taxonomy_workbook",
     "resolve_config",
     "resolve_config_data",
+    "validate_classification_taxonomy_lineage",
+    "verify_classification_taxonomy_lineage",
 ]
 
 
@@ -95,6 +115,297 @@ class EeaGroup:
     labels: Mapping[str, str]
     raster_assets: tuple[RemoteAsset, ...]
     vector_asset: RemoteAsset | None
+
+
+@dataclass(frozen=True, slots=True)
+class ClassificationTaxonomy:
+    """Level, label, and prefix-parent rows parsed from an EUNIS workbook."""
+
+    labels: Mapping[str, str]
+    levels: Mapping[str, int]
+    parents: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        """Reject missing labels and parent edges outside the parsed hierarchy."""
+
+        _validate_classification_labels(self.labels, self.levels, self.parents)
+        _validate_classification_levels(self.levels)
+        _validate_classification_parent_edges(self.parents, self.levels)
+        object.__setattr__(self, "labels", MappingProxyType(dict(self.labels)))
+        object.__setattr__(self, "levels", MappingProxyType(dict(self.levels)))
+        object.__setattr__(self, "parents", MappingProxyType(dict(self.parents)))
+
+    def ancestors_including_self(self, code: str) -> tuple[str, ...]:
+        """Return a code followed by its parsed parents, from specific to root."""
+
+        ancestors = [code]
+        seen = {code}
+        current = code
+        while current in self.parents:
+            current = self.parents[current]
+            if current in seen:
+                raise ValueError(f"EUNIS taxonomy contains a parent cycle at {current}")
+            ancestors.append(current)
+            seen.add(current)
+        return tuple(ancestors)
+
+    def root_for(self, code: str) -> str:
+        """Return the highest parsed ancestor, treating unknown codes as roots."""
+
+        return self.ancestors_including_self(code)[-1]
+
+
+@dataclass(frozen=True, slots=True)
+class ClassificationTaxonomyCacheLineage:
+    """Record and workbook identity decoded from a taxonomy cache artifact."""
+
+    classification_record_id: str
+    workbook_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class ClassificationTaxonomyLineagePin:
+    """Immutable EEA cache, classification record, and workbook digests."""
+
+    cache_sha256: str
+    classification_record_id: str
+    workbook_sha256: str
+
+
+_VERIFIED_TAXONOMY_TOKEN = object()
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class VerifiedClassificationTaxonomy:
+    """Taxonomy with byte-validated workbook/cache lineage and a stable digest."""
+
+    taxonomy: ClassificationTaxonomy
+    lineage_pin: ClassificationTaxonomyLineagePin
+    taxonomy_mapping_sha256: str
+    _token: object = dataclass_field(repr=False, compare=False)
+
+    def __init__(
+        self,
+        taxonomy: ClassificationTaxonomy,
+        lineage_pin: ClassificationTaxonomyLineagePin,
+        taxonomy_mapping_sha256: str,
+        *,
+        _token: object,
+    ) -> None:
+        """Accept only the private token held by the byte-checking verifier."""
+
+        if _token is not _VERIFIED_TAXONOMY_TOKEN:
+            raise TypeError("verified taxonomy evidence must be created by the lineage verifier")
+        object.__setattr__(self, "taxonomy", taxonomy)
+        object.__setattr__(self, "lineage_pin", lineage_pin)
+        object.__setattr__(self, "taxonomy_mapping_sha256", taxonomy_mapping_sha256)
+        object.__setattr__(self, "_token", _token)
+
+
+EEA_2021_CLASSIFICATION_LINEAGE_PIN = ClassificationTaxonomyLineagePin(
+    cache_sha256=EEA_2021_TAXONOMY_CACHE_SHA256,
+    classification_record_id=EEA_2021_CLASSIFICATION_RECORD_ID,
+    workbook_sha256=EEA_2021_CLASSIFICATION_WORKBOOK_SHA256,
+)
+
+
+def validate_classification_taxonomy_lineage(
+    cached_taxonomy: ClassificationTaxonomy,
+    cache_payload: bytes,
+    workbook_payload: bytes,
+    cache_lineage: ClassificationTaxonomyCacheLineage,
+    expected: ClassificationTaxonomyLineagePin = EEA_2021_CLASSIFICATION_LINEAGE_PIN,
+    *,
+    supplemental_labels: Mapping[str, str] | None = None,
+) -> ClassificationTaxonomy:
+    """Verify a decoded taxonomy cache against its pinned workbook lineage.
+
+    ``cached_taxonomy`` must be decoded from ``cache_payload``. The cache's
+    hierarchy and workbook labels are compared with a fresh parse of the
+    checksum-pinned workbook; supplemental cache labels may be retained.
+    """
+
+    return verify_classification_taxonomy_lineage(
+        cached_taxonomy,
+        cache_payload,
+        workbook_payload,
+        cache_lineage,
+        expected,
+        supplemental_labels=supplemental_labels,
+    ).taxonomy
+
+
+def verify_classification_taxonomy_lineage(
+    cached_taxonomy: ClassificationTaxonomy,
+    cache_payload: bytes,
+    workbook_payload: bytes,
+    cache_lineage: ClassificationTaxonomyCacheLineage,
+    expected: ClassificationTaxonomyLineagePin = EEA_2021_CLASSIFICATION_LINEAGE_PIN,
+    *,
+    supplemental_labels: Mapping[str, str] | None = None,
+) -> VerifiedClassificationTaxonomy:
+    """Return immutable proof after validating actual pinned cache/workbook bytes."""
+
+    _validate_taxonomy_lineage_pins(
+        cache_payload,
+        workbook_payload,
+        cache_lineage,
+        expected,
+    )
+
+    workbook_taxonomy = parse_classification_taxonomy_workbook(
+        workbook_payload,
+        supplemental_labels=supplemental_labels,
+    )
+    _require_matching_classification_taxonomy(cached_taxonomy, workbook_taxonomy)
+    return VerifiedClassificationTaxonomy(
+        taxonomy=cached_taxonomy,
+        lineage_pin=expected,
+        taxonomy_mapping_sha256=_classification_taxonomy_mapping_sha256(cached_taxonomy),
+        _token=_VERIFIED_TAXONOMY_TOKEN,
+    )
+
+
+def _classification_taxonomy_mapping_sha256(taxonomy: ClassificationTaxonomy) -> str:
+    payload = json.dumps(
+        {
+            "labels": dict(taxonomy.labels),
+            "levels": dict(taxonomy.levels),
+            "parents": dict(taxonomy.parents),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _validate_taxonomy_lineage_pins(
+    cache_payload: bytes,
+    workbook_payload: bytes,
+    cache_lineage: ClassificationTaxonomyCacheLineage,
+    expected: ClassificationTaxonomyLineagePin,
+) -> None:
+    _validate_payload_pin(
+        cache_payload,
+        expected.cache_sha256,
+        "classification taxonomy cache checksum does not match its pin",
+    )
+    actual_workbook_sha256 = _validate_payload_pin(
+        workbook_payload,
+        expected.workbook_sha256,
+        "classification workbook checksum does not match its pin",
+    )
+    _validate_cache_lineage(cache_lineage, expected, actual_workbook_sha256)
+
+
+def _validate_payload_pin(payload: bytes, expected_sha256: str, message: str) -> str:
+    actual_sha256 = hashlib.sha256(payload).hexdigest()
+    if actual_sha256 != expected_sha256:
+        raise ValueError(message)
+    return actual_sha256
+
+
+def _validate_cache_lineage(
+    cache_lineage: ClassificationTaxonomyCacheLineage,
+    expected: ClassificationTaxonomyLineagePin,
+    workbook_sha256: str,
+) -> None:
+    if cache_lineage.classification_record_id != expected.classification_record_id:
+        raise ValueError("classification taxonomy cache references another EEA record")
+    if cache_lineage.workbook_sha256 != workbook_sha256:
+        raise ValueError("classification taxonomy cache points to another workbook")
+
+
+def _require_matching_classification_taxonomy(
+    cached_taxonomy: ClassificationTaxonomy,
+    workbook_taxonomy: ClassificationTaxonomy,
+) -> None:
+    _require_matching_classification_hierarchy(cached_taxonomy, workbook_taxonomy)
+    mismatched_labels = _mismatched_classification_labels(cached_taxonomy, workbook_taxonomy)
+    if mismatched_labels:
+        raise ValueError(
+            "cached EUNIS labels differ from the workbook for " + ", ".join(mismatched_labels)
+        )
+
+
+def _require_matching_classification_hierarchy(
+    cached_taxonomy: ClassificationTaxonomy,
+    workbook_taxonomy: ClassificationTaxonomy,
+) -> None:
+    if cached_taxonomy.levels != workbook_taxonomy.levels:
+        raise ValueError("cached EUNIS levels or parent hierarchy differs from the workbook")
+    if cached_taxonomy.parents != workbook_taxonomy.parents:
+        raise ValueError("cached EUNIS levels or parent hierarchy differs from the workbook")
+
+
+def _mismatched_classification_labels(
+    cached_taxonomy: ClassificationTaxonomy,
+    workbook_taxonomy: ClassificationTaxonomy,
+) -> list[str]:
+    return sorted(
+        code
+        for code, name in workbook_taxonomy.labels.items()
+        if cached_taxonomy.labels.get(code) != name
+    )
+
+
+def _validate_classification_labels(
+    labels: Mapping[str, str],
+    levels: Mapping[str, int],
+    parents: Mapping[str, str],
+) -> None:
+    taxonomy_codes = set(levels) | set(parents) | set(parents.values())
+    missing = sorted(
+        code
+        for code in taxonomy_codes
+        if not isinstance(labels.get(code), str) or not labels[code].strip()
+    )
+    if missing:
+        raise ValueError(f"EUNIS taxonomy has missing label for {', '.join(missing)}")
+
+
+def _validate_classification_levels(levels: Mapping[str, int]) -> None:
+    for code, level in levels.items():
+        if not _is_valid_classification_level(code, level):
+            raise ValueError(f"EUNIS taxonomy has invalid Level for {code!r}")
+
+
+def _is_valid_classification_level(code: str, level: object) -> bool:
+    return bool(code) and isinstance(level, int) and not isinstance(level, bool) and level >= 1
+
+
+def _validate_classification_parent_edges(
+    parents: Mapping[str, str],
+    levels: Mapping[str, int],
+) -> None:
+    for code, parent in parents.items():
+        _validate_classification_parent_edge(code, parent, levels)
+
+
+def _validate_classification_parent_edge(
+    code: str,
+    parent: str,
+    levels: Mapping[str, int],
+) -> None:
+    _require_parent_levels(code, parent, levels)
+    _require_proper_prefix_parent(code, parent)
+    _require_lower_level_parent(code, parent, levels)
+
+
+def _require_parent_levels(code: str, parent: str, levels: Mapping[str, int]) -> None:
+    if code not in levels or parent not in levels:
+        raise ValueError(f"EUNIS taxonomy has a parent without a Level for {code}")
+
+
+def _require_proper_prefix_parent(code: str, parent: str) -> None:
+    if not code.startswith(parent) or len(parent) >= len(code):
+        raise ValueError(f"EUNIS taxonomy has invalid prefix parent for {code}")
+
+
+def _require_lower_level_parent(code: str, parent: str, levels: Mapping[str, int]) -> None:
+    if levels[parent] >= levels[code]:
+        raise ValueError(f"EUNIS taxonomy parent is not at a lower Level for {code}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,6 +573,175 @@ def parse_classification_rows(rows: Iterable[Iterable[object]]) -> dict[str, str
     return labels
 
 
+def parse_classification_taxonomy_rows(
+    rows: Iterable[Iterable[object]],
+    *,
+    supplemental_labels: Mapping[str, str] | None = None,
+) -> ClassificationTaxonomy:
+    """Parse repeated Level/Code/Name headers and derive present lower-level prefixes."""
+
+    records = _classification_taxonomy_records(rows)
+    labels = {code: name for code, (name, _level) in records.items()}
+    levels = {code: level for code, (_name, level) in records.items()}
+    _add_supplemental_taxonomy_labels(labels, supplemental_labels)
+    parents = {
+        code: parent
+        for code, level in levels.items()
+        if (parent := _longest_lower_level_prefix(code, level, levels)) is not None
+    }
+    return ClassificationTaxonomy(labels, levels, parents)
+
+
+def _classification_taxonomy_records(
+    rows: Iterable[Iterable[object]],
+) -> dict[str, tuple[str, int]]:
+    records: dict[str, tuple[str, int]] = {}
+    current_indexes: tuple[int, int, int] | None = None
+    for raw_row in rows:
+        current_indexes, record = _classification_taxonomy_row(raw_row, current_indexes)
+        if record is None:
+            continue
+        code, name, level = record
+        _merge_classification_taxonomy_record(records, code, name, level)
+    if not records:
+        raise ValueError("EEA classification workbook has no Level/Code/Name rows")
+    return records
+
+
+def _classification_taxonomy_row(
+    raw_row: Iterable[object],
+    current_indexes: tuple[int, int, int] | None,
+) -> tuple[tuple[int, int, int] | None, tuple[str, str, int] | None]:
+    row = tuple(raw_row)
+    if not row:
+        return None, None
+    indexes = _classification_taxonomy_indexes(row)
+    if indexes is not None:
+        return indexes, None
+    if current_indexes is None:
+        return None, None
+    return current_indexes, _classification_taxonomy_record(row, current_indexes)
+
+
+def _merge_classification_taxonomy_record(
+    records: dict[str, tuple[str, int]],
+    code: str,
+    name: str,
+    level: int,
+) -> None:
+    row_value = (name, level)
+    if records.setdefault(code, row_value) != row_value:
+        raise ValueError(f"EEA classification has conflicting name or Level for {code}")
+
+
+def _add_supplemental_taxonomy_labels(
+    labels: dict[str, str],
+    supplemental_labels: Mapping[str, str] | None,
+) -> None:
+    for code, name in (supplemental_labels or {}).items():
+        labels[code] = _validated_supplemental_taxonomy_label(code, name, labels)
+
+
+def _validated_supplemental_taxonomy_label(
+    code: object,
+    name: object,
+    labels: Mapping[str, str],
+) -> str:
+    normalized_code, normalized_name = _normalize_supplemental_taxonomy_label(code, name)
+    previous = labels.get(normalized_code)
+    if previous is not None and previous != normalized_name:
+        raise ValueError(
+            f"EEA supplemental label conflicts with classification for {normalized_code}"
+        )
+    return normalized_name
+
+
+def _normalize_supplemental_taxonomy_label(code: object, name: object) -> tuple[str, str]:
+    _require_supplemental_taxonomy_strings(code, name)
+    code = cast(str, code)
+    name = cast(str, name)
+    normalized_name = name.strip()
+    if not _has_supplemental_taxonomy_text(code, normalized_name):
+        raise ValueError("EEA classification has an invalid supplemental label")
+    return code, normalized_name
+
+
+def _require_supplemental_taxonomy_strings(code: object, name: object) -> None:
+    if not isinstance(code, str) or not isinstance(name, str):
+        raise TypeError("EEA supplemental labels must use string codes and names")
+
+
+def _has_supplemental_taxonomy_text(code: str, name: str) -> bool:
+    return bool(code) and bool(name)
+
+
+def _classification_taxonomy_indexes(
+    row: tuple[object, ...],
+) -> tuple[int, int, int] | None:
+    headers = {_normalise_header(value): index for index, value in enumerate(row)}
+    level_index = _find_header_index(headers, {"level"})
+    code_index = _find_header_index(headers, {"code", "code2018"})
+    name_index = _find_header_index(headers, {"name", "name2018"})
+    if level_index is None or code_index is None or name_index is None:
+        return None
+    return level_index, code_index, name_index
+
+
+def _classification_taxonomy_record(
+    row: tuple[object, ...],
+    indexes: tuple[int, int, int],
+) -> tuple[str, str, int] | None:
+    level_index, code_index, name_index = indexes
+    code = _classification_cell_text(row, code_index)
+    if not code:
+        return None
+    name = _required_classification_name(row, name_index, code)
+    level_value = _classification_cell_value(row, level_index)
+    level = _classification_level_number(level_value, code)
+    return code, name, level
+
+
+def _classification_cell_value(row: tuple[object, ...], index: int) -> object:
+    return row[index] if index < len(row) else ""
+
+
+def _classification_cell_text(row: tuple[object, ...], index: int) -> str:
+    return _text_value(_classification_cell_value(row, index))
+
+
+def _required_classification_name(
+    row: tuple[object, ...],
+    index: int,
+    code: str,
+) -> str:
+    name = _classification_cell_text(row, index)
+    if not name:
+        raise ValueError(f"EEA classification has a missing name for {code}")
+    return name
+
+
+def _classification_level_number(value: object, code: str) -> int:
+    text = _classification_level_text(value)
+    if not text.isdecimal() or int(text) < 1:
+        raise ValueError(f"EEA classification has an invalid Level for {code}")
+    return int(text)
+
+
+def _classification_level_text(value: object) -> str:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    return _text_value(value)
+
+
+def _longest_lower_level_prefix(code: str, level: int, levels: Mapping[str, int]) -> str | None:
+    for end in range(len(code) - 1, 0, -1):
+        prefix = code[:end]
+        parent_level = levels.get(prefix)
+        if parent_level is not None and parent_level < level:
+            return prefix
+    return None
+
+
 def _merge_label(labels: dict[str, str], code: str, name: str, source: str) -> None:
     previous = labels.setdefault(code, name)
     if previous != name:
@@ -342,12 +822,7 @@ def _shared_string_value(shared_strings: tuple[str, ...], raw: str) -> str:
 
 
 def _xlsx_rows(archive: ZipFile, shared_strings: tuple[str, ...]) -> Iterable[tuple[str, ...]]:
-    sheet_paths = sorted(
-        path
-        for path in archive.namelist()
-        if path.startswith("xl/worksheets/sheet") and path.endswith(".xml")
-    )
-    for path in sheet_paths:
+    for path in _taxonomy_sheet_paths(archive):
         root = _safe_fromstring(archive.read(path))
         yield from _sheet_rows(root, shared_strings)
 
@@ -365,6 +840,25 @@ def _sheet_rows(
             yield tuple(cells.get(index, "") for index in range(width))
 
 
+def _xlsx_taxonomy_rows(
+    archive: ZipFile,
+    shared_strings: tuple[str, ...],
+) -> Iterable[tuple[str, ...]]:
+    for index, path in enumerate(_taxonomy_sheet_paths(archive)):
+        if index:
+            yield ()
+        root = _safe_fromstring(archive.read(path))
+        yield from _sheet_rows(root, shared_strings)
+
+
+def _taxonomy_sheet_paths(archive: ZipFile) -> list[str]:
+    return sorted(
+        path
+        for path in archive.namelist()
+        if path.startswith("xl/worksheets/sheet") and path.endswith(".xml")
+    )
+
+
 def _row_cells(row_element: ET.Element, shared_strings: tuple[str, ...]) -> dict[int, str]:
     return {
         _column_index(cell.attrib["r"]): _xlsx_cell_value(cell, shared_strings)
@@ -380,6 +874,21 @@ def parse_classification_workbook(payload: bytes) -> dict[str, str]:
         with ZipFile(io.BytesIO(payload)) as archive:
             rows = _xlsx_rows(archive, _shared_strings(archive))
             return parse_classification_rows(rows)
+    except (BadZipFile, KeyError) as error:
+        raise ValueError("EEA classification asset is not a valid XLSX workbook") from error
+
+
+def parse_classification_taxonomy_workbook(
+    payload: bytes,
+    *,
+    supplemental_labels: Mapping[str, str] | None = None,
+) -> ClassificationTaxonomy:
+    """Parse explicit taxonomy rows from an XLSX without resolving a remote asset."""
+
+    try:
+        with ZipFile(io.BytesIO(payload)) as archive:
+            rows = _xlsx_taxonomy_rows(archive, _shared_strings(archive))
+            return parse_classification_taxonomy_rows(rows, supplemental_labels=supplemental_labels)
     except (BadZipFile, KeyError) as error:
         raise ValueError("EEA classification asset is not a valid XLSX workbook") from error
 

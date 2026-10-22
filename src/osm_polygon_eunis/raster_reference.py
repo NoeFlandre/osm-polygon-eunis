@@ -1,65 +1,62 @@
-"""Read exact habitat overlaps from EEA probability rasters."""
+"""Read EEA score rasters for habitat reference queries."""
 
 from __future__ import annotations
 
 import logging
-import math
-import re
 from collections import OrderedDict
+from collections.abc import Iterable, Mapping
 from contextlib import ExitStack
-from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import rasterio
 import shapely
-from rasterio.windows import Window, WindowError, from_bounds
+from rasterio.windows import Window
 from shapely.geometry import box
 from shapely.geometry.base import BaseGeometry
 
 from .domain import EunisResult
+from .eunis_asset_manifest import (
+    EunisRasterAssetManifest,
+    RasterAssetReferencePins,
+)
+from .eunis_asset_manifest import (
+    validate_classification_inventory as _validate_classification_inventory,
+)
 from .geometry import is_usable
 from .grid_overlap import (
     TILE_SIZE,
     WeightedCells,
     band_row_ranges,
-    is_square_north_up,
     stack_bytes,
     tile_window,
     weighted_cells,
 )
 from .matching import choose_winner
-from .raster_geometry import (
-    is_epsg_3035,
-    wgs84_envelope,
+from .raster_class_support import (
+    ClassificationAreas,
+)
+from .raster_class_support import (
+    classification_areas as _classification_areas,
+)
+from .raster_class_support import (
+    support_areas as _support_areas,
+)
+from .raster_geometry import is_epsg_3035, wgs84_envelope  # noqa: F401
+from .raster_layer import RasterLayer, parse_layer_code  # noqa: F401
+from .raster_reference_helpers import RasterLayerLike
+from .raster_reference_helpers import code_order_on_shared_grid as _code_order_on_shared_grid
+from .raster_reference_helpers import outward_raster_window as _outward_raster_window
+from .raster_reference_helpers import (
+    wgs84_dataset_extent as _wgs84_dataset_extent,
 )
 
 logger = logging.getLogger(__name__)
 
-_LAYER_CODE = re.compile(r"^Prob_(?P<code>[A-Z][A-Z0-9.]+)_\d+m\.tif$")
 _DEFAULT_RASTER_TILE_CACHE_BYTES = 1536 * 1024 * 1024
 # GDAL's block cache per open raster reference, in MiB (``GDAL_CACHEMAX``).
 # Sized independently of ``_DEFAULT_RASTER_TILE_CACHE_BYTES`` above.
 _GDAL_CACHE_MAX_MB = 256
-
-
-@dataclass(frozen=True, slots=True)
-class RasterLayer:
-    """One EEA probability raster and its stable EUNIS metadata."""
-
-    code: str
-    name: str
-    path: Path
-    source_version: str
-
-
-def parse_layer_code(filename: str) -> str:
-    """Extract the EUNIS code from an official probability-map filename."""
-
-    match = _LAYER_CODE.fullmatch(Path(filename).name)
-    if match is None:
-        raise ValueError(f"could not parse reference layer code from {filename!r}")
-    return match.group("code")
 
 
 class RasterReference:
@@ -71,13 +68,15 @@ class RasterReference:
         threshold: int = 0,
         *,
         tile_cache_bytes: int = _DEFAULT_RASTER_TILE_CACHE_BYTES,
+        asset_manifest: EunisRasterAssetManifest | None = None,
     ) -> None:
         """Prepare raster layers for exact overlap queries.
 
         Args:
-            layers: Probability rasters that share one source version.
-            threshold: Minimum raster value counted as habitat presence.
+            layers: EEA score rasters that share one source version.
+            threshold: Minimum source value for the legacy single-layer query.
             tile_cache_bytes: Maximum estimated memory retained for tile geometries.
+            asset_manifest: Complete source inventory and output-semantics evidence.
 
         Raises:
             ValueError: If layer versions disagree, the threshold is negative, or the cache
@@ -91,6 +90,8 @@ class RasterReference:
         if tile_cache_bytes <= 0:
             raise ValueError("raster tile cache byte budget must be positive")
         self._layers = layers
+        self._asset_manifest = asset_manifest
+        self._inventory_verified = False
         self._threshold = threshold
         self._tile_cache_byte_budget = tile_cache_bytes
         self._source_version = next(iter(versions), None)
@@ -147,17 +148,48 @@ class RasterReference:
             self._source_extent_wgs84 = _wgs84_dataset_extent(self._datasets)
         return self._source_extent_wgs84
 
+    @property
+    def layer_codes(self) -> tuple[str, ...]:
+        """Return the direct EUNIS codes for the configured map layers."""
+
+        return tuple(layer.code for layer in self._layers)
+
+    @property
+    def source_version(self) -> str | None:
+        """Return the pinned source version shared by every configured layer."""
+
+        return self._source_version
+
+    def validate_classification_inventory(
+        self,
+        *,
+        expected_native_manifest_sha256: str | None = None,
+        expected_asset_inventory_sha256: str | None = None,
+        expected_output_semantics_sha256: str | None = None,
+    ) -> EunisRasterAssetManifest:
+        """Verify every opened source file against its complete, pinned inventory."""
+
+        self._asset_manifest = _validate_classification_inventory(
+            self._layers,
+            self._source_version,
+            self._asset_manifest,
+            reference_pins=RasterAssetReferencePins(
+                expected_native_manifest_sha256,
+                expected_asset_inventory_sha256,
+                expected_output_semantics_sha256,
+            ),
+            verify_asset_files=not (self._stack is not None and self._inventory_verified),
+        )
+        self._inventory_verified = self._stack is not None
+        return self._asset_manifest
+
     def __enter__(self) -> RasterReference:
         """Open raster datasets and return this reference for overlap queries."""
         if self._stack is not None:
             raise RuntimeError("raster reference is already open")
         stack = ExitStack()
         stack.enter_context(rasterio.Env(GDAL_CACHEMAX=_GDAL_CACHE_MAX_MB))
-        datasets: list[tuple[RasterLayer, rasterio.DatasetReader]] = []
-        for layer in self._layers:
-            dataset = stack.enter_context(rasterio.open(layer.path))
-            self._validate_crs(dataset, layer.path)
-            datasets.append((layer, dataset))
+        datasets = self._open_datasets(stack)
         self._stack = stack
         self._datasets = tuple(datasets)
         return self
@@ -168,6 +200,7 @@ class RasterReference:
 
     def close(self) -> None:
         """Close raster datasets and clear this reference's tile cache."""
+        self._inventory_verified = False
         if self._stack is not None:
             self._stack.close()
             self._stack = None
@@ -189,6 +222,29 @@ class RasterReference:
         if self._stack is not None:
             return self._overlap_open(polygon, self._datasets)
         return self._overlap_closed(polygon)
+
+    def support_areas(
+        self,
+        polygon: BaseGeometry,
+        classes: Mapping[tuple[str, str], Iterable[str]],
+    ) -> dict[tuple[str, str], float]:
+        """Measure highest-source-score class area at each hierarchy level.
+
+        ``classes`` maps ``(level, code)`` to direct map codes. Only cells with
+        a known score for every competing map can receive a categorical label;
+        NoData and uncovered areas remain unknown in the full polygon denominator.
+        """
+
+        return _support_areas(self, polygon, classes)
+
+    def classification_areas(
+        self,
+        polygon: BaseGeometry,
+        classes: Mapping[tuple[str, str], Iterable[str]],
+    ) -> ClassificationAreas:
+        """Return categorical areas plus score, tie, and unknown-area diagnostics."""
+
+        return _classification_areas(self, polygon, classes)
 
     def _overlap_closed(self, polygon: BaseGeometry) -> EunisResult:
         with ExitStack() as stack:
@@ -283,7 +339,7 @@ class RasterReference:
 
     def _tile_stack(
         self,
-        datasets: tuple[tuple[RasterLayer, rasterio.DatasetReader], ...],
+        datasets: tuple[tuple[RasterLayerLike, rasterio.DatasetReader], ...],
         row: int,
         column: int,
     ) -> np.ndarray | None:
@@ -319,7 +375,7 @@ class RasterReference:
     ) -> Window | None:
         if not polygon.intersects(box(*dataset.bounds)):
             return None
-        return self._window(dataset, polygon)
+        return _outward_raster_window(dataset, polygon)
 
     @staticmethod
     def _validate_crs(dataset: rasterio.DatasetReader, path: Path) -> None:
@@ -331,27 +387,6 @@ class RasterReference:
         if not valid:
             raise ValueError(f"reference raster {path} is not EPSG:3035")
 
-    @staticmethod
-    def _window(
-        dataset: rasterio.DatasetReader,
-        polygon: BaseGeometry,
-    ) -> Window | None:
-        try:
-            window = from_bounds(*polygon.bounds, transform=dataset.transform)
-        except WindowError as error:
-            logger.warning("raster window fallback after WindowError: %s", error)
-            return None
-        # Round outwards. Rounding to nearest can shrink the window inside the
-        # polygon's bounding box and silently drop the partially covered cells
-        # on its edges, which undercounts the overlap area.
-        col_off = max(0, math.floor(window.col_off))
-        row_off = max(0, math.floor(window.row_off))
-        col_end = min(dataset.width, math.ceil(window.col_off + window.width))
-        row_end = min(dataset.height, math.ceil(window.row_off + window.height))
-        if col_end <= col_off or row_end <= row_off:
-            return None
-        return Window.from_slices((row_off, row_end), (col_off, col_end))
-
     def _positive_mask(
         self,
         dataset: rasterio.DatasetReader,
@@ -361,37 +396,3 @@ class RasterReference:
         values = np.asarray(data)
         valid = (~np.ma.getmaskarray(data)) & (values > self._threshold)
         return valid if valid.any() else None
-
-
-def _shares_square_grid(
-    datasets: tuple[tuple[RasterLayer, rasterio.DatasetReader], ...],
-) -> bool:
-    grids = {(tuple(d.transform)[:6], d.width, d.height) for _, d in datasets}
-    return len(grids) == 1 and is_square_north_up(datasets[0][1].transform)
-
-
-def _code_order_on_shared_grid(
-    datasets: tuple[tuple[RasterLayer, rasterio.DatasetReader], ...],
-) -> tuple[int, ...] | None:
-    codes = [layer.code for layer, _ in datasets]
-    if len(set(codes)) != len(codes) or not _shares_square_grid(datasets):
-        return None
-    return tuple(sorted(range(len(datasets)), key=codes.__getitem__))
-
-
-def _wgs84_dataset_extent(
-    datasets: tuple[tuple[RasterLayer, rasterio.DatasetReader], ...],
-) -> tuple[float, float, float, float] | None:
-    iterator = iter(datasets)
-    first = next(iterator, None)
-    if first is None:
-        return None
-    bounds = first[1].bounds
-    left, bottom, right, top = bounds.left, bounds.bottom, bounds.right, bounds.top
-    for _, dataset in iterator:
-        bounds = dataset.bounds
-        left = min(left, bounds.left)
-        bottom = min(bottom, bounds.bottom)
-        right = max(right, bounds.right)
-        top = max(top, bounds.top)
-    return wgs84_envelope((left, bottom, right, top))

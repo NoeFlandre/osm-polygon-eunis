@@ -57,8 +57,14 @@ Description `data/` is raw polygon geometry. `language-v1/data/` is a derived
 text layer keyed by `description_identity` and `tag_key` and joins back to the
 same geometry on `source_pbf`, `osm_type`, and `osm_id`; it must not be counted
 as a second polygon inventory. The Description source inventory is therefore
-one `data/` tree. The handoff reports no unique native-key totals, so these
-file-tree pins do not prove raw polygon inventory completeness.
+one `data/` tree. A 2026-10-22 footer and native-key audit covered all 1,158
+raw geometry shards. It counted 906,631 Description rows, 1,726,474 Website
+rows, and 1,259,424 Wiki rows, with 3,825,143 distinct composite native keys
+across the three sources. It found no null or within-source duplicate keys.
+These are composite `(source_pbf, osm_type, osm_id)` keys, not proof of valid
+geometries or globally unique OSM entities. The audit did not read geometry
+values, compute full Parquet-body SHA-256 digests, or verify the PBF manifest
+URI/digest. It performed no reference overlays or evaluation sampling.
 
 `pool_adapters.data/source-join-contract.json` records the verified v2
 metadata handoff SHA-256
@@ -76,8 +82,9 @@ Description, relevance labels join to the derived layer on
 language)` and join documents on `document_id`. The language-split link tree
 is a separate layout; do not union it with the primary links without explicit
 scope and deduplication. Relevance and text joins remain downstream of the
-complete raw polygon attempts. The handoff contains shard metadata and
-representative footer schemas, not a count of distinct polygon keys.
+complete raw polygon attempts. The key audit established raw row and composite
+key counts, but did not establish geometry validity, full file-body hashes, or
+the OSM PBF manifest digest.
 
 | Text source | Frozen repository revision | Geometry tree groups |
 | --- | --- | --- |

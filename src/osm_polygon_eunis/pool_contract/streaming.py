@@ -1217,11 +1217,18 @@ def _manifest_reference_issues(
     expected_semantics = {
         ReferenceSystem.WORLDCOVER: "mapped_cover",
         ReferenceSystem.LUCAS: "surveyed_footprint",
-        ReferenceSystem.EUNIS: "modeled_habitat_support",
+        ReferenceSystem.EUNIS: "modeled_score_derived_classification",
+    }[pool_key.reference_system]
+    expected_area_policy = {
+        ReferenceSystem.WORLDCOVER: "union_by_class",
+        ReferenceSystem.LUCAS: "independent_union_per_level_and_class:v1",
+        ReferenceSystem.EUNIS: (
+            "highest_source_score_per_cell_then_unique_class_area_per_level:v1"
+        ),
     }[pool_key.reference_system]
     if (
         reference.get("threshold") != _POOL_THRESHOLD
-        or reference.get("support_union_policy") != "union_by_class"
+        or reference.get("support_union_policy") != expected_area_policy
         or reference.get("support_semantics") != expected_semantics
     ):
         return ["completion manifest reference rule does not match the shared contract"]

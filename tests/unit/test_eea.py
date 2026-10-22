@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import logging
@@ -13,6 +14,9 @@ import pytest
 from osm_polygon_eunis import eea
 from osm_polygon_eunis._protocols import HttpClient
 from osm_polygon_eunis.eea import (
+    ClassificationTaxonomy,
+    ClassificationTaxonomyCacheLineage,
+    ClassificationTaxonomyLineagePin,
     RemoteAsset,
     WebDavEntry,
     _classification_folder,
@@ -27,11 +31,15 @@ from osm_polygon_eunis.eea import (
     extract_share_token,
     parse_arcgis_labels,
     parse_classification_rows,
+    parse_classification_taxonomy_rows,
+    parse_classification_taxonomy_workbook,
     parse_classification_workbook,
     parse_webdav_entries,
     raster_assets_from_entries,
     resolve_classification_labels,
     resolve_group,
+    validate_classification_taxonomy_lineage,
+    verify_classification_taxonomy_lineage,
 )
 
 
@@ -89,6 +97,244 @@ def test_parse_classification_rows_accepts_multiple_sheet_headers() -> None:
         "N": "Coastal habitats",
         "V": "Vegetated man-made habitats",
     }
+
+
+def test_classification_taxonomy_uses_longest_proper_prefix_at_lower_level() -> None:
+    taxonomy = parse_classification_taxonomy_rows(
+        [
+            ["Level", "Code", "Name"],
+            [1, "A", "Root A"],
+            [5, "AB", "Higher-level prefix"],
+            [2, "ABC", "Lower-level prefix"],
+            [4, "ABCD", "Child of ABC"],
+            [2, "X", "Root X"],
+            [3, "XY", "Same-level prefix"],
+            [3, "XYZ", "Child of X"],
+            ["Level", "Code 2018", "Name 2018"],
+            [1, "Q", "Root Q"],
+            [2, "Q1", "Child Q1"],
+            [3, "Q11", "Child Q11"],
+        ],
+        supplemental_labels={"MA223": "Saltmarsh"},
+    )
+
+    assert taxonomy.labels["MA223"] == "Saltmarsh"
+    assert "MA223" not in taxonomy.levels
+    assert taxonomy.parents["ABCD"] == "ABC"
+    assert taxonomy.parents["XYZ"] == "X"
+    assert taxonomy.parents["Q11"] == "Q1"
+    assert taxonomy.ancestors_including_self("Q11") == ("Q11", "Q1", "Q")
+    assert taxonomy.root_for("MA223") == "MA223"
+
+
+def test_classification_taxonomy_rejects_invalid_levels_and_conflicting_rows() -> None:
+    with pytest.raises(ValueError, match="invalid Level"):
+        parse_classification_taxonomy_rows(
+            [["Level", "Code", "Name"], ["not-a-level", "Q1", "Child"]]
+        )
+    with pytest.raises(ValueError, match="conflicting name or Level"):
+        parse_classification_taxonomy_rows(
+            [
+                ["Level", "Code", "Name"],
+                [1, "Q1", "First"],
+                [2, "Q1", "Different"],
+            ]
+        )
+    with pytest.raises(ValueError, match="missing name"):
+        parse_classification_taxonomy_rows(
+            [["Level", "Code", "Name"], [1, "Q1", "Root"], [2, "Q11", ""]]
+        )
+    with pytest.raises(ValueError, match="has no Level/Code/Name rows"):
+        parse_classification_taxonomy_rows([["Level", "Code", "Name"], [1, "", "No code"]])
+
+
+@pytest.mark.parametrize("invalid_level", [True, 0, -1, "1"])
+def test_classification_taxonomy_rejects_nonpositive_or_noninteger_levels(
+    invalid_level: object,
+) -> None:
+    with pytest.raises(ValueError, match="invalid Level"):
+        ClassificationTaxonomy(
+            labels={"A": "Root"},
+            levels={"A": cast(int, invalid_level)},
+            parents={},
+        )
+
+
+@pytest.mark.parametrize(
+    ("levels", "parents", "error"),
+    [
+        ({"A11": 3}, {"A11": "A"}, "parent without a Level"),
+        ({"A11": 3, "B": 1}, {"A11": "B"}, "invalid prefix parent"),
+        ({"A": 2, "A11": 2}, {"A11": "A"}, "not at a lower Level"),
+    ],
+)
+def test_classification_taxonomy_rejects_invalid_parent_edges(
+    levels: dict[str, int],
+    parents: dict[str, str],
+    error: str,
+) -> None:
+    labels = {code: f"Label {code}" for code in set(levels) | set(parents.values())}
+    with pytest.raises(ValueError, match=error):
+        ClassificationTaxonomy(labels=labels, levels=levels, parents=parents)
+
+
+def test_classification_taxonomy_requires_labels_for_every_parent() -> None:
+    with pytest.raises(ValueError, match="missing label for A"):
+        ClassificationTaxonomy(
+            labels={"A11": "Class A11"},
+            levels={"A": 1, "A11": 3},
+            parents={"A11": "A"},
+        )
+
+
+def test_cached_classification_hierarchy_must_match_pinned_workbook_lineage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workbook_taxonomy = parse_classification_taxonomy_rows(
+        [
+            ["Level", "Code", "Name"],
+            [1, "A", "Root A"],
+            [2, "A1", "Branch A1"],
+            [3, "A11", "Class A11"],
+        ]
+    )
+    workbook_payload = b"pinned workbook fixture"
+    cache_payload = b"pinned cache fixture"
+    workbook_sha256 = hashlib.sha256(workbook_payload).hexdigest()
+    cache_sha256 = hashlib.sha256(cache_payload).hexdigest()
+    monkeypatch.setattr(
+        eea,
+        "parse_classification_taxonomy_workbook",
+        lambda _payload, *, supplemental_labels=None: workbook_taxonomy,
+    )
+
+    verified = validate_classification_taxonomy_lineage(
+        workbook_taxonomy,
+        cache_payload,
+        workbook_payload,
+        ClassificationTaxonomyCacheLineage("fixture-record", workbook_sha256),
+        ClassificationTaxonomyLineagePin(cache_sha256, "fixture-record", workbook_sha256),
+    )
+
+    assert verified == workbook_taxonomy
+
+
+def test_lineage_verifier_returns_token_gated_immutable_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    taxonomy = parse_classification_taxonomy_rows(
+        [
+            ["Level", "Code", "Name"],
+            [1, "A", "Root A"],
+            [2, "A1", "Branch A1"],
+            [3, "A11", "Class A11"],
+        ]
+    )
+    cache_payload = b"cache bytes"
+    workbook_payload = b"workbook bytes"
+    pin = ClassificationTaxonomyLineagePin(
+        hashlib.sha256(cache_payload).hexdigest(),
+        "fixture-record",
+        hashlib.sha256(workbook_payload).hexdigest(),
+    )
+    monkeypatch.setattr(
+        eea,
+        "parse_classification_taxonomy_workbook",
+        lambda _payload, *, supplemental_labels=None: taxonomy,
+    )
+
+    verified = verify_classification_taxonomy_lineage(
+        taxonomy,
+        cache_payload,
+        workbook_payload,
+        ClassificationTaxonomyCacheLineage("fixture-record", pin.workbook_sha256),
+        pin,
+    )
+
+    assert verified.taxonomy is taxonomy
+    assert verified.lineage_pin == pin
+    assert len(verified.taxonomy_mapping_sha256) == 64
+    with pytest.raises(TypeError, match="created by the lineage verifier"):
+        eea.VerifiedClassificationTaxonomy(taxonomy, pin, "0" * 64, _token=object())
+    with pytest.raises(TypeError):
+        cast(dict[str, int], taxonomy.levels)["A11"] = 2
+
+
+def test_cached_classification_hierarchy_rejects_changed_parent_edges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workbook_taxonomy = parse_classification_taxonomy_rows(
+        [
+            ["Level", "Code", "Name"],
+            [1, "A", "Root A"],
+            [2, "A1", "Branch A1"],
+            [3, "A11", "Class A11"],
+        ]
+    )
+    changed_cache = ClassificationTaxonomy(
+        labels=workbook_taxonomy.labels,
+        levels=workbook_taxonomy.levels,
+        parents={"A11": "A"},
+    )
+    workbook_payload = b"workbook"
+    cache_payload = b"cache"
+    workbook_sha256 = hashlib.sha256(workbook_payload).hexdigest()
+    monkeypatch.setattr(
+        eea,
+        "parse_classification_taxonomy_workbook",
+        lambda _payload, *, supplemental_labels=None: workbook_taxonomy,
+    )
+
+    with pytest.raises(ValueError, match="parent hierarchy differs"):
+        validate_classification_taxonomy_lineage(
+            changed_cache,
+            cache_payload,
+            workbook_payload,
+            ClassificationTaxonomyCacheLineage("fixture-record", workbook_sha256),
+            ClassificationTaxonomyLineagePin(
+                hashlib.sha256(cache_payload).hexdigest(),
+                "fixture-record",
+                workbook_sha256,
+            ),
+        )
+
+
+def test_classification_taxonomy_headers_reset_between_workbook_sheets() -> None:
+    workbook = io.BytesIO()
+    with zipfile.ZipFile(workbook, "w") as archive:
+        archive.writestr(
+            "xl/sharedStrings.xml",
+            '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            "<si><t>Level</t></si><si><t>Code</t></si><si><t>Name</t></si>"
+            "<si><t>1</t></si><si><t>N</t></si><si><t>Coastal habitats</t></si>"
+            "<si><t>Name 2021</t></si><si><t>R11</t></si><si><t>Other note</t></si></sst>",
+        )
+        archive.writestr(
+            "xl/worksheets/sheet1.xml",
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            '<sheetData><row r="1"><c r="A1" t="s"><v>0</v></c>'
+            '<c r="B1" t="s"><v>1</v></c><c r="C1" t="s"><v>2</v></c></row>'
+            '<row r="2"><c r="A2" t="s"><v>3</v></c>'
+            '<c r="B2" t="s"><v>4</v></c><c r="C2" t="s"><v>5</v></c>'
+            "</row></sheetData></worksheet>",
+        )
+        archive.writestr(
+            "xl/worksheets/sheet2.xml",
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            '<sheetData><row r="1"><c r="A1" t="s"><v>6</v></c>'
+            '<c r="B1" t="s"><v>7</v></c><c r="C1" t="s"><v>8</v></c>'
+            "</row></sheetData></worksheet>",
+        )
+
+    taxonomy = parse_classification_taxonomy_workbook(workbook.getvalue())
+
+    assert taxonomy.labels == {"N": "Coastal habitats"}
+    assert taxonomy.levels == {"N": 1}
+
+
+def test_classification_taxonomy_workbook_rejects_non_xlsx() -> None:
+    with pytest.raises(ValueError, match="valid XLSX"):
+        parse_classification_taxonomy_workbook(b"not-a-zip")
 
 
 def test_parse_classification_workbook_reads_shared_strings() -> None:

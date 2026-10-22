@@ -1,12 +1,17 @@
-# ADR 0001: EEA reference and exact overlap
+# ADR 0001: EEA reference and overlap operations
+
+This record describes the legacy single-raster overlap API. The source-wide
+EUNIS pool uses the numeric highest-source-score classification and full-area
+80% rule documented in the [EUNIS adapter decision](../eunis-sourcewide-pool-adapter.md).
+Positive-cell overlap is not the EUNIS pool's habitat-labeling method.
 
 ## Decision
 
-Use the official EEA 2021 EUNIS habitat probability-map release. Its declared
-coordinate system is EPSG:3035. The positive raster cells become reference
-cells. The matcher calculates the actual geometry intersections. It chooses the
-largest area. A polygon outside the European reference coverage receives null
-fields.
+Use the official EEA 2021 EUNIS map release for legacy overlap queries. Its
+declared coordinate system is EPSG:3035. The legacy API treats positive raster
+cells as support and chooses the largest measured area. A polygon outside the
+European reference coverage receives null fields. The source-wide pool keeps
+the original numeric scores and uses a separate derived classification rule.
 
 The EEA raster families that are published as GeoPackages are tile pyramids.
 They are not feature layers. The adapter reads only the highest-resolution tiles

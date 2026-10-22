@@ -145,7 +145,7 @@ def test_run_command_terminates_child_process_group_at_deadline(capfd) -> None:
     result = run_command(
         [sys.executable, "-c", child],
         timeout_seconds=0.2,
-        termination_grace_seconds=0.2,
+        termination_grace_seconds=0.05,
     )
 
     output = capfd.readouterr().out.strip()
@@ -190,11 +190,7 @@ def test_deadline_writes_a_distinguishing_stop_marker(tmp_path: Path) -> None:
     helper = Path(__file__).resolve().parents[2] / "scripts/grid5000/worker_deadline.py"
     stop_marker = tmp_path / "worker-stop-state"
     child_started = tmp_path / "child-started"
-    child = (
-        "import os, pathlib, sys, time; "
-        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()), encoding='utf-8'); "
-        "time.sleep(30)"
-    )
+    child = 'printf "%s\\n" "$$" > "$0"; exec sleep 30'
     result = subprocess.run(  # noqa: S603
         [
             sys.executable,
@@ -202,16 +198,16 @@ def test_deadline_writes_a_distinguishing_stop_marker(tmp_path: Path) -> None:
             "--walltime",
             "0:01:00",
             "--started-at",
-            # About one second of runtime is left before the stop, enough for the child to start.
-            str(time.time() - 28),
+            # Leave room for the helper and child startup, then exercise an actual stop.
+            str(time.time() - 29.6),
             "--stop-margin-seconds",
-            "31",
+            "30",
             "--termination-grace-seconds",
-            "1",
+            "0",
             "--stop-marker",
             str(stop_marker),
             "--",
-            sys.executable,
+            "/bin/sh",
             "-c",
             child,
             str(child_started),
@@ -242,7 +238,7 @@ def test_worker_deadline_returns_shell_status_for_external_sigterm(tmp_path: Pat
         "--stop-margin-seconds",
         "300",
         "--termination-grace-seconds",
-        "1",
+        "0",
         "--stop-marker",
         str(stop_marker),
         "--",
