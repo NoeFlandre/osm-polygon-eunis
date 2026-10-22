@@ -247,9 +247,18 @@ A separate raw-polygon inventory audit dated 2026-10-22 read footers and native
 key columns for all 1,158 shards across Description, Website, and Wiki. It
 verified 3,892,529 source rows and 3,825,143 distinct composite native keys
 across those sources, with no null or within-source duplicate composite keys.
-These counts do not establish valid geometries or globally unique OSM entities.
-The audit did not read geometry values, compute full Parquet-body SHA-256
-digests, verify the OSM PBF manifest URI/digest, or perform reference overlays.
+These counts do not establish globally unique OSM entities. That footer/key
+audit did not read geometry values, compute full Parquet-body SHA-256 digests,
+verify the OSM PBF manifest URI/digest, or perform reference overlays.
+
+A separate geometry audit sampled 64 rows per source (192 total). Every sampled
+geometry was parseable, non-empty, and valid. Description geometry is WKB with
+the GeoParquet CRS84 default; Website and Wiki geometries are GeoJSON in
+longitude/latitude order. This sample does not establish validity across the
+full source or prove global OSM identity uniqueness. The selected geometry
+stream is estimated at about 3 GB and is being read with bounded streaming; no
+full-source geometry-validity result is available yet.
+
 No source-wide pool export, overlay run, evaluation sampling, or Hub publication
 was performed. Production EUNIS attempts and exports still require actual raw
 and reference `artifact-list-jsonl-v1` manifests, a verified area-method pin,
