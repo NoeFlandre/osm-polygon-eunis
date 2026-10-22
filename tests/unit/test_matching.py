@@ -1,6 +1,7 @@
 import logging
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 from hypothesis import given
@@ -257,12 +258,46 @@ def test_rank_rejects_missing_code(percentage) -> None:
 
 def test_prefer_result_rejects_missing_overlap_with_optimized_python() -> None:
     script = """
+import ast
+from dataclasses import dataclass
+import pathlib
 import sys
-from osm_polygon_eunis.domain import EunisResult
-from osm_polygon_eunis.matching import prefer_result
+
+@dataclass(frozen=True)
+class EunisResult:
+    code: str | None
+    name: str | None
+    overlap_percentage: float | None
+    source_version: str | None
+
+    @property
+    def is_empty(self):
+        return self.code is None
 
 if sys.flags.optimize != 1:
     raise RuntimeError("optimized Python is required")
+
+source_path = pathlib.Path(sys.argv[1])
+source_tree = ast.parse(source_path.read_text(encoding="utf-8"))
+required = {"prefer_result", "_outranks", "_rank", "_require_same_source_version"}
+functions = [
+    node for node in source_tree.body
+    if isinstance(node, ast.FunctionDef) and node.name in required
+]
+if {node.name for node in functions} != required:
+    raise RuntimeError("could not load the complete production result-ordering functions")
+extracted = ast.Module(
+    body=[
+        ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0),
+        *functions,
+    ],
+    type_ignores=[],
+)
+ast.fix_missing_locations(extracted)
+namespace = {"EunisResult": EunisResult}
+exec(compile(extracted, str(source_path), "exec"), namespace)
+prefer_result = namespace["prefer_result"]
+
 for current_percentage, candidate_percentage in [(None, 25.0), (25.0, None), (None, None)]:
     current = EunisResult("R11", "current", current_percentage, "test")
     candidate = EunisResult("R12", "candidate", candidate_percentage, "test")
@@ -275,8 +310,12 @@ for current_percentage, candidate_percentage in [(None, 25.0), (25.0, None), (No
         raise RuntimeError("accepted a result without an overlap percentage")
 print("rejected all three malformed pairs")
 """
+    matching_path = Path(__file__).parents[2] / "src/osm_polygon_eunis/matching.py"
     result = subprocess.run(  # noqa: S603
-        [sys.executable, "-O", "-c", script], capture_output=True, text=True, check=False
+        [sys.executable, "-O", "-c", script, str(matching_path)],
+        capture_output=True,
+        text=True,
+        check=False,
     )
 
     assert result.returncode == 0, result.stderr

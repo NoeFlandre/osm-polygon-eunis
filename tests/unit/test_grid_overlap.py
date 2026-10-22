@@ -167,13 +167,20 @@ def _vectorized_cell_grid(transform, shape):
     x0 = transform.c + cols * transform.a
     y0 = transform.f + rows * transform.e
     boxes = shapely.box(x0, y0 + transform.e, x0 + transform.a, y0)
-    return rows, cols, boxes
+    return rows, cols, boxes, x0, y0
 
 
 def _vectorized_areas(polygon, transform, shape, *, cell_grid=None) -> dict[tuple[int, int], float]:
     if cell_grid is None:
         cell_grid = _vectorized_cell_grid(transform, shape)
-    rows, cols, boxes = cell_grid
+    rows, cols, boxes, x0, y0 = cell_grid
+    min_x, min_y, max_x, max_y = polygon.bounds
+    candidate = (
+        (x0 <= max_x) & (x0 + transform.a >= min_x) & (y0 >= min_y) & (y0 + transform.e <= max_y)
+    )
+    rows = rows[candidate]
+    cols = cols[candidate]
+    boxes = boxes[candidate]
     # Exact per-cell areas without clipping every cell: a cell inside the polygon keeps its
     # full area, a cell outside has none, and only cells on the boundary need an intersection.
     shapely.prepare(polygon)
