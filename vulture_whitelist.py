@@ -6,6 +6,10 @@ from osm_polygon_eunis.geometry_jobs import process_geometry_paths
 from osm_polygon_eunis.raster_reference import RasterReference
 from osm_polygon_eunis.reference_staging import open_reference_group
 from osm_polygon_eunis.pool_contract.export import ExportReceipt
+from osm_polygon_eunis.pool_contract.streaming import (
+    FilesystemArtifactReader,
+    PoolArtifactReader,
+)
 from osm_polygon_eunis.pool_contract.streaming import PoolStreamSpec
 from osm_polygon_eunis.pool_contract.models import (
     AmbiguityBasis,
@@ -72,3 +76,5 @@ ExportReceipt.table_sha256
 EvaluationCase.arm
 AttemptStatus.COMPLETED
 PoolStreamSpec.from_build_input
+PoolArtifactReader.iter_parquet_rows
+FilesystemArtifactReader.iter_parquet_rows

@@ -11,9 +11,10 @@ import sqlite3
 import tempfile
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, fields, is_dataclass
 from enum import Enum
+from itertools import islice
 from pathlib import Path
 from typing import Protocol, TypeGuard, cast
 from urllib.parse import quote, unquote, urlparse
@@ -29,6 +30,8 @@ from .builder import (
 )
 from .export import (
     _TABLE_FIELDS,
+    _area_measurement_dict,
+    _artifact_manifest_dict,
     _canonical_json_bytes,
     _canonical_json_string_array,
     table_schemas,
@@ -76,6 +79,9 @@ MAX_ROW_BYTES = 1024 * 1024
 MAX_SHARD_ROWS = 8_192
 MAX_SHARD_BYTES = 64 * 1024 * 1024
 _STORAGE_LAYOUT_VERSION = "sharded-parquet-v1"
+_ARTIFACT_MANIFEST_FORMAT = "artifact-list-jsonl-v1"
+_GATE_PARQUET_BATCH_SIZE = 2_048
+_READINESS_EXAMPLE_LIMIT = 3
 _KEY_SHA_EMPTY = hashlib.sha256(b"").hexdigest()
 _SQLITE_CACHE_KIB = 4_096
 _SHA256_LENGTH = 64
@@ -99,7 +105,7 @@ class PoolStreamSpec:
     adapter_revision: str
     builder_revision: str
     levels: tuple[LabelLevel, ...]
-    contract_version: str = "1.1.0"
+    contract_version: str = "1.2.0"
     pool_version: str = "1.0.0"
 
     @classmethod
@@ -107,7 +113,7 @@ class PoolStreamSpec:
         cls,
         source: PoolBuildInput,
         *,
-        contract_version: str = "1.1.0",
+        contract_version: str = "1.2.0",
         pool_version: str = "1.0.0",
     ) -> PoolStreamSpec:
         """Create stream metadata from an existing adapter build input."""
@@ -236,7 +242,7 @@ class FileArtifactSink(Protocol):
 
 
 class PoolArtifactReader(Protocol):
-    """Read manifests, stream artifacts, and inspect Parquet footers."""
+    """Read pinned artifact snapshots, inspect Parquet, and read bounded rows."""
 
     def read_bytes(self, uri: str) -> bytes:
         """Read a small completion manifest from its URI."""
@@ -244,11 +250,33 @@ class PoolArtifactReader(Protocol):
     def iter_lines(self, uri: str) -> Iterable[bytes]:
         """Stream lines from a JSONL manifest or sidecar without materializing it."""
 
+    def iter_verified_lines(self, uri: str, expected_sha256: str) -> Iterable[bytes]:
+        """Yield JSONL lines from the exact snapshot whose bytes match the pin."""
+
     def sha256(self, uri: str) -> str:
         """Return the content SHA-256, streaming large artifacts when needed."""
 
     def parquet_metadata(self, uri: str) -> ParquetArtifactMetadata:
         """Read one Parquet footer without materializing row-group contents."""
+
+    def iter_parquet_rows(
+        self,
+        uri: str,
+        columns: tuple[str, ...],
+        *,
+        batch_size: int,
+    ) -> Iterable[dict[str, object]]:
+        """Yield selected Parquet columns in batches no larger than ``batch_size``."""
+
+    def iter_verified_parquet_rows(
+        self,
+        uri: str,
+        expected_sha256: str,
+        columns: tuple[str, ...],
+        *,
+        batch_size: int,
+    ) -> Iterable[dict[str, object]]:
+        """Yield bounded rows from the exact Parquet snapshot whose bytes match the pin."""
 
     def resolve_uri(self, manifest_uri: str, relative_path: str) -> str:
         """Resolve a sink-relative artifact path beside the given pool manifest."""
@@ -324,6 +352,15 @@ class FilesystemArtifactReader:
         with self._path(uri).open("rb") as source:
             yield from source
 
+    def iter_verified_lines(self, uri: str, expected_sha256: str) -> Iterable[bytes]:
+        """Verify a disk snapshot before yielding its JSONL records."""
+
+        with (
+            self._verified_snapshot(uri, expected_sha256) as snapshot_path,
+            snapshot_path.open("rb") as snapshot,
+        ):
+            yield from snapshot
+
     def sha256(self, uri: str) -> str:
         """Hash a local artifact in bounded chunks."""
 
@@ -338,6 +375,46 @@ class FilesystemArtifactReader:
             schema=parquet_file.schema_arrow,
         )
 
+    def iter_parquet_rows(
+        self,
+        uri: str,
+        columns: tuple[str, ...],
+        *,
+        batch_size: int,
+    ) -> Iterable[dict[str, object]]:
+        """Yield selected rows through bounded Arrow record batches."""
+
+        if batch_size <= 0:
+            raise ValueError("Parquet batch size must be positive")
+        parquet_file = pq.ParquetFile(self._path(uri))
+        for batch in parquet_file.iter_batches(
+            batch_size=batch_size,
+            columns=list(columns),
+            use_threads=False,
+        ):
+            yield from batch.to_pylist()
+
+    def iter_verified_parquet_rows(
+        self,
+        uri: str,
+        expected_sha256: str,
+        columns: tuple[str, ...],
+        *,
+        batch_size: int,
+    ) -> Iterable[dict[str, object]]:
+        """Verify a disk snapshot, then scan that same copy in bounded batches."""
+
+        if batch_size <= 0:
+            raise ValueError("Parquet batch size must be positive")
+        with self._verified_snapshot(uri, expected_sha256) as snapshot_path:
+            parquet_file = pq.ParquetFile(snapshot_path)
+            for batch in parquet_file.iter_batches(
+                batch_size=batch_size,
+                columns=list(columns),
+                use_threads=False,
+            ):
+                yield from batch.to_pylist()
+
     def resolve_uri(self, manifest_uri: str, relative_path: str) -> str:
         """Resolve a pool-relative path under the local artifact root."""
 
@@ -351,6 +428,30 @@ class FilesystemArtifactReader:
         root = path.split(marker, 1)[0]
         artifact_path = f"{root}/{relative_path}"
         return parsed._replace(path=quote(artifact_path, safe="/")).geturl()
+
+    @contextmanager
+    def _verified_snapshot(self, uri: str, expected_sha256: str) -> Iterator[Path]:
+        """Copy and hash one artifact, then expose only that verified temporary copy."""
+
+        if not _valid_sha256(expected_sha256):
+            raise ValueError("artifact snapshot pin is not a SHA-256 digest")
+        source_path = self._path(uri)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix="pool-gate-snapshot-",
+            suffix=source_path.suffix,
+        )
+        snapshot_path = Path(temporary_name)
+        digest = hashlib.sha256()
+        try:
+            with os.fdopen(descriptor, "wb") as snapshot, source_path.open("rb") as source:
+                while chunk := source.read(1024 * 1024):
+                    digest.update(chunk)
+                    snapshot.write(chunk)
+            if digest.hexdigest() != expected_sha256:
+                raise ValueError("artifact snapshot SHA-256 does not match its pin")
+            yield snapshot_path
+        finally:
+            snapshot_path.unlink(missing_ok=True)
 
     @staticmethod
     def _path(uri: str) -> Path:
@@ -410,6 +511,567 @@ def validate_nine_streamed_pool_gate(
             ("nine-pool-version-set", ("pool versions must match across all nine pools",))
         )
     return GateReport(missing, duplicates, tuple(invalid))
+
+
+def validate_nine_streamed_evaluation_ready_gate(
+    receipts: Iterable[StreamingExportReceipt],
+    reader: PoolArtifactReader,
+) -> GateReport:
+    """Require nine structurally valid pools and readable, complete evidence."""
+
+    receipt_rows = tuple(islice(receipts, len(TextSource) * len(ReferenceSystem) + 1))
+    archive_report = validate_nine_streamed_pool_gate(receipt_rows, reader)
+    if archive_report.invalid_pools or archive_report.duplicate_pools or not receipt_rows:
+        return archive_report
+
+    invalid: list[tuple[str, tuple[str, ...]]] = []
+    for receipt in receipt_rows:
+        pool_name = receipt.pool_id.split("/")[1] if "/" in receipt.pool_id else receipt.pool_id
+        issues: list[str] = []
+        try:
+            manifest, pool_key, actual_manifest_sha = _read_streamed_manifest(receipt, reader)
+            pool_name = pool_key.name
+            if actual_manifest_sha != receipt.manifest_sha256:
+                issues.append(
+                    "evaluation readiness blocked: completion manifest changed since "
+                    "structural validation"
+                )
+                invalid.append((pool_name, tuple(issues)))
+                continue
+            source = _manifest_mapping(manifest, "source_snapshot", issues)
+            reference = _manifest_mapping(manifest, "reference_pin", issues)
+            issues.extend(
+                _evaluation_provenance_issues(
+                    source,
+                    reference,
+                    reader,
+                )
+            )
+            issues.extend(_evaluation_artifact_issues(receipt, reader))
+        except (OSError, TypeError, ValueError, KeyError, AttributeError) as error:
+            issues.append(
+                f"evaluation evidence could not be verified: {type(error).__name__}: {error}"
+            )
+        if issues:
+            invalid.append((pool_name, tuple(issues)))
+
+    return GateReport(
+        archive_report.missing_pools,
+        archive_report.duplicate_pools,
+        tuple(invalid),
+    )
+
+
+def _evaluation_provenance_issues(
+    source: dict[str, object],
+    reference: dict[str, object],
+    reader: PoolArtifactReader,
+) -> list[str]:
+    issues: list[str] = []
+    pbf_uri = source.get("pbf_uri")
+    pbf_sha256 = source.get("pbf_sha256")
+    pbf_present = pbf_uri is not None or pbf_sha256 is not None
+    if pbf_present:
+        if (
+            isinstance(pbf_uri, str)
+            and _valid_uri(pbf_uri)
+            and isinstance(pbf_sha256, str)
+            and _valid_sha256(pbf_sha256)
+        ):
+            _verify_pinned_artifact(pbf_uri, pbf_sha256, "raw PBF", reader, issues)
+        else:
+            issues.append("evaluation readiness blocked: raw PBF artifact pin is incomplete")
+
+    source_tree = source.get("source_artifact_manifest")
+    if not isinstance(source_tree, dict):
+        issues.append("evaluation readiness blocked: raw source artifact manifest pin is missing")
+    else:
+        source_tree_issues, pbf_listed = _verify_artifact_manifest(
+            source_tree,
+            "raw source",
+            reader,
+            required_uri=str(pbf_uri) if pbf_present and isinstance(pbf_uri, str) else None,
+            required_sha256=(
+                str(pbf_sha256)
+                if pbf_present and isinstance(pbf_sha256, str) and _valid_sha256(pbf_sha256)
+                else None
+            ),
+        )
+        issues.extend(source_tree_issues)
+        if pbf_present and isinstance(pbf_uri, str) and not pbf_listed:
+            issues.append("evaluation readiness blocked: raw source manifest omits the pinned PBF")
+
+    reference_tree = reference.get("reference_artifact_manifest")
+    if not isinstance(reference_tree, dict):
+        issues.append("evaluation readiness blocked: reference artifact manifest pin is missing")
+    else:
+        reference_issues, _ = _verify_artifact_manifest(reference_tree, "reference", reader)
+        issues.extend(reference_issues)
+
+    issues.extend(_area_measurement_issues(reference))
+    return issues
+
+
+def _area_measurement_issues(reference: dict[str, object]) -> list[str]:
+    method = reference.get("area_measurement")
+    if not isinstance(method, dict) or any(
+        not _present(method.get(field)) for field in ("implementation", "implementation_version")
+    ):
+        return ["evaluation readiness blocked: area measurement method pin is incomplete"]
+    support_unit = reference.get("support_unit")
+    issues: list[str] = []
+    for area_name in ("numerator", "denominator"):
+        spec = method.get(area_name)
+        if not isinstance(spec, dict):
+            issues.append(
+                f"evaluation readiness blocked: area measurement {area_name} method is missing"
+            )
+            continue
+        issues.extend(_area_measure_spec_issues(area_name, spec, support_unit))
+    return issues
+
+
+def _area_measure_spec_issues(
+    area_name: str,
+    spec: dict[str, object],
+    support_unit: object,
+) -> list[str]:
+    issues = [
+        f"evaluation readiness blocked: area measurement {area_name} lacks {field}"
+        for field in ("method_id", "boundary_convention", "densification_method", "output_unit")
+        if not _present(spec.get(field))
+    ]
+    coordinate_system = spec.get("coordinate_system")
+    ellipsoid = spec.get("ellipsoid")
+    if coordinate_system is not None and not _present(coordinate_system):
+        issues.append(
+            f"evaluation readiness blocked: area measurement {area_name} has an invalid "
+            "coordinate system"
+        )
+    if ellipsoid is not None and not _present(ellipsoid):
+        issues.append(
+            f"evaluation readiness blocked: area measurement {area_name} has an invalid ellipsoid"
+        )
+    if coordinate_system is None and ellipsoid is None:
+        issues.append(
+            f"evaluation readiness blocked: area measurement {area_name} needs a coordinate "
+            "system or ellipsoid"
+        )
+    if spec.get("output_unit") != support_unit:
+        issues.append(
+            f"evaluation readiness blocked: area measurement {area_name} output unit differs "
+            "from the support unit"
+        )
+    for field in ("densification_parameters_json", "error_settings_json"):
+        value = spec.get(field)
+        if not isinstance(value, str) or not _canonical_json_object(value):
+            issues.append(
+                f"evaluation readiness blocked: area measurement {area_name} {field} "
+                "is not a non-empty canonical JSON object"
+            )
+    return issues
+
+
+def _verify_artifact_manifest(
+    pin: dict[str, object],
+    label: str,
+    reader: PoolArtifactReader,
+    *,
+    required_uri: str | None = None,
+    required_sha256: str | None = None,
+) -> tuple[list[str], bool]:
+    issues, manifest_uri, manifest_sha256, expected_count = _artifact_manifest_pin_fields(
+        pin, label
+    )
+    if manifest_uri is None or manifest_sha256 is None or expected_count is None:
+        return issues, False
+    row_issues, line_count, found_required_uri = _verify_artifact_manifest_rows(
+        manifest_uri,
+        manifest_sha256,
+        label,
+        reader,
+        required_uri,
+        required_sha256,
+    )
+    issues.extend(row_issues)
+    if line_count != expected_count:
+        _append_bounded_issue(
+            issues,
+            f"evaluation readiness blocked: {label} artifact manifest lists {line_count} "
+            f"artifacts, expected {expected_count}",
+        )
+    if line_count == 0:
+        _append_bounded_issue(
+            issues,
+            f"evaluation readiness blocked: {label} artifact manifest is empty",
+        )
+    return issues, found_required_uri
+
+
+def _artifact_manifest_pin_fields(
+    pin: dict[str, object],
+    label: str,
+) -> tuple[list[str], str | None, str | None, int | None]:
+    issues: list[str] = []
+    uri = pin.get("manifest_uri")
+    digest = pin.get("manifest_sha256")
+    count = pin.get("expected_artifact_count")
+    if pin.get("format_version") != _ARTIFACT_MANIFEST_FORMAT:
+        issues.append(
+            f"evaluation readiness blocked: {label} artifact manifest format is unsupported"
+        )
+    if (
+        not isinstance(uri, str)
+        or not _valid_uri(uri)
+        or not isinstance(digest, str)
+        or not _valid_sha256(digest)
+        or not _is_positive_count(count)
+    ):
+        issues.append(f"evaluation readiness blocked: {label} artifact manifest pin is invalid")
+        return issues, None, None, None
+    return issues, uri, digest, cast(int, count)
+
+
+def _verify_artifact_manifest_rows(
+    manifest_uri: str,
+    expected_sha256: str,
+    label: str,
+    reader: PoolArtifactReader,
+    required_uri: str | None,
+    required_sha256: str | None,
+) -> tuple[list[str], int, bool]:
+    issues: list[str] = []
+    previous_uri: str | None = None
+    line_count = 0
+    found_required_uri = False
+    try:
+        for line in reader.iter_verified_lines(manifest_uri, expected_sha256):
+            line_count += 1
+            row_issues, artifact_uri, artifact_sha256 = _artifact_manifest_row(
+                line,
+                label,
+                previous_uri,
+                required_uri,
+                required_sha256,
+            )
+            for issue in row_issues:
+                _append_bounded_issue(issues, issue)
+            if artifact_uri is None or artifact_sha256 is None:
+                continue
+            previous_uri = artifact_uri
+            if artifact_uri == required_uri:
+                found_required_uri = True
+            _verify_pinned_artifact(
+                artifact_uri,
+                artifact_sha256,
+                f"{label} artifact",
+                reader,
+                issues,
+            )
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+        _append_bounded_issue(
+            issues,
+            f"evaluation readiness blocked: {label} artifact manifest could not be read: "
+            f"{type(error).__name__}",
+        )
+    return issues, line_count, found_required_uri
+
+
+def _artifact_manifest_row(
+    line: bytes,
+    label: str,
+    previous_uri: str | None,
+    required_uri: str | None,
+    required_sha256: str | None,
+) -> tuple[list[str], str | None, str | None]:
+    issues: list[str] = []
+    row = json.loads(line)
+    if not isinstance(row, dict):
+        return [f"{label} artifact manifest contains a non-object row"], None, None
+    if set(row) != {"artifact_uri", "sha256"}:
+        _append_bounded_issue(issues, f"{label} artifact manifest row has an invalid schema")
+    uri = row.get("artifact_uri")
+    digest = row.get("sha256")
+    if (
+        not isinstance(uri, str)
+        or not _valid_uri(uri)
+        or not isinstance(digest, str)
+        or not _valid_sha256(digest)
+    ):
+        _append_bounded_issue(issues, f"{label} artifact manifest contains an invalid artifact pin")
+        return issues, None, None
+    if _canonical_json_bytes(row) != line:
+        _append_bounded_issue(issues, f"{label} artifact manifest rows are not canonical JSONL")
+    if previous_uri is not None and uri <= previous_uri:
+        _append_bounded_issue(issues, f"{label} artifact manifest is not uniquely sorted")
+    if uri == required_uri and required_sha256 is not None and digest != required_sha256:
+        _append_bounded_issue(
+            issues,
+            f"evaluation readiness blocked: required {label} artifact hash differs "
+            "from its pool pin",
+        )
+    return issues, uri, digest
+
+
+def _verify_pinned_artifact(
+    uri: str,
+    expected_sha256: str,
+    label: str,
+    reader: PoolArtifactReader,
+    issues: list[str],
+) -> None:
+    try:
+        actual_sha256 = reader.sha256(uri)
+    except (OSError, TypeError, ValueError) as error:
+        _append_bounded_issue(
+            issues,
+            f"evaluation readiness blocked: {label} could not be read: {type(error).__name__}",
+        )
+        return
+    if actual_sha256 != expected_sha256:
+        _append_bounded_issue(
+            issues,
+            f"evaluation readiness blocked: {label} SHA-256 does not match its pin",
+        )
+
+
+def _evaluation_artifact_issues(
+    receipt: StreamingExportReceipt,
+    reader: PoolArtifactReader,
+) -> list[str]:
+    issues: list[str] = []
+    counts = {"failed": 0, "partial": 0, "missing": 0, "invalid": 0}
+    examples = {key: [] for key in counts}
+    try:
+        for table, row in _iter_evaluation_rows(receipt, reader):
+            if table == "polygon_attempts":
+                _scan_attempt_readiness_row(row, counts, examples, reader, issues)
+            elif table == "polygon_snapshots":
+                _scan_polygon_readiness_row(row, reader, issues)
+            else:
+                _scan_support_readiness_row(row, reader, issues)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+        _append_bounded_issue(
+            issues,
+            f"evaluation readiness blocked: reference evidence rows could not be scanned: "
+            f"{type(error).__name__}",
+        )
+    _append_readiness_summaries(issues, counts, examples)
+    return issues
+
+
+def _iter_evaluation_rows(
+    receipt: StreamingExportReceipt,
+    reader: PoolArtifactReader,
+) -> Iterator[tuple[str, dict[str, object]]]:
+    columns = {
+        "polygon_attempts": (
+            "inventory_row_id",
+            "status",
+            "attempted_reference_ids_json",
+            "missing_reference_ids_json",
+            "measurement_sidecar_uri",
+            "measurement_sidecar_sha256",
+        ),
+        "polygon_snapshots": ("polygon_snapshot_id", "geometry_uri", "geometry_sha256"),
+        "label_support_evidence": (
+            "inventory_row_id",
+            "level",
+            "code",
+            "reference_id_namespace",
+            "reference_ids_json",
+            "measurement_sidecar_uri",
+            "measurement_sidecar_sha256",
+        ),
+    }
+    for line in reader.iter_verified_lines(
+        receipt.shard_manifest_uri,
+        receipt.shard_manifest_sha256,
+    ):
+        record = json.loads(line)
+        if not isinstance(record, dict):
+            raise TypeError("shard manifest row is not an object")
+        table = record.get("table")
+        if not isinstance(table, str) or table not in _TABLE_FIELDS:
+            raise ValueError("shard manifest row has an unknown table")
+        if table not in columns:
+            continue
+        relative_path = record.get("path")
+        expected_sha256 = record.get("sha256")
+        if not isinstance(relative_path, str) or not isinstance(expected_sha256, str):
+            raise TypeError("evaluation shard path or hash is not text")
+        if not _valid_sha256(expected_sha256):
+            raise ValueError("evaluation shard path or hash is invalid")
+        shard_uri = reader.resolve_uri(receipt.manifest_uri, relative_path)
+        for row in reader.iter_verified_parquet_rows(
+            shard_uri,
+            expected_sha256,
+            columns[table],
+            batch_size=_GATE_PARQUET_BATCH_SIZE,
+        ):
+            yield table, row
+
+
+def _scan_attempt_readiness_row(
+    row: dict[str, object],
+    counts: dict[str, int],
+    examples: dict[str, list[str]],
+    reader: PoolArtifactReader,
+    issues: list[str],
+) -> None:
+    row_id = str(row.get("inventory_row_id") or "unknown")
+    status = row.get("status")
+    if status == AttemptStatus.FAILED.value:
+        _record_readiness_problem(counts, examples, "failed", row_id)
+    elif status == AttemptStatus.PARTIAL.value:
+        _record_readiness_problem(counts, examples, "partial", row_id)
+    elif status not in {item.value for item in AttemptStatus}:
+        _record_readiness_problem(counts, examples, "invalid", row_id)
+    attempted_ids = _parse_json_id_array(row.get("attempted_reference_ids_json"))
+    missing_ids = _parse_json_id_array(row.get("missing_reference_ids_json"))
+    if attempted_ids is None or missing_ids is None:
+        _record_readiness_problem(counts, examples, "invalid", row_id)
+    elif missing_ids:
+        _record_readiness_problem(counts, examples, "missing", row_id)
+    _verify_optional_sidecar(
+        row.get("measurement_sidecar_uri"),
+        row.get("measurement_sidecar_sha256"),
+        f"polygon attempt {row_id}",
+        reader,
+        issues,
+    )
+
+
+def _scan_polygon_readiness_row(
+    row: dict[str, object],
+    reader: PoolArtifactReader,
+    issues: list[str],
+) -> None:
+    geometry_uri = row.get("geometry_uri")
+    geometry_sha256 = row.get("geometry_sha256")
+    if (
+        not isinstance(geometry_uri, str)
+        or not _valid_uri(geometry_uri)
+        or not isinstance(geometry_sha256, str)
+        or not _valid_sha256(geometry_sha256)
+    ):
+        _append_bounded_issue(
+            issues,
+            "evaluation readiness blocked: polygon geometry pin is incomplete",
+        )
+        return
+    _verify_pinned_artifact(
+        geometry_uri,
+        geometry_sha256,
+        "polygon geometry",
+        reader,
+        issues,
+    )
+
+
+def _scan_support_readiness_row(
+    row: dict[str, object],
+    reader: PoolArtifactReader,
+    issues: list[str],
+) -> None:
+    evidence_key = f"{row.get('inventory_row_id')}/{row.get('level')}/{row.get('code')}"
+    reference_ids = _parse_json_id_array(row.get("reference_ids_json"))
+    has_sidecar = row.get("measurement_sidecar_uri") is not None
+    if (
+        reference_ids is None
+        or bool(reference_ids) == has_sidecar
+        or not _present(row.get("reference_id_namespace"))
+    ):
+        _append_bounded_issue(
+            issues,
+            f"evaluation readiness blocked: malformed reference support record {evidence_key}",
+        )
+    _verify_optional_sidecar(
+        row.get("measurement_sidecar_uri"),
+        row.get("measurement_sidecar_sha256"),
+        f"label support evidence {evidence_key}",
+        reader,
+        issues,
+    )
+
+
+def _record_readiness_problem(
+    counts: dict[str, int],
+    examples: dict[str, list[str]],
+    category: str,
+    row_id: str,
+) -> None:
+    counts[category] += 1
+    if len(examples[category]) < _READINESS_EXAMPLE_LIMIT:
+        examples[category].append(row_id)
+
+
+def _append_readiness_summaries(
+    issues: list[str],
+    counts: dict[str, int],
+    examples: dict[str, list[str]],
+) -> None:
+    messages = {
+        "failed": "FAILED polygon attempts",
+        "partial": "PARTIAL polygon attempts",
+        "missing": "attempts list missing reference IDs",
+        "invalid": "attempt rows have unknown status or malformed reference IDs",
+    }
+    for category, label in messages.items():
+        count = counts[category]
+        if count:
+            issues.append(
+                f"evaluation readiness blocked: {count} {label} "
+                f"(examples: {', '.join(examples[category])})"
+            )
+
+
+def _verify_optional_sidecar(
+    uri: object,
+    sha256: object,
+    label: str,
+    reader: PoolArtifactReader,
+    issues: list[str],
+) -> None:
+    if uri is None:
+        return
+    if (
+        not isinstance(uri, str)
+        or not _valid_uri(uri)
+        or not isinstance(sha256, str)
+        or not _valid_sha256(sha256)
+    ):
+        _append_bounded_issue(
+            issues, f"evaluation readiness blocked: {label} sidecar pin is incomplete"
+        )
+        return
+    _verify_pinned_artifact(uri, sha256, label, reader, issues)
+
+
+def _canonical_json_object(value: str) -> bool:
+    try:
+        parsed = json.loads(value)
+        canonical = json.dumps(
+            parsed,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (json.JSONDecodeError, ValueError):
+        return False
+    return isinstance(parsed, dict) and bool(parsed) and canonical == value
+
+
+def _is_positive_count(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _append_bounded_issue(issues: list[str], message: str) -> None:
+    if len(issues) < _MAX_DIAGNOSTICS:
+        issues.append(message)
+    elif len(issues) == _MAX_DIAGNOSTICS:
+        issues.append("additional evaluation-readiness diagnostics omitted")
 
 
 def _read_streamed_manifest(
@@ -510,20 +1172,31 @@ def _manifest_identity_issues(
         source_id,
         source.get("repository"),
         source.get("revision"),
-        source.get("pbf_uri"),
         implementation.get("adapter_id"),
         implementation.get("adapter_revision"),
         implementation.get("builder_revision"),
     )
     if any(not _present(value) for value in required):
         issues.append("completion manifest has incomplete source or code provenance")
+    issues.extend(_source_artifact_identity_issues(source))
+    return issues
+
+
+def _source_artifact_identity_issues(source: dict[str, object]) -> list[str]:
+    issues: list[str] = []
     pbf_uri = source.get("pbf_uri")
-    if (
-        not isinstance(pbf_uri, str)
-        or not _valid_uri(pbf_uri)
-        or not _valid_sha256(source.get("pbf_sha256"))
-    ):
-        issues.append("completion manifest has an invalid PBF artifact pin")
+    pbf_sha256 = source.get("pbf_sha256")
+    pbf_present = pbf_uri is not None or pbf_sha256 is not None
+    if pbf_present:
+        if (
+            not isinstance(pbf_uri, str)
+            or not _valid_uri(pbf_uri)
+            or not isinstance(pbf_sha256, str)
+            or not _valid_sha256(pbf_sha256)
+        ):
+            issues.append("completion manifest has an invalid PBF artifact pin")
+    elif not isinstance(source.get("source_artifact_manifest"), dict):
+        issues.append("completion manifest lacks a PBF pin and source artifact tree pin")
     return issues
 
 
@@ -2759,6 +3432,9 @@ def _stream_manifest_bytes(
                 "revision": spec.source_snapshot.revision,
                 "pbf_uri": spec.source_snapshot.pbf_uri,
                 "pbf_sha256": spec.source_snapshot.pbf_sha256,
+                "source_artifact_manifest": _artifact_manifest_dict(
+                    spec.source_snapshot.source_artifact_manifest
+                ),
             },
             "raw_inventory_evidence": {
                 "enumeration_rule": spec.raw_inventory_evidence.enumeration_rule,
@@ -2777,6 +3453,10 @@ def _stream_manifest_bytes(
                 "support_unit": spec.reference_pin.support_unit,
                 "threshold": spec.reference_pin.threshold,
                 "support_union_policy": spec.reference_pin.support_union_policy,
+                "reference_artifact_manifest": _artifact_manifest_dict(
+                    spec.reference_pin.reference_artifact_manifest
+                ),
+                "area_measurement": _area_measurement_dict(spec.reference_pin.area_measurement),
             },
             "total_source_keys": total_keys,
             "source_inventory_receipt": {

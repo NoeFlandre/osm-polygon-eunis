@@ -18,6 +18,9 @@ from .export import (
 )
 from .models import (
     AmbiguityBasis,
+    AreaMeasurementPin,
+    AreaMeasureSpec,
+    ArtifactManifestPin,
     AssignmentKind,
     AttemptStatus,
     BodyStatus,
@@ -72,6 +75,7 @@ from .streaming import (
     StreamingLevelAccounting,
     StreamingLimits,
     export_pool_batches,
+    validate_nine_streamed_evaluation_ready_gate,
     validate_nine_streamed_pool_gate,
 )
 from .validation import (
@@ -84,6 +88,9 @@ from .validation import (
 
 __all__ = [
     "AmbiguityBasis",
+    "AreaMeasureSpec",
+    "AreaMeasurementPin",
+    "ArtifactManifestPin",
     "AssignmentKind",
     "AttemptStatus",
     "BodyStatus",
@@ -152,6 +159,7 @@ __all__ = [
     "validate_evaluation_trace",
     "validate_full_pool",
     "validate_nine_pool_gate",
+    "validate_nine_streamed_evaluation_ready_gate",
     "validate_nine_streamed_pool_gate",
     "validate_split_assignment",
 ]

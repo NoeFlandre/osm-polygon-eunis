@@ -15,10 +15,16 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from .builder import native_key_json
-from .models import PoolBundle, PoolValidationReport
+from .models import (
+    AreaMeasurementPin,
+    AreaMeasureSpec,
+    ArtifactManifestPin,
+    PoolBundle,
+    PoolValidationReport,
+)
 from .validation import validate_full_pool
 
-_CONTRACT_VERSION = "1.1.0"
+_CONTRACT_VERSION = "1.2.0"
 _TABLE_FIELDS: dict[str, tuple[pa.Field, ...]] = {
     "polygon_inventory": (
         pa.field("inventory_row_id", pa.string(), nullable=False),
@@ -423,6 +429,9 @@ def _manifest_dict(
             "revision": manifest.source_snapshot.revision,
             "pbf_uri": manifest.source_snapshot.pbf_uri,
             "pbf_sha256": manifest.source_snapshot.pbf_sha256,
+            "source_artifact_manifest": _artifact_manifest_dict(
+                manifest.source_snapshot.source_artifact_manifest
+            ),
         },
         "raw_inventory_evidence": {
             "enumeration_rule": manifest.raw_inventory_evidence.enumeration_rule,
@@ -441,6 +450,10 @@ def _manifest_dict(
             "support_unit": manifest.reference_pin.support_unit,
             "threshold": manifest.reference_pin.threshold,
             "support_union_policy": manifest.reference_pin.support_union_policy,
+            "reference_artifact_manifest": _artifact_manifest_dict(
+                manifest.reference_pin.reference_artifact_manifest
+            ),
+            "area_measurement": _area_measurement_dict(manifest.reference_pin.area_measurement),
         },
         "total_source_keys": manifest.total_source_keys,
         "levels": [
@@ -472,6 +485,41 @@ def _manifest_dict(
             name: {"path": table_paths[name], "sha256": table_hashes[name]}
             for name in sorted(table_paths)
         },
+    }
+
+
+def _artifact_manifest_dict(pin: ArtifactManifestPin | None) -> dict[str, object] | None:
+    if pin is None:
+        return None
+    return {
+        "format_version": pin.format_version,
+        "manifest_uri": pin.manifest_uri,
+        "manifest_sha256": pin.manifest_sha256,
+        "expected_artifact_count": pin.expected_artifact_count,
+    }
+
+
+def _area_measurement_dict(pin: AreaMeasurementPin | None) -> dict[str, object] | None:
+    if pin is None:
+        return None
+    return {
+        "implementation": pin.implementation,
+        "implementation_version": pin.implementation_version,
+        "numerator": _area_measure_spec_dict(pin.numerator),
+        "denominator": _area_measure_spec_dict(pin.denominator),
+    }
+
+
+def _area_measure_spec_dict(spec: AreaMeasureSpec) -> dict[str, object]:
+    return {
+        "method_id": spec.method_id,
+        "coordinate_system": spec.coordinate_system,
+        "ellipsoid": spec.ellipsoid,
+        "boundary_convention": spec.boundary_convention,
+        "densification_method": spec.densification_method,
+        "densification_parameters_json": spec.densification_parameters_json,
+        "error_settings_json": spec.error_settings_json,
+        "output_unit": spec.output_unit,
     }
 
 

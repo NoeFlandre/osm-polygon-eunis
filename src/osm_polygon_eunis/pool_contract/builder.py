@@ -73,7 +73,7 @@ def native_keyset_sha256(keys: Iterable[NativeKey]) -> str:
 def build_full_pool(
     source: PoolBuildInput,
     *,
-    contract_version: str = "1.1.0",
+    contract_version: str = "1.2.0",
     pool_version: str = "1.0.0",
 ) -> PoolBundle:
     """Assemble and canonically order pool tables without filtering inventory.
