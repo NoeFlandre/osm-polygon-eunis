@@ -20,9 +20,10 @@ WORLDCOVER_CODES: Final[frozenset[int]] = frozenset({10, 20, 30, 40, 50, 60, 70,
 WORLDCOVER_LEVELS: Final[tuple[LabelLevel, ...]] = (LabelLevel("class", supported=True),)
 WORLDCOVER_AREA_MEASUREMENT: Final[str] = (
     "WGS84 ellipsoidal CEA (lat_ts=30, lon_0=0, EPSG:4326 input); "
-    "canonical full-polygon boundary reused for clipping; geographic edges densified "
-    "<=0.01deg, refined at <=0.001/0.0001deg when abs(ratio-0.8)<=0.001; "
-    "unresolved threshold brackets fail closed; v3"
+    "straight lon/lat source edges; canonical full-polygon boundary reused for clipping; "
+    "CEA curve-to-chord boundary area envelope controls the ratio decision; invalid coarse "
+    "projections refine or fail closed; GEOS overlay and floating-point accumulation error "
+    "are excluded; unresolved enclosures fail closed; v4"
 )
 WORLDCOVER_REFERENCE_ID_NAMESPACE: Final[str] = "worldcover-tile-id"
 

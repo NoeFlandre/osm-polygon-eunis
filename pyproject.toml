@@ -26,6 +26,7 @@ dev = [
   "hypothesis>=6.120,<7",
   "mkdocs-material>=9.5,<10",
   "mutmut>=3.2,<4",
+  "osm-worldcover",
   "pytest>=8.3,<10",
   "pytest-bdd>=8,<10",
   "pytest-cov>=6,<8",
@@ -120,6 +121,9 @@ error-on-warning = true
 possibly-unresolved-reference = "error"
 possibly-missing-attribute = "error"
 possibly-missing-import = "error"
+
+[tool.uv.sources]
+osm-worldcover = { git = "https://github.com/NoeFlandre/osm-worldcover", rev = "18c75517c74be22ab2f90edce2b65d3600461048" }
 
 [tool.mutmut]
 source_paths = [
