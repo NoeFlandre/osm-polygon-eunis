@@ -260,6 +260,7 @@ def test_prefer_result_rejects_missing_overlap_with_optimized_python() -> None:
     script = """
 import ast
 from dataclasses import dataclass
+import os
 import pathlib
 import sys
 
@@ -280,10 +281,28 @@ if sys.flags.optimize != 1:
 source_path = pathlib.Path(sys.argv[1])
 source_tree = ast.parse(source_path.read_text(encoding="utf-8"))
 required = {"prefer_result", "_outranks", "_rank", "_require_same_source_version"}
-functions = [
-    node for node in source_tree.body
-    if isinstance(node, ast.FunctionDef) and node.name in required
-]
+functions_by_name = {
+    node.name: node
+    for node in source_tree.body
+    if isinstance(node, ast.FunctionDef)
+}
+active_mutant = os.environ.get("MUTANT_UNDER_TEST", "").rpartition(".")[2]
+functions = []
+for name in required:
+    original_name = f"x_{name}__mutmut_orig"
+    if original_name in functions_by_name:
+        selected_name = original_name
+        mutant_prefix = f"x_{name}__mutmut_"
+        if active_mutant.startswith(mutant_prefix) and active_mutant in functions_by_name:
+            selected_name = active_mutant
+    else:
+        selected_name = name
+    if selected_name not in functions_by_name:
+        raise RuntimeError(f"could not load the production function {name}")
+    function = functions_by_name[selected_name]
+    function.decorator_list = []
+    function.name = name
+    functions.append(function)
 if {node.name for node in functions} != required:
     raise RuntimeError("could not load the complete production result-ordering functions")
 extracted = ast.Module(
