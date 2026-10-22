@@ -326,6 +326,36 @@ def _reference_pin(tmp_path: Path | None = None) -> ReferencePin:
     )
 
 
+def _byte_pinned_fixture_reference(tmp_path: Path) -> tuple[RasterReference, ReferencePin]:
+    reference_pin = _reference_pin(tmp_path)
+    raster_path = tmp_path / "reference-fixture" / "Prob_A11_10m.tif"
+    evidence = SourceOutputSemanticsEvidence(
+        "synthetic-suitability-score",
+        "test-fixture://eunis/output-semantics",
+        "b" * 64,
+    )
+    asset = EunisRasterAssetPin(
+        code="A11",
+        filename="Prob_A11_10m.tif",
+        size_bytes=raster_path.stat().st_size,
+        sha256=hashlib.sha256(raster_path.read_bytes()).hexdigest(),
+        output_evidence=evidence,
+    )
+    reference = RasterReference(
+        (
+            RasterLayer(
+                "A11",
+                "fixture class",
+                raster_path,
+                "EEA test map release",
+                "Prob_A11_10m.tif",
+            ),
+        ),
+        asset_manifest=EunisRasterAssetManifest("d" * 64, (asset,)),
+    )
+    return reference, reference_pin
+
+
 def test_label_runner_fails_closed_without_byte_verified_taxonomy_lineage(
     tmp_path: Path,
 ) -> None:
@@ -841,6 +871,208 @@ def test_incomplete_raster_inventory_fails_before_attempt_checkpoint_writes(
         )
 
     assert not attempts_root.exists()
+
+
+def test_reference_artifact_list_must_match_the_verified_raster_inventory(
+    tmp_path: Path,
+) -> None:
+    source = _frozen_source(tmp_path, [_source_row(11, _geojson_polygon())])
+    raw_scan = scan_raw_inventory(source, tmp_path / "raw-checkpoints", _code_pin())
+    reference, reference_pin = _byte_pinned_fixture_reference(tmp_path)
+    unrelated = tmp_path / "unrelated-valid-artifact.bin"
+    unrelated.write_bytes(b"valid, but not an EUNIS raster")
+    unrelated_manifest = _artifact_manifest_pin(tmp_path, "unrelated-artifacts", (unrelated,))
+    unrelated_reference_pin = replace(
+        reference_pin,
+        reference_artifact_manifest=unrelated_manifest,
+    )
+    failed_attempt_root = tmp_path / "attempts-with-unrelated-reference"
+
+    with pytest.raises(ValueError, match="outside the verified raster inventory"):
+        run_eunis_label_attempts(
+            raw_scan,
+            reference,
+            unrelated_reference_pin,
+            _TAXONOMY,
+            failed_attempt_root,
+        )
+
+    assert not failed_attempt_root.exists()
+
+    attempt_root = tmp_path / "attempts-with-pinned-reference"
+    attempts = run_eunis_label_attempts(
+        raw_scan,
+        reference,
+        reference_pin,
+        _TAXONOMY,
+        attempt_root,
+    )
+    assert attempts.verified_reference_inventory is not None
+
+    # Re-pin the portable report to a different, internally valid artifact list.
+    # Export must still compare that list with the inventory used for attempts.
+    tampered_reference_pin = replace(
+        attempts.reference_pin,
+        reference_artifact_manifest=unrelated_manifest,
+    )
+    tampered_signature = pool_runner._attempt_signature(
+        attempts.raw_scan,
+        tampered_reference_pin,
+        attempts.taxonomy,
+        reference.layer_codes,
+        attempts.code_pin,
+    )
+    report_path = pool_runner._local_file_uri_path(attempts.report_uri)
+    report = json.loads(report_path.read_bytes())
+    report["reference_pin"] = asdict(tampered_reference_pin)
+    report["signature"] = tampered_signature
+    report_bytes = pool_runner._canonical_json_bytes(report)
+    report_path.write_bytes(report_bytes)
+    tampered_attempts = replace(
+        attempts,
+        reference_pin=tampered_reference_pin,
+        signature=tampered_signature,
+        report_sha256=hashlib.sha256(report_bytes).hexdigest(),
+    )
+    sink_root = tmp_path / "pool-from-unrelated-reference"
+
+    with pytest.raises(ValueError, match="outside the verified raster inventory"):
+        export_eunis_pool(tampered_attempts, FilesystemStreamingSink(sink_root))
+
+    assert not sink_root.exists()
+
+
+@pytest.mark.parametrize(
+    ("line", "message"),
+    [
+        (b"not-json\n", "invalid JSON at line 7"),
+        (
+            b'{"artifact_uri":"file:///a.tif","sha256":"' + b"a" * 64 + b'","extra":true}\n',
+            "invalid schema",
+        ),
+        (
+            b'{ "artifact_uri": "file:///a.tif", "sha256": "' + b"a" * 64 + b'"}\n',
+            "not canonical JSONL",
+        ),
+        (
+            pool_runner._canonical_json_bytes({"artifact_uri": 5, "sha256": "a" * 64}),
+            "invalid artifact pin",
+        ),
+        (
+            pool_runner._canonical_json_bytes(
+                {"artifact_uri": "relative/a.tif", "sha256": "a" * 64}
+            ),
+            "invalid artifact pin",
+        ),
+        (
+            pool_runner._canonical_json_bytes({"artifact_uri": "file:///a.tif", "sha256": 5}),
+            "invalid artifact pin",
+        ),
+        (
+            pool_runner._canonical_json_bytes(
+                {"artifact_uri": "file:///a.tif", "sha256": "A" * 64}
+            ),
+            "invalid artifact pin",
+        ),
+    ],
+)
+def test_reference_artifact_manifest_parser_rejects_malformed_rows(
+    line: bytes,
+    message: str,
+) -> None:
+    with pytest.raises((TypeError, ValueError), match=message):
+        pool_runner._parse_reference_artifact_row(line, 7)
+
+
+def test_reference_artifact_manifest_parser_accepts_canonical_pin() -> None:
+    row = {"artifact_uri": "file:///a.tif", "sha256": "a" * 64}
+    assert pool_runner._parse_reference_artifact_row(pool_runner._canonical_json_bytes(row), 1) == (
+        "file:///a.tif",
+        "a" * 64,
+    )
+
+
+def _write_reference_manifest_rows(
+    tmp_path: Path,
+    name: str,
+    rows: tuple[dict[str, Any], ...],
+    *,
+    expected_count: int | None = None,
+) -> ArtifactManifestPin:
+    content = b"".join(pool_runner._canonical_json_bytes(row) for row in rows)
+    path = tmp_path / f"{name}.jsonl"
+    path.write_bytes(content)
+    return ArtifactManifestPin(
+        format_version="artifact-list-jsonl-v1",
+        manifest_uri=path.resolve().as_uri(),
+        manifest_sha256=hashlib.sha256(content).hexdigest(),
+        expected_artifact_count=len(rows) if expected_count is None else expected_count,
+    )
+
+
+def test_reference_artifact_inventory_verifier_rejects_incomplete_and_duplicate_lists(
+    tmp_path: Path,
+) -> None:
+    reference, reference_pin = _byte_pinned_fixture_reference(tmp_path)
+    inventory = reference.validate_classification_inventory()
+    asset = inventory.assets[0]
+    second_asset = replace(asset, code="A12", filename="Prob_A12_10m.tif")
+    two_asset_inventory = EunisRasterAssetManifest(
+        inventory.native_manifest_sha256,
+        (asset, second_asset),
+    )
+    first_uri = "file:///a/Prob_A11_10m.tif"
+    second_uri = "file:///z/Prob_A12_10m.tif"
+    first_row = {"artifact_uri": first_uri, "sha256": asset.sha256}
+    second_row = {"artifact_uri": second_uri, "sha256": second_asset.sha256}
+
+    missing_pin = reference_pin.reference_artifact_manifest
+    assert missing_pin is not None
+    with pytest.raises(ValueError, match="reference artifact manifest pin is missing"):
+        pool_runner._verify_reference_artifact_inventory(None, inventory)
+
+    with pytest.raises(ValueError, match="count differs"):
+        pool_runner._verify_reference_artifact_inventory(
+            replace(missing_pin, expected_artifact_count=2), inventory
+        )
+
+    wrong_hash_pin = _write_reference_manifest_rows(
+        tmp_path,
+        "wrong-reference-hash",
+        ({"artifact_uri": first_uri, "sha256": "e" * 64},),
+    )
+    with pytest.raises(ValueError, match="hash differs from verified raster"):
+        pool_runner._verify_reference_artifact_inventory(wrong_hash_pin, inventory)
+
+    incomplete_pin = _write_reference_manifest_rows(
+        tmp_path,
+        "incomplete-reference-list",
+        (first_row,),
+        expected_count=2,
+    )
+    with pytest.raises(ValueError, match="does not cover the verified raster inventory"):
+        pool_runner._verify_reference_artifact_inventory(incomplete_pin, two_asset_inventory)
+
+    duplicate_pin = _write_reference_manifest_rows(
+        tmp_path,
+        "duplicate-reference-list",
+        (
+            {"artifact_uri": "file:///a/Prob_A11_10m.tif", "sha256": asset.sha256},
+            {"artifact_uri": "file:///z/Prob_A11_10m.tif", "sha256": asset.sha256},
+        ),
+        expected_count=2,
+    )
+    with pytest.raises(ValueError, match="repeats a verified raster"):
+        pool_runner._verify_reference_artifact_inventory(duplicate_pin, two_asset_inventory)
+
+    unsorted_pin = _write_reference_manifest_rows(
+        tmp_path,
+        "unsorted-reference-list",
+        (second_row, first_row),
+        expected_count=2,
+    )
+    with pytest.raises(ValueError, match="not uniquely sorted"):
+        pool_runner._verify_reference_artifact_inventory(unsorted_pin, two_asset_inventory)
 
 
 def test_production_eunis_attempts_fail_closed_without_output_semantics_pin(

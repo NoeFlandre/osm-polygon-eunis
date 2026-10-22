@@ -166,7 +166,7 @@ class RasterReference:
         expected_native_manifest_sha256: str | None = None,
         expected_asset_inventory_sha256: str | None = None,
         expected_output_semantics_sha256: str | None = None,
-    ) -> None:
+    ) -> EunisRasterAssetManifest:
         """Verify every opened source file against its complete, pinned inventory."""
 
         self._asset_manifest = _validate_classification_inventory(
@@ -178,9 +178,10 @@ class RasterReference:
                 expected_asset_inventory_sha256,
                 expected_output_semantics_sha256,
             ),
-            verify_asset_files=not self._inventory_verified,
+            verify_asset_files=not (self._stack is not None and self._inventory_verified),
         )
-        self._inventory_verified = True
+        self._inventory_verified = self._stack is not None
+        return self._asset_manifest
 
     def __enter__(self) -> RasterReference:
         """Open raster datasets and return this reference for overlap queries."""
@@ -199,6 +200,7 @@ class RasterReference:
 
     def close(self) -> None:
         """Close raster datasets and clear this reference's tile cache."""
+        self._inventory_verified = False
         if self._stack is not None:
             self._stack.close()
             self._stack = None
@@ -207,7 +209,6 @@ class RasterReference:
             self._tile_cache_bytes = 0
             self._grid_order = None
             self._grid_checked = False
-            self._inventory_verified = False
 
     def _count_intersection_error(self) -> None:
         self.intersection_errors += 1

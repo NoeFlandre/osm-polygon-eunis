@@ -16,6 +16,7 @@ import re
 import tempfile
 from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping
+from contextlib import ExitStack
 from dataclasses import asdict, dataclass, replace
 from dataclasses import field as dataclass_field
 from fnmatch import fnmatchcase
@@ -36,6 +37,7 @@ from .eunis_asset_manifest import (
     EEA_2021_NATIVE_ASSET_INVENTORY_SHA256,
     EEA_2021_NATIVE_MANIFEST_SHA256,
     EEA_2021_OUTPUT_SEMANTICS_EVIDENCE_SHA256,
+    EunisRasterAssetManifest,
 )
 from .geometry import is_usable, parse_geometry, to_equal_area
 from .pool_adapter import (
@@ -207,6 +209,7 @@ class EunisAttemptRun:
     report_uri: str
     report_sha256: str
     shards: tuple[AttemptShardReceipt, ...]
+    verified_reference_inventory: EunisRasterAssetManifest | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -491,11 +494,48 @@ def run_eunis_label_attempts(
 ) -> EunisAttemptRun:
     """Attempt L1/L2/L3 for every raw key and checkpoint each shard atomically."""
 
+    if isinstance(reference, RasterReference):
+        with ExitStack() as lifetime:
+            if reference._stack is None:
+                lifetime.enter_context(reference)
+            return _run_eunis_label_attempts_open(
+                raw_scan,
+                reference,
+                reference_pin,
+                taxonomy,
+                checkpoint_root,
+            )
+    return _run_eunis_label_attempts_open(
+        raw_scan,
+        reference,
+        reference_pin,
+        taxonomy,
+        checkpoint_root,
+    )
+
+
+def _run_eunis_label_attempts_open(
+    raw_scan: RawInventoryScan,
+    reference: RasterReference,
+    reference_pin: ReferencePin,
+    taxonomy: EunisTaxonomy,
+    checkpoint_root: Path,
+) -> EunisAttemptRun:
+    """Run attempts while one byte-verified raster reference remains open."""
+
     _validate_eunis_reference_pin(reference_pin)
     _validate_reference_release(reference, reference_pin)
-    _validate_classification_asset_inventory(reference, reference_pin)
+    verified_reference_inventory = _validate_classification_asset_inventory(
+        reference,
+        reference_pin,
+    )
     code_pin = raw_scan.code_pin
     _validate_attempt_taxonomy_inputs(raw_scan, reference_pin, taxonomy, code_pin, reference)
+    if verified_reference_inventory is not None:
+        _verify_reference_artifact_inventory(
+            reference_pin.reference_artifact_manifest,
+            verified_reference_inventory,
+        )
     checkpoint_root.mkdir(parents=True, exist_ok=True)
     attempts_root = checkpoint_root / "eunis-label-attempts"
     attempts_root.mkdir(parents=True, exist_ok=True)
@@ -525,6 +565,9 @@ def run_eunis_label_attempts(
         signature,
         receipts,
     )
+    summary["verified_reference_inventory"] = _reference_inventory_report(
+        verified_reference_inventory
+    )
     report_path = checkpoint_root / "eunis-label-attempts-report.json"
     report_bytes = _canonical_json_bytes(summary)
     _write_atomic(report_path, report_bytes)
@@ -537,6 +580,7 @@ def run_eunis_label_attempts(
         report_path.resolve().as_uri(),
         hashlib.sha256(report_bytes).hexdigest(),
         tuple(receipts),
+        verified_reference_inventory,
     )
 
 
@@ -683,6 +727,11 @@ def _preflight_export_evidence(
     attempt_report_bytes = attempt_report_path.read_bytes()
     attempt_report = _json_object(attempt_report_bytes, "EUNIS label-attempt report")
     _validate_attempt_report(attempts, attempt_report)
+    if attempts.verified_reference_inventory is not None:
+        _verify_reference_artifact_inventory(
+            attempts.reference_pin.reference_artifact_manifest,
+            attempts.verified_reference_inventory,
+        )
 
     checkpoint_paths = {
         shard.path_in_repo: _verified_report_path(
@@ -927,6 +976,125 @@ def _require_artifact_manifest_pin(
     _require_sha256(pin.manifest_sha256, f"contract 1.2 EUNIS {name} digest")
 
 
+def _verify_reference_artifact_inventory(
+    pin: ArtifactManifestPin | None,
+    inventory: EunisRasterAssetManifest,
+) -> None:
+    """Require the reference artifact list to name every byte-verified raster."""
+
+    if pin is None:
+        raise ValueError("reference artifact manifest pin is missing")
+    _require_artifact_manifest_pin(
+        pin,
+        "reference_pin.reference_artifact_manifest",
+        "label attempts",
+    )
+    expected = {asset.filename: asset.sha256 for asset in inventory.assets}
+    if pin.expected_artifact_count != len(expected):
+        raise ValueError(
+            "reference artifact manifest count differs from the verified raster inventory"
+        )
+    manifest_path = _verified_report_path(
+        pin.manifest_uri,
+        pin.manifest_sha256,
+        "reference artifact manifest",
+    )
+    observed: set[str] = set()
+    for filename, digest in _iter_reference_artifact_rows(manifest_path):
+        _validate_reference_artifact_entry(filename, digest, expected, observed)
+    _validate_reference_artifact_coverage(observed, expected, pin.expected_artifact_count)
+
+
+def _validate_reference_artifact_entry(
+    filename: str,
+    digest: str,
+    expected: dict[str, str],
+    observed: set[str],
+) -> None:
+    expected_digest = expected.get(filename)
+    if expected_digest is None:
+        raise ValueError(
+            "reference artifact manifest contains an artifact outside the verified raster inventory"
+        )
+    if filename in observed:
+        raise ValueError("reference artifact manifest repeats a verified raster")
+    if digest != expected_digest:
+        raise ValueError(
+            f"reference artifact manifest hash differs from verified raster {filename}"
+        )
+    observed.add(filename)
+
+
+def _validate_reference_artifact_coverage(
+    observed: set[str], expected: dict[str, str], expected_count: int
+) -> None:
+    if len(observed) == expected_count and observed == set(expected):
+        return
+    missing = sorted(set(expected) - observed)
+    raise ValueError(
+        "reference artifact manifest does not cover the verified raster inventory; "
+        f"missing={missing}"
+    )
+
+
+def _iter_reference_artifact_rows(manifest_path: Path) -> Iterator[tuple[str, str]]:
+    previous_uri: str | None = None
+    with manifest_path.open("rb") as stream:
+        for line_number, line in enumerate(stream, start=1):
+            uri, digest = _parse_reference_artifact_row(line, line_number)
+            if previous_uri is not None and uri <= previous_uri:
+                raise ValueError("reference artifact manifest is not uniquely sorted")
+            previous_uri = uri
+            filename = Path(unquote(urlparse(uri).path)).name
+            yield filename, digest
+
+
+def _parse_reference_artifact_row(line: bytes, line_number: int) -> tuple[str, str]:
+    row = _load_reference_artifact_json(line, line_number)
+    _validate_reference_artifact_schema(row, line)
+    return _extract_reference_artifact_pin(row)
+
+
+def _load_reference_artifact_json(line: bytes, line_number: int) -> Any:
+    try:
+        return json.loads(line)
+    except json.JSONDecodeError as error:
+        raise ValueError(
+            f"reference artifact manifest has invalid JSON at line {line_number}"
+        ) from error
+
+
+def _validate_reference_artifact_schema(row: Any, line: bytes) -> None:
+    if not isinstance(row, dict) or set(row) != {"artifact_uri", "sha256"}:
+        raise ValueError("reference artifact manifest row has an invalid schema")
+    if _canonical_json_bytes(row) != line:
+        raise ValueError("reference artifact manifest rows are not canonical JSONL")
+
+
+def _extract_reference_artifact_pin(row: dict[str, Any]) -> tuple[str, str]:
+    uri = row["artifact_uri"]
+    digest = row["sha256"]
+    if not isinstance(uri, str) or not isinstance(digest, str):
+        raise TypeError("reference artifact manifest contains an invalid artifact pin")
+    if not _has_uri(uri):
+        raise ValueError("reference artifact manifest contains an invalid artifact pin")
+    if _SHA256_HEX_PATTERN.fullmatch(digest) is None:
+        raise ValueError("reference artifact manifest contains an invalid artifact pin")
+    return uri, digest
+
+
+def _reference_inventory_report(
+    inventory: EunisRasterAssetManifest | None,
+) -> dict[str, Any] | None:
+    if inventory is None:
+        return None
+    return {
+        "native_manifest_sha256": inventory.native_manifest_sha256,
+        "asset_inventory_sha256": inventory.asset_inventory_sha256,
+        "assets": [asdict(asset) for asset in sorted(inventory.assets, key=lambda item: item.code)],
+    }
+
+
 def _require_eunis_area_pin(area_pin: AreaMeasurementPin | None, purpose: str) -> None:
     if area_pin is None:
         raise ValueError(f"contract 1.2 EUNIS {purpose} are missing reference_pin.area_measurement")
@@ -1085,6 +1253,9 @@ def _validate_attempt_report(
         "builder_revision": attempts.code_pin.builder_revision,
         "signature": attempts.signature,
         "total_attempted_polygons": evidence.expected_key_count,
+        "verified_reference_inventory": _reference_inventory_report(
+            attempts.verified_reference_inventory
+        ),
     }
     _require_report_fields(
         report,
@@ -2146,16 +2317,16 @@ def _require_revision_pin(
 def _validate_classification_asset_inventory(
     reference: object,
     reference_pin: ReferencePin,
-) -> None:
+) -> EunisRasterAssetManifest | None:
     if not isinstance(reference, RasterReference):
         if reference_pin.release_id == EEA_2021_MAP_RELEASE:
             raise ValueError(
                 "production EUNIS classification requires a RasterReference bound to its "
                 "opened, pinned raster assets"
             )
-        return
+        return None
     revision_pins = _reference_revision_fields(reference_pin.source_revision)
-    reference.validate_classification_inventory(
+    return reference.validate_classification_inventory(
         expected_native_manifest_sha256=revision_pins.get("native-manifest-sha256"),
         expected_asset_inventory_sha256=revision_pins.get("asset-inventory-sha256"),
         expected_output_semantics_sha256=(

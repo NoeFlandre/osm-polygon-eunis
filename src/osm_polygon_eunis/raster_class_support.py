@@ -13,6 +13,7 @@ import rasterio
 from rasterio.windows import Window
 from shapely.geometry.base import BaseGeometry
 
+from .eunis_asset_manifest import EunisRasterAssetManifest
 from .geometry import is_usable
 from .grid_overlap import (
     TILE_SIZE,
@@ -134,7 +135,7 @@ class _Reference(Protocol):
         polygon: BaseGeometry,
     ) -> Window | None: ...
 
-    def validate_classification_inventory(self) -> None: ...
+    def validate_classification_inventory(self) -> EunisRasterAssetManifest: ...
 
 
 def support_areas(

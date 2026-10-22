@@ -165,6 +165,30 @@ def test_substituted_raster_bytes_fail_before_score_classification(tmp_path) -> 
         reference.classification_areas(box(0, 0, 10, 10), _classes())
 
 
+def test_closed_reference_rehashes_assets_after_a_previous_classification(tmp_path) -> None:
+    paths = {}
+    for code, value in (("C1", 0.9), ("C2", 0.2), ("C3", 0.1)):
+        path = tmp_path / f"{code}.tif"
+        _write_raster(path, value)
+        paths[code] = path
+    manifest = _manifest(*(_pin(code, path) for code, path in paths.items()))
+    reference = RasterReference(
+        tuple(_layer(code, path) for code, path in paths.items()),
+        asset_manifest=manifest,
+    )
+
+    reference.classification_areas(box(0, 0, 10, 10), _classes())
+    assert reference._inventory_verified is False
+
+    # Keep the raster byte length stable so only the content digest detects the change.
+    _write_raster(paths["C1"], 0.4)
+    assert paths["C1"].stat().st_size == next(
+        asset.size_bytes for asset in manifest.assets if asset.code == "C1"
+    )
+    with pytest.raises(ValueError, match="bytes differ from its pinned asset SHA-256"):
+        reference.classification_areas(box(0, 0, 10, 10), _classes())
+
+
 def test_missing_and_mixed_source_output_semantics_fail_closed(tmp_path) -> None:
     paths = {}
     for code, value in (("C1", 0.9), ("C2", 0.2), ("C3", 0.1)):

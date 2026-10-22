@@ -130,22 +130,24 @@ whether fixed-pin byte evidence covers the exact emitted path mapping, while
 without it. The production runner and full-pool exporter record and verify the
 lineage pin plus digests of both the classification mapping and derived paths.
 This uses the hierarchy only; no external habitat crosswalk is needed for
-L3-to-L2-to-L1 rollups. The separately transferred original taxonomy cache
-`classification-taxonomy-original-20261021.json` is 284,146 bytes and matches SHA-256
-`223aa3fb89ac48cb5095e443433412c085e66fc54602e2c29253537455a2424f`. Its
-classification record ID, declared workbook digest, labels, levels, and parent
-structure were checked: 3,950 labels, 3,949 level entries, and 3,942 parent
-links. The cache records EEA classification
-`bfe4c237-e378-4a83-ab21-b3807f96c2e2` and workbook SHA-256
-`1427d22db8d77d1053ab1683aa60713bdec3d810605dd6b7bc16683b4ca14665`.
+L3-to-L2-to-L1 rollups. The source-provenance record reports that the
+separately transferred original taxonomy cache
+`classification-taxonomy-original-20261021.json` is 284,146 bytes with SHA-256
+`223aa3fb89ac48cb5095e443433412c085e66fc54602e2c29253537455a2424f`, and has
+3,950 labels, 3,949 level entries, and 3,942 parent links. The cache payload is
+not present on the public PR branch or public main, so those cache values could
+not be independently rechecked in this checkout.
+
 The original 2021_1 workbook was recovered from the official EEA public share
 as `EUNIS terrestrial habitat classification 2021_1 including crosswalks.xlsx`
-(1,439,940 bytes). Its freshly computed SHA-256 matches the pinned digest above.
-The exact asset URL is
-`https://sdi.eea.europa.eu/datashare/public.php/dav/files/sptXqwkQr5g7Bp5/eea_t_eunis-hab-t_p_2004-on-going_v01_r00/EUNIS%20terrestrial%20habitat%20classification%202021_1%20including%20crosswalks.xlsx`.
-The taxonomy cache-to-workbook comparison and crosswalk extraction have not
-run. No production-eligible taxonomy was created during this recovery; that
-lineage check remains a separate production gate.
+(1,439,940 bytes). Its SHA-256 matches the pinned digest above. A fresh parser
+run produced the same reported label, level, and parent counts; this count
+agreement does not replace a code-by-code cache comparison. The workbook
+crosswalk sheets have not been extracted. See the
+[original-source verification report](eunis-original-source-verification-20261022.md)
+for the public branch heads checked and the remaining cache and map-coverage
+gaps. No production-eligible taxonomy was created; the full lineage check
+remains a separate production gate.
 
 The source-specific text adapter joins downstream text and relevance rows only
 after the complete raw inventory and geometry attempts. It validates pinned
