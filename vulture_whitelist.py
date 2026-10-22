@@ -6,6 +6,11 @@ from osm_polygon_eunis.geometry_jobs import process_geometry_paths
 from osm_polygon_eunis.pool_adapters.lucas import LucasTaxonomy
 from osm_polygon_eunis.pool_adapters.source_pins import SourceTreeFile
 from osm_polygon_eunis.pool_contract.export import ExportReceipt
+from osm_polygon_eunis.pool_contract.streaming import (
+    FilesystemArtifactReader,
+    PoolArtifactReader,
+    PoolStreamSpec,
+)
 from osm_polygon_eunis.pool_contract.models import (
     AmbiguityBasis,
     AssignmentKind,
@@ -79,3 +84,5 @@ LucasTaxonomy.from_records
 LucasTaxonomy.lucas_2022_c3
 SourceTreeFile.lfs_oid
 SourceTreeFile.lfs_size_bytes
+PoolArtifactReader.iter_parquet_rows
+FilesystemArtifactReader.iter_parquet_rows
