@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from argparse import Namespace
 from dataclasses import replace
 from pathlib import Path
@@ -21,7 +22,6 @@ from osm_polygon_eunis.pool_adapters.controller import (
     RawInventoryCensus,
     ShardCensus,
     WorkspaceQuotaExceededError,
-    _ensure_workspace_quota,
 )
 from osm_polygon_eunis.pool_adapters.lucas import LucasFeatureQuery, _JsonlReferenceIdWriter
 from osm_polygon_eunis.pool_adapters.source_pins import RawSourceTreePin, SourceTreeFile
@@ -37,6 +37,7 @@ from osm_polygon_eunis.pool_adapters.workers import (
     build_workers,
     make_raw_row_factory,
 )
+from osm_polygon_eunis.pool_adapters.workspace_quota import WorkspaceQuota
 from osm_polygon_eunis.pool_adapters.worldcover_tiles import (
     VerifiedWorldCoverTileSource,
     WorldCoverShardScope,
@@ -186,7 +187,7 @@ def test_verified_worldcover_snapshot_is_quota_bound_and_isolates_consumed_bytes
         tile_not_published_error=FileNotFoundError,
         snapshot_root=workspace / "references" / "worldcover",
         workspace=workspace,
-        reserve_workspace_bytes=lambda size: _ensure_workspace_quota(workspace, 4, size),
+        workspace_quota=WorkspaceQuota(workspace, 4),
     )
 
     source.preflight({_TILE_ID})
@@ -206,7 +207,7 @@ def test_verified_worldcover_snapshot_is_quota_bound_and_isolates_consumed_bytes
         tile_not_published_error=FileNotFoundError,
         snapshot_root=blocked_workspace / "references" / "worldcover",
         workspace=blocked_workspace,
-        reserve_workspace_bytes=lambda size: _ensure_workspace_quota(blocked_workspace, 3, size),
+        workspace_quota=WorkspaceQuota(blocked_workspace, 3),
     )
     with pytest.raises(WorkspaceQuotaExceededError):
         blocked.preflight({_TILE_ID})
@@ -453,8 +454,11 @@ def test_lucas_sidecar_reserves_workspace_quota_before_writing(tmp_path: Path) -
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     budget = _WorkspaceScratchBudget(workspace, 10)
-    first = _JsonlReferenceIdWriter(workspace / "scratch", "first", budget)
-    second = _JsonlReferenceIdWriter(workspace / "scratch", "second", budget)
+    scratch = workspace / "scratch" / "lucas-reference-evidence-test"
+    scratch.mkdir(parents=True)
+    budget.track_temporary_path(scratch)
+    first = _JsonlReferenceIdWriter(scratch, "first", budget)
+    second = _JsonlReferenceIdWriter(scratch, "second", budget)
 
     first.write_id("1")
     with pytest.raises(WorkspaceQuotaExceededError):
@@ -464,7 +468,7 @@ def test_lucas_sidecar_reserves_workspace_quota_before_writing(tmp_path: Path) -
     first.finish()
     assert budget._reserved_bytes == 0
 
-    retry = _JsonlReferenceIdWriter(workspace / "scratch", "retry", budget)
+    retry = _JsonlReferenceIdWriter(scratch, "retry", budget)
     retry.write_id("3")
     sidecar = retry.finish()
     assert sidecar is not None
@@ -473,6 +477,9 @@ def test_lucas_sidecar_reserves_workspace_quota_before_writing(tmp_path: Path) -
     assert sidecar_path.read_text(encoding="utf-8") == '"3"\n'
     assert budget._reserved_bytes == 0
     assert sum(path.stat().st_size for path in workspace.rglob("*") if path.is_file()) == 8
+    shutil.rmtree(scratch)
+    budget.forget_temporary_path(scratch)
+    budget.close()
 
 
 def test_worldcover_direct_url_requires_the_live_clean_pinned_checkout(

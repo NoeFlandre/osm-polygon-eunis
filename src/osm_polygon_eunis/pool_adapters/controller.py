@@ -12,11 +12,14 @@ import argparse
 import fcntl
 import hashlib
 import importlib
+import inspect
 import json
 import os
 import re
+import textwrap
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields, is_dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import unquote, urlparse
@@ -30,7 +33,18 @@ from osm_polygon_eunis.pool_contract import TextSource
 
 from .lucas import LUCAS_AREA_MEASUREMENT_ID
 from .streaming import persist_measurement_sidecars
+from .workspace_quota import (
+    WorkspaceQuota,
+    WorkspaceQuotaLease,
+    WorkspaceQuotaWriter,
+)
+from .workspace_quota import WorkspaceQuotaExceededError as _WorkspaceQuotaExceededError
+from .workspace_quota import (
+    workspace_size as _workspace_size,
+)
 from .worldcover import WORLDCOVER_AREA_MEASUREMENT
+
+WorkspaceQuotaExceededError = _WorkspaceQuotaExceededError
 
 _FORMAT_VERSION = "bounded-pool-controller-v1"
 _CENSUS_FORMAT_VERSION = "raw-inventory-keyset-v1"
@@ -416,16 +430,16 @@ class LocalControllerArtifactSink:
             if target.read_bytes() != content:
                 raise ValueError(f"refusing to replace immutable evidence artifact {target}")
             return target.resolve().as_uri()
-        _ensure_workspace_quota(self.workspace, self.max_workspace_bytes, len(content))
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = target.with_name(f".{target.name}.partial")
         try:
-            with temporary.open("wb") as output:
-                output.write(content)
-                output.flush()
-                os.fsync(output.fileno())
-            temporary.chmod(0o444)
-            temporary.replace(target)
+            with WorkspaceQuota(self.workspace, self.max_workspace_bytes).lease() as lease:
+                with lease.writer(temporary) as output:
+                    output.write(content)
+                    output.flush()
+                    os.fsync(output.fileno())
+                temporary.chmod(0o444)
+                lease.promote_temporary_path(temporary, target)
         except Exception:
             temporary.unlink(missing_ok=True)
             raise
@@ -439,13 +453,14 @@ class LocalControllerArtifactSink:
         if target.exists():
             return _verify_existing_sidecar(target, expected_sha)
         expected_size = source_path.stat().st_size
-        _ensure_workspace_quota(self.workspace, self.max_workspace_bytes, expected_size)
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = target.with_name(f".{target.name}.partial")
         try:
-            _copy_hash_checked_sidecar(source_path, temporary, expected_size, expected_sha)
-            temporary.chmod(0o444)
-            temporary.replace(target)
+            with WorkspaceQuota(self.workspace, self.max_workspace_bytes).lease() as lease:
+                with lease.writer(temporary) as output:
+                    _copy_hash_checked_sidecar(source_path, output, expected_size, expected_sha)
+                temporary.chmod(0o444)
+                lease.promote_temporary_path(temporary, target)
         except Exception:
             temporary.unlink(missing_ok=True)
             raise
@@ -495,13 +510,13 @@ def _verify_existing_sidecar(target: Path, expected_sha: str) -> str:
 
 def _copy_hash_checked_sidecar(
     source_path: Path,
-    temporary: Path,
+    output: WorkspaceQuotaWriter,
     expected_size: int,
     expected_sha: str,
 ) -> None:
     digest = hashlib.sha256()
     written = 0
-    with source_path.open("rb") as source, temporary.open("wb") as output:
+    with source_path.open("rb") as source:
         while chunk := source.read(1024 * 1024):
             written = _copy_sidecar_chunk(chunk, written, expected_size, digest, output)
         if written != expected_size:
@@ -593,9 +608,7 @@ class SourceCopyContext:
     expected_size: int
     git_digest: Any
     content_digest: Any
-    output: Any
-    workspace: Path
-    max_workspace_bytes: int
+    output: WorkspaceQuotaWriter
     total: int = 0
 
 
@@ -857,14 +870,94 @@ def _raw_checkpoint_signature(context: RawCheckpointContext) -> str:
         _canonical_json_bytes(
             {
                 "source": request.text_source,
+                "source_snapshot_id": context.source_snapshot_id,
                 "path": census_row.path,
                 "source_sha256": context.source_sha256,
                 "source_ordered_key_sha256": census_row.ordered_key_sha256,
                 "census_row_count": census_row.row_count,
+                "raw_row_factory_identity": _raw_row_factory_identity(context.raw_row_factory),
                 "format_version": _FORMAT_VERSION,
             }
         )
     ).hexdigest()
+
+
+def _raw_row_factory_identity(factory: RawRowFactory) -> str:
+    explicit = getattr(factory, "__pool_checkpoint_identity__", None)
+    if explicit is not None:
+        if not isinstance(explicit, str) or not explicit:
+            raise ValueError("raw-row factory checkpoint identity must be nonempty text")
+        return explicit
+    target = (
+        factory
+        if inspect.isfunction(factory) or inspect.ismethod(factory)
+        else type(factory).__call__
+    )
+    code = getattr(target, "__code__", None)
+    if code is None:
+        raise ValueError("raw-row factory must expose a stable checkpoint identity")
+    try:
+        source = textwrap.dedent(inspect.getsource(target))
+    except (OSError, TypeError):
+        source = ""
+    state = getattr(factory, "__dict__", {})
+    return hashlib.sha256(
+        _canonical_json_bytes(
+            {
+                "module": getattr(factory, "__module__", type(factory).__module__),
+                "qualname": getattr(factory, "__qualname__", type(factory).__qualname__),
+                "source": source,
+                "code": _callable_code_identity(code) if not source else None,
+                "defaults": _checkpoint_identity_value(getattr(target, "__defaults__", None)),
+                "keyword_defaults": _checkpoint_identity_value(
+                    getattr(target, "__kwdefaults__", None)
+                ),
+                "callable_state": _checkpoint_identity_value(state),
+            }
+        )
+    ).hexdigest()
+
+
+def _callable_code_identity(code: Any) -> dict[str, Any]:
+    return {
+        "bytecode": code.co_code.hex(),
+        "constants": [
+            _callable_code_identity(value)
+            if inspect.iscode(value)
+            else _checkpoint_identity_value(value)
+            for value in code.co_consts
+        ],
+        "names": code.co_names,
+        "variables": code.co_varnames,
+    }
+
+
+def _checkpoint_identity_value(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float, str)):
+        result = value
+    elif isinstance(value, bytes):
+        result = {"bytes_sha256": hashlib.sha256(value).hexdigest(), "size_bytes": len(value)}
+    elif isinstance(value, Enum):
+        result = value.value
+    elif isinstance(value, Path):
+        result = str(value)
+    elif is_dataclass(value) and not isinstance(value, type):
+        result = {
+            item.name: _checkpoint_identity_value(getattr(value, item.name))
+            for item in fields(value)
+        }
+    elif isinstance(value, Mapping):
+        if any(not isinstance(key, str) for key in value):
+            raise ValueError("raw-row factory identity mappings must use string keys")
+        result = {key: _checkpoint_identity_value(value[key]) for key in sorted(value)}
+    elif isinstance(value, (tuple, list)):
+        result = [_checkpoint_identity_value(item) for item in value]
+    elif isinstance(value, (set, frozenset)):
+        values = [_checkpoint_identity_value(item) for item in value]
+        result = sorted(values, key=lambda item: json.dumps(item, sort_keys=True))
+    else:
+        raise ValueError("raw-row factory state needs an explicit stable checkpoint identity")
+    return result
 
 
 def _create_raw_checkpoint(
@@ -876,8 +969,12 @@ def _create_raw_checkpoint(
     raw_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = raw_path.with_name(".rows.jsonl.partial")
     try:
-        row_count, key_digest = _write_raw_checkpoint_rows(context, temporary)
-        _install_unreceipted_checkpoint(temporary, raw_path, "raw")
+        with WorkspaceQuota(
+            context.workspace, context.request.max_workspace_bytes
+        ).lease() as lease:
+            lease.track_temporary_path(temporary)
+            row_count, key_digest = _write_raw_checkpoint_rows(context, temporary, lease)
+            _install_unreceipted_checkpoint(temporary, raw_path, "raw", lease)
     except Exception:
         temporary.unlink(missing_ok=True)
         raise
@@ -902,12 +999,13 @@ def _create_raw_checkpoint(
 def _write_raw_checkpoint_rows(
     context: RawCheckpointContext,
     temporary: Path,
+    lease: WorkspaceQuotaLease,
 ) -> tuple[int, str]:
     request = context.request
     census_row = context.census_row
     key_hash = hashlib.sha256()
     row_count = 0
-    with temporary.open("wb") as output:
+    with lease.writer(temporary) as output:
         for row in context.raw_row_factory(context.staged_path):
             record = _validate_raw_row(
                 row,
@@ -921,8 +1019,6 @@ def _write_raw_checkpoint_rows(
                 output,
                 record,
                 request.max_row_bytes,
-                context.workspace,
-                request.max_workspace_bytes,
             )
             row_count += 1
         output.flush()
@@ -949,8 +1045,10 @@ def _write_map_checkpoint(
     receipt_path = map_dir / "receipt.json"
     temporary = checkpoint_path.with_name(".attempts.jsonl.partial")
     try:
-        row_count = _write_map_attempt_rows(context, temporary)
-        _install_unreceipted_checkpoint(temporary, checkpoint_path, "map")
+        with WorkspaceQuota(context.workspace, context.max_workspace_bytes).lease() as lease:
+            lease.track_temporary_path(temporary)
+            row_count = _write_map_attempt_rows(context, temporary, lease)
+            _install_unreceipted_checkpoint(temporary, checkpoint_path, "map", lease)
     except Exception:
         temporary.unlink(missing_ok=True)
         raise
@@ -974,7 +1072,11 @@ def _write_map_checkpoint(
     return checkpoint_sha
 
 
-def _write_map_attempt_rows(context: MapCheckpointContext, temporary: Path) -> int:
+def _write_map_attempt_rows(
+    context: MapCheckpointContext,
+    temporary: Path,
+    lease: WorkspaceQuotaLease,
+) -> int:
     raw_iter = read_raw_checkpoint(context.raw_path)
     expected = next(raw_iter, None)
     row_count = 0
@@ -984,7 +1086,7 @@ def _write_map_attempt_rows(context: MapCheckpointContext, temporary: Path) -> i
         if callable(checkpoint_runner)
         else context.worker(read_raw_checkpoint(context.raw_path))
     )
-    with temporary.open("wb") as output:
+    with lease.writer(temporary) as output:
         for result in results:
             wrapper = _map_attempt_record(result, expected, context.map_name)
             expected = next(raw_iter, None)
@@ -992,8 +1094,6 @@ def _write_map_attempt_rows(context: MapCheckpointContext, temporary: Path) -> i
                 output,
                 wrapper,
                 context.max_row_bytes,
-                context.workspace,
-                context.max_workspace_bytes,
             )
             row_count += 1
         if expected is not None:
@@ -1126,16 +1226,13 @@ def _validate_serialized_raw_row(
 
 
 def _write_bounded_line(
-    output: Any,
+    output: WorkspaceQuotaWriter,
     record: Mapping[str, Any],
     max_row_bytes: int,
-    workspace: Path,
-    max_workspace_bytes: int,
 ) -> None:
     line = _canonical_json_bytes(record) + b"\n"
     if len(line) > max_row_bytes + 1:
         raise ValueError("serialized row exceeds the configured record byte cap")
-    _ensure_workspace_quota(workspace, max_workspace_bytes, len(line))
     output.write(line)
 
 
@@ -1155,7 +1252,6 @@ def _stage_source_file(
     destination = _staged_source_path(staging_root, source_path, file_pin.path)
     if destination.exists():
         return _verify_existing_staged_source(destination, file_pin)
-    _ensure_workspace_quota(workspace, max_workspace_bytes, expected_size)
     return _copy_verified_source(
         source_path, destination, file_pin, expected_size, max_workspace_bytes, workspace
     )
@@ -1185,26 +1281,28 @@ def _copy_verified_source(
     git_digest = hashlib.sha1(usedforsecurity=False)
     content_digest = hashlib.sha256()
     try:
-        with source_path.open("rb") as source, temporary.open("wb") as output:
-            git_digest.update(f"blob {expected_size}\0".encode())
-            copy_context = SourceCopyContext(
-                expected_size,
-                git_digest,
-                content_digest,
-                output,
-                workspace,
-                max_workspace_bytes,
-            )
-            while chunk := source.read(1024 * 1024):
-                _write_source_chunk(chunk, copy_context)
-            output.flush()
-            os.fsync(output.fileno())
-        if copy_context.total != expected_size or not _source_hash_matches(
-            file_pin, copy_context.total, git_digest.hexdigest(), content_digest.hexdigest()
-        ):
-            raise ValueError("selected source shard bytes do not match the immutable source pin")  # noqa: TRY301
-        temporary.chmod(0o444)
-        temporary.replace(destination)
+        with WorkspaceQuota(workspace, max_workspace_bytes).lease() as lease:
+            lease.track_temporary_path(temporary)
+            with source_path.open("rb") as source, lease.writer(temporary) as output:
+                git_digest.update(f"blob {expected_size}\0".encode())
+                copy_context = SourceCopyContext(
+                    expected_size,
+                    git_digest,
+                    content_digest,
+                    output,
+                )
+                while chunk := source.read(1024 * 1024):
+                    _write_source_chunk(chunk, copy_context)
+                output.flush()
+                os.fsync(output.fileno())
+            if copy_context.total != expected_size or not _source_hash_matches(
+                file_pin, copy_context.total, git_digest.hexdigest(), content_digest.hexdigest()
+            ):
+                raise ValueError(  # noqa: TRY301 -- clean the partial before reporting bad source bytes
+                    "selected source shard bytes do not match the immutable source pin"
+                )
+            temporary.chmod(0o444)
+            lease.promote_temporary_path(temporary, destination)
     except Exception:
         temporary.unlink(missing_ok=True)
         raise
@@ -1217,7 +1315,6 @@ def _write_source_chunk(chunk: bytes, context: SourceCopyContext) -> None:
         raise ValueError("source shard grew beyond its pinned size while staging")
     context.git_digest.update(chunk)
     context.content_digest.update(chunk)
-    _ensure_workspace_quota(context.workspace, context.max_workspace_bytes, len(chunk))
     context.output.write(chunk)
 
 
@@ -1394,15 +1491,20 @@ def _validate_jsonl_checkpoint_line(line: bytes, max_row_bytes: int) -> None:
         raise TypeError("checkpoint row must be a JSON object")
 
 
-def _install_unreceipted_checkpoint(temporary: Path, target: Path, kind: str) -> None:
+def _install_unreceipted_checkpoint(
+    temporary: Path,
+    target: Path,
+    kind: str,
+    lease: WorkspaceQuotaLease,
+) -> None:
     """Make retries deterministic after a crash between checkpoint and receipt."""
 
     if target.exists():
         if _sha256_file(target) != _sha256_file(temporary):
             raise ValueError(f"unreceipted {kind} checkpoint conflicts with regenerated bytes")
-        temporary.unlink()
+        lease.discard_temporary_path(temporary)
         return
-    temporary.replace(target)
+    lease.promote_temporary_path(temporary, target)
 
 
 def _map_signature(
@@ -1507,8 +1609,6 @@ def _acquire_lock(directory: Path) -> int:
     except BlockingIOError as error:
         os.close(descriptor)
         raise RuntimeError(f"another controller owns {directory}") from error
-    os.ftruncate(descriptor, 0)
-    os.write(descriptor, f"pid={os.getpid()}\n".encode())
     return descriptor
 
 
@@ -1528,15 +1628,15 @@ def _write_receipt(
         if path.read_bytes() == data:
             return
         raise ValueError(f"refusing to replace immutable controller receipt {path}")
-    _ensure_workspace_quota(workspace, max_workspace_bytes, len(data))
     temporary = path.with_name(f".{path.name}.partial")
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        with temporary.open("wb") as output:
-            output.write(data)
-            output.flush()
-            os.fsync(output.fileno())
-        temporary.replace(path)
+        with WorkspaceQuota(workspace, max_workspace_bytes).lease() as lease:
+            with lease.writer(temporary) as output:
+                output.write(data)
+                output.flush()
+                os.fsync(output.fileno())
+            lease.promote_temporary_path(temporary, path)
     except Exception:
         temporary.unlink(missing_ok=True)
         raise
@@ -1551,24 +1651,7 @@ def _read_receipt(path: Path) -> dict[str, Any] | None:
 
 
 def _ensure_workspace_quota(workspace: Path, cap: int, reservation: int) -> None:
-    if reservation < 0:
-        raise ValueError("quota reservation cannot be negative")
-    if _workspace_size(workspace) + reservation > cap:
-        raise WorkspaceQuotaExceededError(
-            f"workspace cap {cap} bytes would be exceeded by a {reservation}-byte write"
-        )
-
-
-def _workspace_size(workspace: Path) -> int:
-    if not workspace.exists():
-        return 0
-    total = 0
-    for path in workspace.rglob("*"):
-        if path.is_symlink():
-            raise ValueError("workspace must not contain symlinks")
-        if path.is_file():
-            total += path.stat().st_size
-    return total
+    WorkspaceQuota(workspace, cap).ensure(reservation)
 
 
 def _canonical_json_bytes(value: object) -> bytes:
@@ -1598,10 +1681,6 @@ def _non_negative_int(value: object, description: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"{description} must be a non-negative integer")
     return value
-
-
-class WorkspaceQuotaExceededError(RuntimeError):
-    """Raised before a write that would exceed the controller's disk cap."""
 
 
 def _load_factory(spec: str) -> Callable[..., Any]:

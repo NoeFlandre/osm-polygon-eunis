@@ -13,15 +13,20 @@ from osm_polygon_eunis.pool_adapters.controller import (
     LocalControllerArtifactSink,
     MapPin,
     PoolControllerRequest,
+    RawCheckpointContext,
     RawInventoryCensus,
     ShardCensus,
     ShardRunInputs,
     WorkspaceQuotaExceededError,
+    _build_or_reuse_raw_checkpoint,
     _load_factory,
+    _raw_checkpoint_signature,
     _validate_map_checkpoint_digest,
     _validate_raw_row,
+    _write_bounded_line,
     canonical_adapter_checkpoint_rows,
     plan_run,
+    read_raw_checkpoint,
     run_shard,
 )
 from osm_polygon_eunis.pool_adapters.lucas import LUCAS_AREA_MEASUREMENT_ID
@@ -279,6 +284,11 @@ def test_unreceipted_checkpoint_from_crash_cannot_be_replaced_on_retry(
 ) -> None:
     source_pin, census, input_root, raw_rows = _fixture(tmp_path)
     workspace = tmp_path / "orphan-checkpoint-workspace"
+    rows_to_emit = list(raw_rows)
+
+    def read_rows(_path: Path):
+        yield from rows_to_emit
+
     inputs = ShardRunInputs(
         census,
         source_pin,
@@ -286,7 +296,7 @@ def test_unreceipted_checkpoint_from_crash_cannot_be_replaced_on_retry(
         workspace,
         {"lucas": _lucas_pin()},
         {"lucas": _worker},
-        lambda _path: iter(raw_rows),
+        read_rows,
     )
     run_shard(_request(), inputs)
 
@@ -297,6 +307,7 @@ def test_unreceipted_checkpoint_from_crash_cannot_be_replaced_on_retry(
     original_checkpoint = raw_checkpoint.read_bytes()
     raw_receipt.unlink()
     changed_rows = [dict(row, geometry_payload="changed-wkb") for row in raw_rows]
+    rows_to_emit[:] = changed_rows
 
     with pytest.raises(ValueError, match="unreceipted raw checkpoint conflicts"):
         run_shard(
@@ -308,7 +319,7 @@ def test_unreceipted_checkpoint_from_crash_cannot_be_replaced_on_retry(
                 workspace,
                 {"lucas": _lucas_pin()},
                 {"lucas": _worker},
-                lambda _path: iter(changed_rows),
+                read_rows,
             ),
         )
 
@@ -463,6 +474,85 @@ def test_local_artifact_sink_is_immutable_bounded_and_path_safe(tmp_path: Path) 
     small_sink = LocalControllerArtifactSink(tmp_path / "small", tmp_path / "small", 1)
     with pytest.raises(WorkspaceQuotaExceededError):
         small_sink.put("too-large", b"12")
+
+
+def test_buffered_jsonl_writes_reserve_before_the_buffer_can_exceed_workspace_cap(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "buffered-workspace"
+    workspace.mkdir()
+    value_size = 99 - len(b'{"value":""}\n')
+    record = {"value": "x" * value_size}
+    temporary = workspace / ".attempts.jsonl.partial"
+
+    with controller_module.WorkspaceQuota(workspace, 99).lease() as lease:
+        lease.track_temporary_path(temporary)
+        with lease.writer(temporary) as output:
+            _write_bounded_line(output, record, 200)
+            with pytest.raises(WorkspaceQuotaExceededError):
+                _write_bounded_line(output, record, 200)
+            assert temporary.stat().st_size == 99
+
+    assert not temporary.exists()
+
+
+def test_raw_checkpoint_identity_changes_with_snapshot_and_factory(tmp_path: Path) -> None:
+    _, census, input_root, raw_rows = _fixture(tmp_path)
+    staged_path = input_root / census.shards[0].path
+
+    def factory_for(snapshot_id: str):
+        rows = [
+            dict(
+                row,
+                inventory_row_id=hashlib.sha256(
+                    f"{snapshot_id}\n{row['native_key_json']}".encode()
+                ).hexdigest(),
+            )
+            for row in raw_rows
+        ]
+
+        def read(_path: Path):
+            yield from rows
+
+        return read
+
+    first_snapshot = census.source_snapshot_id
+    second_snapshot = replace(census, revision="2" * 40).source_snapshot_id
+    first_factory = factory_for(first_snapshot)
+    second_factory = factory_for(second_snapshot)
+
+    def different_factory(_path: Path):
+        yield from raw_rows
+
+    first = RawCheckpointContext(
+        _request(),
+        census.shards[0],
+        staged_path,
+        _SHA_A,
+        first_snapshot,
+        first_factory,
+        tmp_path / "workspace" / "scope",
+        tmp_path / "workspace",
+    )
+    same_snapshot_different_factory = replace(first, raw_row_factory=different_factory)
+    second = replace(
+        first,
+        source_snapshot_id=second_snapshot,
+        raw_row_factory=second_factory,
+    )
+
+    assert _raw_checkpoint_signature(first) != _raw_checkpoint_signature(
+        same_snapshot_different_factory
+    )
+    assert _raw_checkpoint_signature(first) != _raw_checkpoint_signature(second)
+    first_path, _ = _build_or_reuse_raw_checkpoint(first)
+    second_path, _ = _build_or_reuse_raw_checkpoint(second)
+    second_ids = [row["inventory_row_id"] for row in read_raw_checkpoint(second_path)]
+
+    assert first_path != second_path
+    assert second_ids == [
+        row["inventory_row_id"] for row in factory_for(second_snapshot)(staged_path)
+    ]
 
 
 def test_raw_row_validation_binds_locator_typed_key_and_derived_id(tmp_path: Path) -> None:

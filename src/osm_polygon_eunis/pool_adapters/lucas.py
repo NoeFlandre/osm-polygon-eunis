@@ -460,6 +460,12 @@ class LucasScratchBudget(Protocol):
     def release(self, size_bytes: int) -> None:
         """Return capacity that was reserved but not written."""
 
+    def track_temporary_path(self, path: Path) -> None:
+        """Register the scratch directory that owns subsequent evidence bytes."""
+
+    def forget_temporary_path(self, path: Path) -> None:
+        """Forget a scratch directory after its temporary owner removes it."""
+
 
 @dataclass(frozen=True, slots=True)
 class LucasReaderConfig:
@@ -522,13 +528,19 @@ class LucasGeoPackageReader:
             prefix="lucas-reference-evidence-", dir=self.scratch_parent
         )
         self._sidecar_directory = sidecar_directory
+        scratch_path_tracked = False
         try:
+            if self.scratch_budget is not None:
+                self.scratch_budget.track_temporary_path(Path(sidecar_directory.name))
+                scratch_path_tracked = True
             self._validate_schema()
         except Exception:
             self._connection.close()
             self._connection = None
             sidecar_directory.cleanup()
             self._sidecar_directory = None
+            if self.scratch_budget is not None and scratch_path_tracked:
+                self.scratch_budget.forget_temporary_path(Path(sidecar_directory.name))
             raise
         return self
 
@@ -545,8 +557,11 @@ class LucasGeoPackageReader:
             self._connection.close()
             self._connection = None
         if self._sidecar_directory is not None:
+            sidecar_path = Path(self._sidecar_directory.name)
             self._sidecar_directory.cleanup()
             self._sidecar_directory = None
+            if self.scratch_budget is not None:
+                self.scratch_budget.forget_temporary_path(sidecar_path)
 
     def query(self, geometry: BaseGeometry) -> LucasFeatureQuery:
         """Query all RTree candidates, retaining IDs even for zero-area touches."""

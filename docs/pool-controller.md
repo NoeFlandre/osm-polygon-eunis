@@ -25,6 +25,41 @@ The census is not the source tree metadata file. It must come from a completed
 and reviewed raw-key audit. The checked-in source-tree pins alone intentionally
 do not provide raw row or key counts.
 
+To generate that census from the complete local source snapshot, run this from
+the repository root on the Grid. The input root must contain every pinned shard
+at its repository-relative path; use a separate scratch directory with enough
+free space for the bounded SQLite key index. The 16 GiB cap is an operational
+ceiling, not an estimate of expected use:
+
+```bash
+uv run python scripts/generate_raw_inventory_census.py \
+  --source website \
+  --input-root /data/pinned-source/website \
+  --scratch-dir /data/scratch/raw-census/website \
+  --output /data/audits/website-keyset.json \
+  --batch-rows 4096 \
+  --max-scratch-bytes 17179869184
+```
+
+Run the same command with `--source description` and its full snapshot root,
+then with `--source wiki` and its full snapshot root. Website and Wiki roots
+must contain their pinned `polygons/` files; Description must contain its
+pinned `data/` files. The scanner reads only `source_pbf`, `osm_type`, and
+`osm_id` columns, verifies every shard against the checked-in Git blob or LFS
+content pin, rejects duplicate or invalid native keys, and fails if any pinned
+shard is missing. It does not load or copy geometry. Its temporary SQLite key
+index is capped by `--max-scratch-bytes` and removed on success or failure.
+
+The output is one deterministic `raw-inventory-keyset-v1` JSON document. It
+contains the source/repository/revision/tree pins; complete shard, raw-row, and
+unique-key counts; the SHA-256 of the sorted full-source native-key set; and a
+sorted `shards` list with each pinned path, byte size, Git blob ID, optional
+LFS OID, row count, and SHA-256 of that shard's ordered canonical native keys.
+The command prints the SHA-256 of the exact manifest bytes. Use that value for
+`--inventory-sha256`. It refuses to overwrite an existing output path and does
+not produce a manifest if a scan or pin check fails. No labeling or evaluation
+is performed by this census command.
+
 The built-in `osm_polygon_eunis.pool_adapters.workers:build_workers` factory
 receives `(args, census, source_pin)` and returns
 `(map_workers, map_pins, raw_row_factory)`. It reads only native keys and
@@ -122,10 +157,16 @@ the complete `raw-inventory-keyset-v1` census must still be supplied. Do not
 replace it with a one-shard census or start evaluation from a partial source
 inventory. Repeating an exact invocation reuses hash-verified checkpoints; a
 changed source, census, adapter, reference, taxonomy, area method, or resource
-limit gets a separate checkpoint signature. The workspace cap covers staged
-input, raw rows, attempts, receipts, sink artifacts, verified WorldCover tile
-snapshots, and LUCAS temporary sidecars. The catalog also bounds the WorldCover
-reference entry count and aggregate source-tile bytes.
+limit gets a separate checkpoint signature. Raw checkpoint identity also binds
+the derived source snapshot ID and raw-row producer identity. The workspace cap
+covers staged input, raw rows, attempts, receipts, sink artifacts, verified
+WorldCover tile snapshots, and LUCAS temporary sidecars. Each write reserves
+capacity before buffered bytes reach disk. Reservations use one workspace-wide
+process lock, so separate shard processes cannot spend the same capacity. If a
+process exits before promoting an output, a later quota check removes only that
+lease's registered temporary files. Coordination metadata is stored beside the
+workspace and is not part of the payload byte cap. The catalog also bounds the
+WorldCover reference entry count and aggregate source-tile bytes.
 
 ## Output status
 

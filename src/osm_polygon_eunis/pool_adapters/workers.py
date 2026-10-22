@@ -29,8 +29,6 @@ from osm_polygon_eunis.pool_adapters.controller import (
     MapPin,
     RawInventoryCensus,
     RawRowFactory,
-    _ensure_workspace_quota,
-    _workspace_size,
     canonical_adapter_checkpoint_rows,
     read_raw_checkpoint,
 )
@@ -47,6 +45,7 @@ from osm_polygon_eunis.pool_adapters.lucas import (
 )
 from osm_polygon_eunis.pool_adapters.runner import iter_lucas_rows, iter_worldcover_source_rows
 from osm_polygon_eunis.pool_adapters.source_pins import RawSourceTreePin
+from osm_polygon_eunis.pool_adapters.workspace_quota import WorkspaceQuota
 from osm_polygon_eunis.pool_adapters.worldcover import (
     WORLDCOVER_AREA_MEASUREMENT,
     worldcover_area_measurement_pin,
@@ -100,6 +99,53 @@ class WorkerRuntime:
             raise ValueError("worker runtime needs a source snapshot ID and positive workspace cap")
 
 
+@dataclass(frozen=True, slots=True)
+class _PinnedParquetRowFactory:
+    """Read a pinned Parquet shard and derive its canonical source row identities."""
+
+    source_paths_by_name: Mapping[str, str]
+    source_snapshot_id: str
+    batch_size: int
+    max_row_bytes: int
+    checkpoint_identity: str
+
+    @property
+    def __pool_checkpoint_identity__(self) -> str:
+        """Expose the producer code and all inputs that affect checkpoint rows."""
+
+        return self.checkpoint_identity
+
+    def __call__(self, path: Path) -> Iterator[Mapping[str, Any]]:
+        shard_path = self.source_paths_by_name.get(path.name.split("-", 1)[-1])
+        if shard_path is None:
+            raise ValueError("staged Parquet shard does not match a pinned source path")
+        parquet = pq.ParquetFile(path)
+        required = {"source_pbf", "osm_type", "osm_id", "geometry"}
+        missing = required - set(parquet.schema_arrow.names)
+        if missing:
+            raise ValueError(f"pinned Parquet shard lacks native fields: {sorted(missing)}")
+        ordinal = 0
+        for batch in parquet.iter_batches(
+            batch_size=self.batch_size,
+            columns=["source_pbf", "osm_type", "osm_id", "geometry"],
+        ):
+            for row in batch.to_pylist():
+                key = canonical_native_key(
+                    {
+                        "source_pbf": row["source_pbf"],
+                        "osm_type": row["osm_type"],
+                        "osm_id": row["osm_id"],
+                    }
+                )
+                yield {
+                    "native_key_json": native_key_json(key),
+                    "inventory_row_id": inventory_row_identifier(self.source_snapshot_id, key),
+                    "source_row_locator": f"{shard_path}#row={ordinal}",
+                    "geometry_payload": _encode_geometry(row["geometry"], self.max_row_bytes),
+                }
+                ordinal += 1
+
+
 class _WorkspaceScratchBudget(LucasScratchBudget):
     """Reserve temporary LUCAS evidence bytes against the shared workspace cap."""
 
@@ -107,27 +153,46 @@ class _WorkspaceScratchBudget(LucasScratchBudget):
         self.workspace = workspace
         self.maximum_bytes = maximum_bytes
         self._reserved_bytes = 0
+        self._lease = WorkspaceQuota(workspace, maximum_bytes).lease()
+        self._temporary_path: Path | None = None
+
+    def track_temporary_path(self, path: Path) -> None:
+        self._lease.track_temporary_path(path)
+        self._temporary_path = path
+
+    def forget_temporary_path(self, path: Path) -> None:
+        self._lease.forget_temporary_path(path)
+        self._temporary_path = None
 
     def reserve(self, size_bytes: int) -> int:
         if size_bytes <= 0:
             raise ValueError("scratch reservation must be positive")
-        available = self.maximum_bytes - _workspace_size(self.workspace) - self._reserved_bytes
-        if available <= 0:
-            _ensure_workspace_quota(self.workspace, self.maximum_bytes, size_bytes)
-        granted = min(size_bytes, available)
+        if self._temporary_path is None:
+            raise RuntimeError("LUCAS scratch path must be registered before reserving bytes")
+        granted = self._lease.reserve_up_to(size_bytes, self._temporary_path)
         self._reserved_bytes += granted
         return granted
 
     def consume(self, size_bytes: int) -> None:
-        self._settle(size_bytes)
+        self._settle(size_bytes, consume=True)
 
     def release(self, size_bytes: int) -> None:
-        self._settle(size_bytes)
+        self._settle(size_bytes, consume=False)
 
-    def _settle(self, size_bytes: int) -> None:
+    def _settle(self, size_bytes: int, *, consume: bool) -> None:
         if size_bytes < 0 or size_bytes > self._reserved_bytes:
             raise ValueError("scratch reservation settlement exceeds outstanding bytes")
+        if self._temporary_path is None:
+            raise RuntimeError("LUCAS scratch path is not registered")
+        if size_bytes:
+            if consume:
+                self._lease.consume(size_bytes, self._temporary_path)
+            else:
+                self._lease.release(size_bytes, self._temporary_path)
         self._reserved_bytes -= size_bytes
+
+    def close(self) -> None:
+        self._lease.close()
 
 
 def build_workers(
@@ -181,7 +246,7 @@ def build_workers(
             tile_not_published_error=producer.tile_not_published_error,
             snapshot_root=runtime.workspace / "references" / "worldcover",
             workspace=runtime.workspace,
-            reserve_workspace_bytes=_workspace_reserver(runtime),
+            workspace_quota=WorkspaceQuota(runtime.workspace, runtime.max_workspace_bytes),
         )
         reference_pin = _worldcover_reference_pin(producer.taxonomy_sha256)
         runtime = WorkerRuntime(
@@ -250,38 +315,24 @@ def make_raw_row_factory(
     source_paths_by_name = {Path(row.path).name: row.path for row in source_pin.files}
     if len(source_paths_by_name) != len(source_pin.files):
         raise ValueError("pinned source tree has duplicate shard basenames")
-
-    def read_rows(path: Path) -> Iterator[Mapping[str, Any]]:
-        shard_path = source_paths_by_name.get(path.name.split("-", 1)[-1])
-        if shard_path is None:
-            raise ValueError("staged Parquet shard does not match a pinned source path")
-        parquet = pq.ParquetFile(path)
-        required = {"source_pbf", "osm_type", "osm_id", "geometry"}
-        missing = required - set(parquet.schema_arrow.names)
-        if missing:
-            raise ValueError(f"pinned Parquet shard lacks native fields: {sorted(missing)}")
-        ordinal = 0
-        for batch in parquet.iter_batches(
-            batch_size=batch_size,
-            columns=["source_pbf", "osm_type", "osm_id", "geometry"],
-        ):
-            for row in batch.to_pylist():
-                key = canonical_native_key(
-                    {
-                        "source_pbf": row["source_pbf"],
-                        "osm_type": row["osm_type"],
-                        "osm_id": row["osm_id"],
-                    }
-                )
-                yield {
-                    "native_key_json": native_key_json(key),
-                    "inventory_row_id": inventory_row_identifier(source_snapshot_id, key),
-                    "source_row_locator": f"{shard_path}#row={ordinal}",
-                    "geometry_payload": _encode_geometry(row["geometry"], max_row_bytes),
-                }
-                ordinal += 1
-
-    return read_rows
+    factory_identity = _canonical_sha256(
+        {
+            "factory_code_sha256": _implementation_sha256(("workers.py",)),
+            "source_snapshot_id": source_snapshot_id,
+            "source_repository": source_pin.repository,
+            "source_revision": source_pin.revision,
+            "tree_inventory_sha256": source_pin.inventory_sha256,
+            "batch_size": batch_size,
+            "max_row_bytes": max_row_bytes,
+        }
+    )
+    return _PinnedParquetRowFactory(
+        source_paths_by_name,
+        source_snapshot_id,
+        batch_size,
+        max_row_bytes,
+        factory_identity,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -431,32 +482,36 @@ class LucasAdapterWorker:
         """Project each unchanged source polygon and emit canonical LUCAS attempts."""
 
         scratch_parent = self.runtime.workspace / "scratch" / "lucas"
+        scratch_budget = _WorkspaceScratchBudget(
+            self.runtime.workspace,
+            self.runtime.max_workspace_bytes,
+        )
         reader_config = LucasReaderConfig(
             resource_limits=DEFAULT_LUCAS_RESOURCE_LIMITS,
             scratch_parent=scratch_parent,
-            scratch_budget=_WorkspaceScratchBudget(
-                self.runtime.workspace,
-                self.runtime.max_workspace_bytes,
-            ),
+            scratch_budget=scratch_budget,
         )
-        with LucasGeoPackageReader(
-            self.gpkg_path,
-            self.taxonomy_path,
-            self.manifest,
-            self.taxonomy,
-            config=reader_config,
-        ) as reader:
-            polygons = _lucas_pool_polygons(
-                rows,
-                self.runtime.source_snapshot_id,
-                self.sink,
-            )
-            pairs = iter_lucas_rows(polygons, reader, self.taxonomy, self.reference_pin)
-            yield from canonical_adapter_checkpoint_rows(
-                pairs,
-                self.sink,
-                f"{self.runtime.text_source}-lucas",
-            )
+        try:
+            with LucasGeoPackageReader(
+                self.gpkg_path,
+                self.taxonomy_path,
+                self.manifest,
+                self.taxonomy,
+                config=reader_config,
+            ) as reader:
+                polygons = _lucas_pool_polygons(
+                    rows,
+                    self.runtime.source_snapshot_id,
+                    self.sink,
+                )
+                pairs = iter_lucas_rows(polygons, reader, self.taxonomy, self.reference_pin)
+                yield from canonical_adapter_checkpoint_rows(
+                    pairs,
+                    self.sink,
+                    f"{self.runtime.text_source}-lucas",
+                )
+        finally:
+            scratch_budget.close()
 
 
 def _worldcover_frames(rows: Iterable[Mapping[str, Any]]) -> Iterator[Any]:
@@ -565,13 +620,6 @@ def _artifact_sink(runtime: WorkerRuntime) -> LocalControllerArtifactSink:
         runtime.workspace,
         runtime.max_workspace_bytes,
     )
-
-
-def _workspace_reserver(runtime: WorkerRuntime) -> Callable[[int], None]:
-    def reserve(size_bytes: int) -> None:
-        _ensure_workspace_quota(runtime.workspace, runtime.max_workspace_bytes, size_bytes)
-
-    return reserve
 
 
 def _lucas_pool_polygons(

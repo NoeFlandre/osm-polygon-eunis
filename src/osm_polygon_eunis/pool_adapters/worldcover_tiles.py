@@ -7,14 +7,16 @@ import json
 import math
 import os
 import re
-import tempfile
-from collections.abc import Callable, Mapping
+import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 import rasterio
+
+from osm_polygon_eunis.pool_adapters.workspace_quota import WorkspaceQuota, WorkspaceQuotaWriter
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _TILE_RE = re.compile(r"^([NS])(\d{2})([EW])(\d{3})$")
@@ -345,17 +347,23 @@ class VerifiedWorldCoverTileSource:
         tile_not_published_error: type[Exception],
         snapshot_root: Path | None = None,
         workspace: Path | None = None,
-        reserve_workspace_bytes: Callable[[int], None] | None = None,
+        workspace_quota: WorkspaceQuota | None = None,
     ) -> None:
         """Retain catalog scope and caller-owned tile files without downloads."""
 
         self.catalog = catalog
         self.reference_root = reference_root.resolve(strict=True)
         self._tile_not_published_error = tile_not_published_error
-        if snapshot_root is not None and (workspace is None or reserve_workspace_bytes is None):
+        if snapshot_root is not None and (workspace is None or workspace_quota is None):
             raise ValueError("verified tile snapshots require a bounded workspace")
         self.workspace = workspace.resolve() if workspace is not None else None
-        self.reserve_workspace_bytes = reserve_workspace_bytes
+        self.workspace_quota = workspace_quota
+        if (
+            self.workspace is not None
+            and workspace_quota is not None
+            and workspace_quota.workspace != self.workspace
+        ):
+            raise ValueError("WorldCover quota belongs to another workspace")
         self.snapshot_root = snapshot_root.resolve() if snapshot_root is not None else None
         if (
             self.snapshot_root is not None
@@ -424,18 +432,29 @@ class VerifiedWorldCoverTileSource:
             return destination.resolve(strict=True)
         if source.stat().st_size != entry.size_bytes or _sha256_file(source) != entry.sha256:
             raise ValueError(f"WorldCover tile bytes differ from pinned catalog: {entry.tile_id}")
-        with tempfile.NamedTemporaryFile(
-            mode="wb",
-            prefix=f".{entry.filename}-",
-            suffix=".partial",
-            dir=root,
-            delete=False,
-        ) as temporary_file:
-            temporary_path = Path(temporary_file.name)
+        temporary_path = root / f".{entry.filename}-{uuid.uuid4().hex}.partial"
         try:
-            _copy_pinned_tile(entry, source, temporary_path, self.reserve_workspace_bytes)
-            temporary_path.chmod(0o444)
-            temporary_path.replace(destination)
+            if self.workspace_quota is None:
+                raise RuntimeError("WorldCover snapshot quota configuration was lost")  # noqa: TRY301 -- remove the partial tile before surfacing lost quota state
+            with self.workspace_quota.lease() as lease:
+                lease.track_temporary_path(temporary_path)
+                with lease.writer(temporary_path) as output:
+                    _copy_pinned_tile(entry, source, output)
+                temporary_path.chmod(0o444)
+                try:
+                    lease.promote_temporary_path(temporary_path, destination)
+                except FileExistsError as error:
+                    if (
+                        destination.is_symlink()
+                        or not destination.is_file()
+                        or destination.stat().st_size != entry.size_bytes
+                        or _sha256_file(destination) != entry.sha256
+                    ):
+                        raise ValueError(
+                            "concurrent WorldCover snapshot bytes differ from catalog: "
+                            f"{entry.tile_id}"
+                        ) from error
+                    lease.discard_temporary_path(temporary_path)
         except Exception:
             temporary_path.unlink(missing_ok=True)
             raise
@@ -457,23 +476,19 @@ class VerifiedWorldCoverTileSource:
 def _copy_pinned_tile(
     entry: WorldCoverTileEntry,
     source: Path,
-    destination: Path,
-    reserve_workspace_bytes: Callable[[int], None] | None,
+    output: WorkspaceQuotaWriter,
 ) -> None:
-    if reserve_workspace_bytes is None:
-        raise RuntimeError("WorldCover snapshot workspace cap was lost")
     digest = hashlib.sha256()
     copied = 0
-    with source.open("rb") as input_stream, destination.open("wb") as output_stream:
+    with source.open("rb") as input_stream:
         while chunk := input_stream.read(1024 * 1024):
             if copied + len(chunk) > entry.size_bytes:
                 raise ValueError(f"WorldCover tile grew beyond its catalog size: {entry.tile_id}")
-            reserve_workspace_bytes(len(chunk))
-            output_stream.write(chunk)
+            output.write(chunk)
             copied += len(chunk)
             digest.update(chunk)
-        output_stream.flush()
-        os.fsync(output_stream.fileno())
+        output.flush()
+        os.fsync(output.fileno())
     if copied != entry.size_bytes or digest.hexdigest() != entry.sha256:
         raise ValueError(f"WorldCover tile copy differs from pinned catalog: {entry.tile_id}")
 
