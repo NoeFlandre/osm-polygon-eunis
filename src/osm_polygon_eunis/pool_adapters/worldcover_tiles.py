@@ -433,31 +433,26 @@ class VerifiedWorldCoverTileSource:
         if source.stat().st_size != entry.size_bytes or _sha256_file(source) != entry.sha256:
             raise ValueError(f"WorldCover tile bytes differ from pinned catalog: {entry.tile_id}")
         temporary_path = root / f".{entry.filename}-{uuid.uuid4().hex}.partial"
-        try:
-            if self.workspace_quota is None:
-                raise RuntimeError("WorldCover snapshot quota configuration was lost")  # noqa: TRY301 -- remove the partial tile before surfacing lost quota state
-            with self.workspace_quota.lease() as lease:
-                lease.track_temporary_path(temporary_path)
-                with lease.writer(temporary_path) as output:
-                    _copy_pinned_tile(entry, source, output)
-                temporary_path.chmod(0o444)
-                try:
-                    lease.promote_temporary_path(temporary_path, destination)
-                except FileExistsError as error:
-                    if (
-                        destination.is_symlink()
-                        or not destination.is_file()
-                        or destination.stat().st_size != entry.size_bytes
-                        or _sha256_file(destination) != entry.sha256
-                    ):
-                        raise ValueError(
-                            "concurrent WorldCover snapshot bytes differ from catalog: "
-                            f"{entry.tile_id}"
-                        ) from error
-                    lease.discard_temporary_path(temporary_path)
-        except Exception:
-            temporary_path.unlink(missing_ok=True)
-            raise
+        if self.workspace_quota is None:
+            raise RuntimeError("WorldCover snapshot quota configuration was lost")
+        with self.workspace_quota.lease() as lease:
+            lease.track_temporary_path(temporary_path)
+            with lease.writer(temporary_path) as output:
+                _copy_pinned_tile(entry, source, output)
+            temporary_path.chmod(0o444)
+            try:
+                lease.promote_temporary_path(temporary_path, destination)
+            except FileExistsError as error:
+                if (
+                    destination.is_symlink()
+                    or not destination.is_file()
+                    or destination.stat().st_size != entry.size_bytes
+                    or _sha256_file(destination) != entry.sha256
+                ):
+                    raise ValueError(
+                        f"concurrent WorldCover snapshot bytes differ from catalog: {entry.tile_id}"
+                    ) from error
+                lease.discard_temporary_path(temporary_path)
         return destination.resolve(strict=True)
 
     def _snapshot_destination(self, entry: WorldCoverTileEntry) -> tuple[Path, Path]:

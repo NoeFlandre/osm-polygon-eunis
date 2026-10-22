@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import multiprocessing
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,7 @@ from osm_polygon_eunis.pool_adapters.controller import (
 )
 from osm_polygon_eunis.pool_adapters.lucas import LUCAS_AREA_MEASUREMENT_ID
 from osm_polygon_eunis.pool_adapters.source_pins import RawSourceTreePin, SourceTreeFile
+from osm_polygon_eunis.pool_adapters.workspace_quota import WorkspaceQuota
 from osm_polygon_eunis.pool_adapters.worldcover import WORLDCOVER_AREA_MEASUREMENT
 from osm_polygon_eunis.pool_contract import PolygonInventoryRow, TextSource
 
@@ -100,6 +102,163 @@ def _fixture(
         for ordinal, key in enumerate(keys)
     ]
     return source_pin, census, input_root, raw_rows
+
+
+def _own_artifact_partial(
+    workspace_text: str,
+    ready: Any,
+    competitor_finished: Any,
+    results: Any,
+) -> None:
+    workspace = Path(workspace_text)
+    target = workspace / "artifacts" / "same.json"
+    temporary = target.with_name(f".{target.name}.partial")
+    with WorkspaceQuota(workspace, 128).lease() as lease:
+        with lease.writer(temporary) as output:
+            output.write(b"active-owner-data")
+            output.flush()
+        ready.set()
+        if not competitor_finished.wait(timeout=20):
+            results.put(("owner-timeout", b""))
+            return
+        try:
+            owned_bytes = temporary.read_bytes()
+        except OSError:
+            results.put(("owner-partial-missing", b""))
+            return
+        if owned_bytes != b"active-owner-data":
+            results.put(("owner-partial-changed", owned_bytes))
+            return
+        temporary.chmod(0o444)
+        lease.promote_temporary_path(temporary, target)
+        results.put(("owner-completed", target.read_bytes()))
+
+
+def _reject_competing_artifact_write(
+    workspace_text: str,
+    owner_ready: Any,
+    competitor_finished: Any,
+    results: Any,
+) -> None:
+    workspace = Path(workspace_text)
+    sink = LocalControllerArtifactSink(workspace / "artifacts", workspace, 128)
+    try:
+        if not owner_ready.wait(timeout=20):
+            results.put(("owner-not-ready", b""))
+            return
+        try:
+            sink.put("same.json", b"competing-data")
+        except RuntimeError as error:
+            results.put(("rejected", str(error).encode("utf-8")))
+        else:
+            results.put(("unexpected-success", b""))
+    finally:
+        competitor_finished.set()
+
+
+@pytest.mark.slow
+def test_rejected_sink_writer_cannot_unlink_another_process_partial(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    context = multiprocessing.get_context("spawn")
+    owner_ready = context.Event()
+    competitor_finished = context.Event()
+    results = context.Queue()
+    owner = context.Process(
+        target=_own_artifact_partial,
+        args=(str(workspace), owner_ready, competitor_finished, results),
+    )
+    competitor = context.Process(
+        target=_reject_competing_artifact_write,
+        args=(str(workspace), owner_ready, competitor_finished, results),
+    )
+    owner.start()
+    competitor.start()
+    observed = [results.get(timeout=30), results.get(timeout=30)]
+    owner.join(timeout=30)
+    competitor.join(timeout=30)
+
+    assert owner.exitcode == 0
+    assert competitor.exitcode == 0
+    assert sorted(row[0] for row in observed) == ["owner-completed", "rejected"]
+    owner_result = next(row for row in observed if row[0] == "owner-completed")
+    assert owner_result[1] == b"active-owner-data"
+    rejection = next(row for row in observed if row[0] == "rejected")
+    assert b"already has an active owner" in rejection[1]
+    assert (workspace / "artifacts" / "same.json").read_bytes() == b"active-owner-data"
+
+
+def test_staged_source_path_includes_full_pinned_source_identity(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    staging_root = workspace / "inputs"
+    relative_path = "polygons/shared-shard.parquet"
+
+    def pinned_source(
+        source: TextSource,
+        repository: str,
+        revision: str,
+        data: bytes,
+        inventory_sha: str,
+    ) -> tuple[RawSourceTreePin, Path]:
+        blob_id = hashlib.sha1(
+            f"blob {len(data)}\0".encode() + data,
+            usedforsecurity=False,
+        ).hexdigest()
+        file_pin = SourceTreeFile(relative_path, len(data), blob_id, None, len(data))
+        source_pin = RawSourceTreePin(
+            source,
+            repository,
+            revision,
+            "polygons/",
+            1,
+            len(data),
+            inventory_sha,
+            (file_pin,),
+            "polygon_geometry",
+        )
+        source_path = tmp_path / repository.replace("/", "-") / relative_path
+        source_path.parent.mkdir(parents=True)
+        source_path.write_bytes(data)
+        return source_pin, source_path
+
+    website_pin, website_path = pinned_source(
+        TextSource.WEBSITE,
+        "owner/website",
+        "1" * 40,
+        b"website-shard",
+        _SHA_A,
+    )
+    wiki_pin, wiki_path = pinned_source(
+        TextSource.WIKI,
+        "owner/wiki",
+        "2" * 40,
+        b"wiki-shard",
+        _SHA_B,
+    )
+
+    website_staged, website_sha = controller_module._stage_source_file(
+        website_path,
+        website_pin.files[0],
+        website_pin,
+        staging_root,
+        128,
+        workspace,
+    )
+    wiki_staged, wiki_sha = controller_module._stage_source_file(
+        wiki_path,
+        wiki_pin.files[0],
+        wiki_pin,
+        staging_root,
+        128,
+        workspace,
+    )
+
+    assert website_staged != wiki_staged
+    assert website_staged.read_bytes() == b"website-shard"
+    assert wiki_staged.read_bytes() == b"wiki-shard"
+    assert website_sha == hashlib.sha256(b"website-shard").hexdigest()
+    assert wiki_sha == hashlib.sha256(b"wiki-shard").hexdigest()
 
 
 def _request(*, max_workspace_bytes: int = 10_000) -> PoolControllerRequest:

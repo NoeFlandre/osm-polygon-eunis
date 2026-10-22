@@ -134,6 +134,8 @@ source_paths = [
   "src/osm_polygon_eunis/release_plan.py",
   "src/osm_polygon_eunis/manifest_state.py",
   "src/osm_polygon_eunis/publish.py",
+  "src/osm_polygon_eunis/pool_adapters/source_staging.py",
+  "src/osm_polygon_eunis/pool_adapters/workspace_quota.py",
 ]
 also_copy = [
   "src/osm_polygon_eunis/__init__.py",
@@ -176,4 +178,6 @@ pytest_add_cli_args_test_selection = [
   "tests/unit/test_release_plan.py",
   "tests/unit/test_manifest_state.py",
   "tests/unit/test_publish.py",
+  "tests/unit/test_source_staging.py",
+  "tests/unit/test_workspace_quota.py",
 ]

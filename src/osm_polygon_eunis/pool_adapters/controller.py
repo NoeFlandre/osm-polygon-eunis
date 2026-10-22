@@ -32,6 +32,7 @@ from osm_polygon_eunis.pool_adapters.source_pins import (
 from osm_polygon_eunis.pool_contract import TextSource
 
 from .lucas import LUCAS_AREA_MEASUREMENT_ID
+from .source_staging import SourceIdentity, staged_source_path
 from .streaming import persist_measurement_sidecars
 from .workspace_quota import (
     WorkspaceQuota,
@@ -432,17 +433,13 @@ class LocalControllerArtifactSink:
             return target.resolve().as_uri()
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = target.with_name(f".{target.name}.partial")
-        try:
-            with WorkspaceQuota(self.workspace, self.max_workspace_bytes).lease() as lease:
-                with lease.writer(temporary) as output:
-                    output.write(content)
-                    output.flush()
-                    os.fsync(output.fileno())
-                temporary.chmod(0o444)
-                lease.promote_temporary_path(temporary, target)
-        except Exception:
-            temporary.unlink(missing_ok=True)
-            raise
+        with WorkspaceQuota(self.workspace, self.max_workspace_bytes).lease() as lease:
+            with lease.writer(temporary) as output:
+                output.write(content)
+                output.flush()
+                os.fsync(output.fileno())
+            temporary.chmod(0o444)
+            lease.promote_temporary_path(temporary, target)
         return target.resolve().as_uri()
 
     def put_file(self, relative_path: str, source_path: Path) -> str:
@@ -455,15 +452,11 @@ class LocalControllerArtifactSink:
         expected_size = source_path.stat().st_size
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = target.with_name(f".{target.name}.partial")
-        try:
-            with WorkspaceQuota(self.workspace, self.max_workspace_bytes).lease() as lease:
-                with lease.writer(temporary) as output:
-                    _copy_hash_checked_sidecar(source_path, output, expected_size, expected_sha)
-                temporary.chmod(0o444)
-                lease.promote_temporary_path(temporary, target)
-        except Exception:
-            temporary.unlink(missing_ok=True)
-            raise
+        with WorkspaceQuota(self.workspace, self.max_workspace_bytes).lease() as lease:
+            with lease.writer(temporary) as output:
+                _copy_hash_checked_sidecar(source_path, output, expected_size, expected_sha)
+            temporary.chmod(0o444)
+            lease.promote_temporary_path(temporary, target)
         return target.resolve().as_uri()
 
     def _target(self, relative_path: str) -> Path:
@@ -737,6 +730,7 @@ def _run_locked_shard(
     staged_path, actual_sha256 = _stage_source_file(
         inputs.input_root / source_row.path,
         file_pin,
+        inputs.source_pin,
         workspace / "inputs",
         request.max_workspace_bytes,
         workspace,
@@ -968,16 +962,10 @@ def _create_raw_checkpoint(
 ) -> tuple[Path, str]:
     raw_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = raw_path.with_name(".rows.jsonl.partial")
-    try:
-        with WorkspaceQuota(
-            context.workspace, context.request.max_workspace_bytes
-        ).lease() as lease:
-            lease.track_temporary_path(temporary)
-            row_count, key_digest = _write_raw_checkpoint_rows(context, temporary, lease)
-            _install_unreceipted_checkpoint(temporary, raw_path, "raw", lease)
-    except Exception:
-        temporary.unlink(missing_ok=True)
-        raise
+    with WorkspaceQuota(context.workspace, context.request.max_workspace_bytes).lease() as lease:
+        lease.track_temporary_path(temporary)
+        row_count, key_digest = _write_raw_checkpoint_rows(context, temporary, lease)
+        _install_unreceipted_checkpoint(temporary, raw_path, "raw", lease)
     raw_sha = _sha256_file(raw_path)
     _write_receipt(
         receipt_path,
@@ -1044,14 +1032,10 @@ def _write_map_checkpoint(
     checkpoint_path = map_dir / "attempts.jsonl"
     receipt_path = map_dir / "receipt.json"
     temporary = checkpoint_path.with_name(".attempts.jsonl.partial")
-    try:
-        with WorkspaceQuota(context.workspace, context.max_workspace_bytes).lease() as lease:
-            lease.track_temporary_path(temporary)
-            row_count = _write_map_attempt_rows(context, temporary, lease)
-            _install_unreceipted_checkpoint(temporary, checkpoint_path, "map", lease)
-    except Exception:
-        temporary.unlink(missing_ok=True)
-        raise
+    with WorkspaceQuota(context.workspace, context.max_workspace_bytes).lease() as lease:
+        lease.track_temporary_path(temporary)
+        row_count = _write_map_attempt_rows(context, temporary, lease)
+        _install_unreceipted_checkpoint(temporary, checkpoint_path, "map", lease)
     checkpoint_sha = _sha256_file(checkpoint_path)
     _validate_map_checkpoint_artifacts(checkpoint_path)
     _write_receipt(
@@ -1239,6 +1223,7 @@ def _write_bounded_line(
 def _stage_source_file(
     source_path: Path,
     file_pin: SourceTreeFile,
+    source_pin: RawSourceTreePin,
     staging_root: Path,
     max_workspace_bytes: int,
     workspace: Path,
@@ -1249,17 +1234,22 @@ def _stage_source_file(
     if not source_path.is_file() or source_path.stat().st_size != expected_size:
         raise ValueError("selected source shard is absent or has the wrong pinned byte size")
     staging_root.mkdir(parents=True, exist_ok=True)
-    destination = _staged_source_path(staging_root, source_path, file_pin.path)
+    destination = staged_source_path(
+        staging_root,
+        SourceIdentity(
+            text_source=source_pin.text_source.value,
+            repository=source_pin.repository,
+            revision=source_pin.revision,
+            path_prefix=source_pin.path_prefix,
+            tree_inventory_sha256=source_pin.inventory_sha256,
+        ),
+        file_pin.path,
+    )
     if destination.exists():
         return _verify_existing_staged_source(destination, file_pin)
     return _copy_verified_source(
         source_path, destination, file_pin, expected_size, max_workspace_bytes, workspace
     )
-
-
-def _staged_source_path(staging_root: Path, source_path: Path, source_path_pin: str) -> Path:
-    digest = hashlib.sha256(source_path_pin.encode()).hexdigest()
-    return staging_root / f"{digest}-{source_path.name}"
 
 
 def _verify_existing_staged_source(destination: Path, file_pin: SourceTreeFile) -> tuple[Path, str]:
@@ -1280,32 +1270,26 @@ def _copy_verified_source(
     temporary = destination.with_name(f".{destination.name}.partial")
     git_digest = hashlib.sha1(usedforsecurity=False)
     content_digest = hashlib.sha256()
-    try:
-        with WorkspaceQuota(workspace, max_workspace_bytes).lease() as lease:
-            lease.track_temporary_path(temporary)
-            with source_path.open("rb") as source, lease.writer(temporary) as output:
-                git_digest.update(f"blob {expected_size}\0".encode())
-                copy_context = SourceCopyContext(
-                    expected_size,
-                    git_digest,
-                    content_digest,
-                    output,
-                )
-                while chunk := source.read(1024 * 1024):
-                    _write_source_chunk(chunk, copy_context)
-                output.flush()
-                os.fsync(output.fileno())
-            if copy_context.total != expected_size or not _source_hash_matches(
-                file_pin, copy_context.total, git_digest.hexdigest(), content_digest.hexdigest()
-            ):
-                raise ValueError(  # noqa: TRY301 -- clean the partial before reporting bad source bytes
-                    "selected source shard bytes do not match the immutable source pin"
-                )
-            temporary.chmod(0o444)
-            lease.promote_temporary_path(temporary, destination)
-    except Exception:
-        temporary.unlink(missing_ok=True)
-        raise
+    with WorkspaceQuota(workspace, max_workspace_bytes).lease() as lease:
+        lease.track_temporary_path(temporary)
+        with source_path.open("rb") as source, lease.writer(temporary) as output:
+            git_digest.update(f"blob {expected_size}\0".encode())
+            copy_context = SourceCopyContext(
+                expected_size,
+                git_digest,
+                content_digest,
+                output,
+            )
+            while chunk := source.read(1024 * 1024):
+                _write_source_chunk(chunk, copy_context)
+            output.flush()
+            os.fsync(output.fileno())
+        if copy_context.total != expected_size or not _source_hash_matches(
+            file_pin, copy_context.total, git_digest.hexdigest(), content_digest.hexdigest()
+        ):
+            raise ValueError("selected source shard bytes do not match the immutable source pin")
+        temporary.chmod(0o444)
+        lease.promote_temporary_path(temporary, destination)
     return destination, content_digest.hexdigest()
 
 
@@ -1630,16 +1614,12 @@ def _write_receipt(
         raise ValueError(f"refusing to replace immutable controller receipt {path}")
     temporary = path.with_name(f".{path.name}.partial")
     path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with WorkspaceQuota(workspace, max_workspace_bytes).lease() as lease:
-            with lease.writer(temporary) as output:
-                output.write(data)
-                output.flush()
-                os.fsync(output.fileno())
-            lease.promote_temporary_path(temporary, path)
-    except Exception:
-        temporary.unlink(missing_ok=True)
-        raise
+    with WorkspaceQuota(workspace, max_workspace_bytes).lease() as lease:
+        with lease.writer(temporary) as output:
+            output.write(data)
+            output.flush()
+            os.fsync(output.fileno())
+        lease.promote_temporary_path(temporary, path)
 
 
 def _read_receipt(path: Path) -> dict[str, Any] | None:
