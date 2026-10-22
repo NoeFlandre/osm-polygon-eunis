@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from dataclasses import asdict, replace
 from typing import Any, cast
 
@@ -9,6 +10,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from osm_polygon_eunis import text_join
 from osm_polygon_eunis.pool_adapter import (
     EUNIS_POOL_SOURCE_LAYOUTS,
     SourceTreeFile,
@@ -372,6 +374,36 @@ def test_wiki_link_groups_keep_nested_evidence_order_and_enforce_record_rows() -
     )
     with pytest.raises(ValueError, match="joined record exceeds the maximum output row count"):
         next(iter(too_small))
+
+
+def test_oversized_wiki_evidence_count_is_checked_before_string_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    appended_fragment_sizes: list[int] = []
+    append = text_join._BoundedTextBuilder.append
+
+    def record_fragment_size(builder: text_join._BoundedTextBuilder, fragment: str) -> None:
+        appended_fragment_sizes.append(len(fragment))
+        append(builder, fragment)
+
+    monkeypatch.setattr(text_join._BoundedTextBuilder, "append", record_fragment_size)
+
+    with (
+        sqlite3.connect(":memory:") as connection,
+        pytest.raises(
+            ValueError, match="combined Wiki link evidence exceeds the maximum output row size"
+        ),
+    ):
+        text_join._combined_wiki_link_evidence(
+            connection,
+            "document-1",
+            "wikipedia",
+            "native-key",
+            evidence_count=1_000_000,
+            max_output_row_bytes=256,
+        )
+
+    assert appended_fragment_sizes == []
 
 
 def test_description_rejects_source_hash_and_identity_drift() -> None:

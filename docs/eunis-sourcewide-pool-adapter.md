@@ -126,7 +126,8 @@ rejects a record before returning it if its evidence, link rows, or serialized
 size exceeds the declared allocation bounds. It preserves all evidence and
 does not truncate oversized groups. `export_eunis_full_pool()` requires a
 bounds-carrying join stream whose per-record limits match the selected
-`StreamingLimits`, and checks lineage before it writes through the sink.
+`StreamingLimits`, and checks lineage while it consumes the stream before
+writing the completion manifest.
 
 Join keys follow the pinned source conventions. Description uses
 `description_identity`, tag key, language, sentence index, and the source
@@ -176,7 +177,11 @@ sentence/label groups in the same streamed export. Pass those records to
 `export_eunis_full_pool()`; it appends them after the raw polygon attempts and
 still performs no evaluation sampling. If export limits are customized, pass
 matching `JoinAllocationBounds.from_streaming_limits(limits)` when building the
-downstream stream, so an oversized record fails before any sink write.
+downstream stream. Export is lazy: it persists the raw scan report and label
+attempt artifacts before consuming downstream records, so a later oversized
+record can leave earlier evidence or attempt artifacts in the sink. A failed
+export does not write a completion manifest; only a finalized manifest marks a
+complete pool.
 
 This uses PR #165's streaming API at contract 1.1.0, including one attempt
 receipt per raw key, support evidence for every label candidate, disk-backed

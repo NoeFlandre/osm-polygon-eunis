@@ -184,6 +184,19 @@ class _BoundedTextBuilder:
         self._require_open_file().write(fragment)
         self._byte_count += fragment_bytes
 
+    def append_repeated(self, fragment: str, count: int) -> None:
+        """Append repeated text only after proving its total size fits the cap."""
+        if count <= 0 or not fragment:
+            return
+        fragment_bytes = len(fragment.encode("utf-8"))
+        if self._byte_count + fragment_bytes * count > self._max_bytes:
+            raise ValueError(self._description)
+        repeats_per_chunk = max(1, (64 * 1024) // fragment_bytes)
+        while count:
+            repeats = min(count, repeats_per_chunk)
+            self.append(fragment * repeats)
+            count -= repeats
+
     def value(self) -> str:
         file = self._require_open_file()
         file.flush()
@@ -2438,7 +2451,7 @@ def _combined_wiki_link_evidence(
         max_output_row_bytes,
         "combined Wiki link evidence exceeds the maximum output row size",
     ) as output:
-        output.append("[" * (evidence_count - 1))
+        output.append_repeated("[", evidence_count - 1)
         for index, (evidence_payload,) in enumerate(
             connection.execute(
                 "SELECT evidence_json FROM wiki_links "

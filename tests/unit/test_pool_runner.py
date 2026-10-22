@@ -845,6 +845,82 @@ def test_full_pool_export_streams_downstream_text_and_relevance_rows(tmp_path: P
     assert links["status"][0].as_py() == TextLinkStatus.LINKED.value
 
 
+def test_lazy_downstream_failure_leaves_attempt_evidence_without_completion_manifest(
+    tmp_path: Path,
+) -> None:
+    source = _frozen_source(tmp_path, [_source_row(11, _geojson_polygon())])
+    checkpoint_root = tmp_path / "checkpoints"
+    raw_scan = scan_raw_inventory(source, checkpoint_root, _code_pin())
+    attempts = run_eunis_label_attempts(
+        raw_scan,
+        cast(RasterReference, FakeReference()),
+        _reference_pin(),
+        _TAXONOMY,
+        checkpoint_root,
+    )
+    text = "A useful visitor description."
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    limits = StreamingLimits(max_batch_rows=16, max_row_bytes=1024)
+    downstream = iter_eunis_join_records(
+        TextSource.WEBSITE,
+        [
+            PinnedSourceRow(
+                "polygons/region-a.parquet",
+                0,
+                {
+                    "polygon_id": "region:way:11",
+                    "source_pbf": "region.osm.pbf",
+                    "osm_type": "way",
+                    "osm_id": 11,
+                    "website_sentences": [text],
+                    "contact_website_sentences": [],
+                    "website_sentence_status": "success",
+                    "contact_website_sentence_status": "absent",
+                    "website_text": text,
+                    "contact_website_text": None,
+                    "website_text_status": "success",
+                    "contact_website_text_status": "absent",
+                },
+            )
+        ],
+        [
+            PinnedSourceRow(
+                "labels/polygons/region-a.parquet",
+                0,
+                {
+                    "label_id": f"oversized-{'x' * 2048}",
+                    "polygon_id": "region:way:11",
+                    "field": "website",
+                    "sentence_index": 0,
+                    "text_sha256": digest,
+                    "decision": "YES",
+                },
+            )
+        ],
+        list(iter_eunis_attempt_inventory_rows(attempts)),
+        website_field_to_column={
+            "website": "website_sentences",
+            "contact_website": "contact_website_sentences",
+        },
+        allocation_bounds=JoinAllocationBounds.from_streaming_limits(limits),
+    )
+    sink_root = tmp_path / "failed-full-export"
+
+    with pytest.raises(ValueError, match="exceeds the maximum output row size"):
+        export_eunis_full_pool(
+            attempts,
+            downstream,
+            FilesystemStreamingSink(sink_root),
+            limits=limits,
+            staging_directory=tmp_path,
+        )
+
+    assert list(sink_root.rglob("raw-inventory-scan.json"))
+    assert list(sink_root.rglob("label-attempts-report.json"))
+    assert list(sink_root.rglob("*.jsonl"))
+    assert not list(sink_root.rglob("manifest.json"))
+
+
 def test_wiki_downstream_wrapper_streams_both_corpora(monkeypatch) -> None:
     calls = []
 
