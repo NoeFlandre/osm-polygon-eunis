@@ -7,6 +7,10 @@ import time
 from contextlib import suppress
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.slow
+
 
 def test_sigterm_is_forwarded_to_active_helper_before_receipt_exit(tmp_path: Path) -> None:
     project_root = Path(__file__).resolve().parents[2]

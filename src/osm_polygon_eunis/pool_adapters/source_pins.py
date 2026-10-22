@@ -107,6 +107,24 @@ class SourceTreeFile:
     blob_id: str
     lfs_oid: str | None
     lfs_size_bytes: int | None
+    verified_lfs_content_sha256: str | None = None
+
+
+# Hugging Face's pinned Website shard has a Git LFS pointer whose metadata was
+# omitted by the original tree inventory. The public pointer at the pinned
+# commit hashes to this Git blob and names this content digest and size. Keep
+# the supplemental resolution separate from the metadata inventory digest.
+_VERIFIED_LFS_CONTENT_PINS = {
+    (
+        "NoeFlandre/osm-polygon-website-tag",
+        "4cbddf95ce614e68d5ada8b94ca21bf9e48d39dd",
+        "polygons/afghanistan-latest.parquet",
+    ): (
+        "702eb4afb4c63502f7f598141c7f97f120a57f02",
+        "796965a9013b2ed590d1797a77a1dfa86dcda60e75fceb8d05d460d37e70c1b2",
+        145293,
+    ),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,14 +266,7 @@ def _load_source_group(
     if _EXPECTED_TREE_DIGESTS.get((name, path_prefix)) != inventory_sha256:
         raise ValueError(f"source tree {path_prefix!r} differs from its verified pin")
     files_in_group = tuple(
-        SourceTreeFile(
-            path=row["path"],
-            size_bytes=row["size"],
-            blob_id=row["blob_id"],
-            lfs_oid=row["lfs_oid"],
-            lfs_size_bytes=row["lfs_size"],
-        )
-        for row in group["files"]
+        _source_tree_file(name, source["resolved_sha"], row) for row in group["files"]
     )
     pin = RawSourceTreePin(
         text_source=TextSource(name),
@@ -270,6 +281,32 @@ def _load_source_group(
     )
     _validate_tree_pin(pin, group["files"])
     return pin
+
+
+def _source_tree_file(name: str, revision: str, row: dict[str, Any]) -> SourceTreeFile:
+    identity = (f"NoeFlandre/osm-polygon-{name}-tag", revision, row["path"])
+    if name == "wiki":
+        identity = ("NoeFlandre/osm-polygon-wikidata-and-wikipedia", revision, row["path"])
+    verified = _VERIFIED_LFS_CONTENT_PINS.get(identity)
+    if verified is not None:
+        pointer_blob, content_sha256, content_size = verified
+        if (
+            row["blob_id"] != pointer_blob
+            or row["lfs_oid"] is not None
+            or row["size"] != content_size
+            or row["lfs_size"] != content_size
+        ):
+            raise ValueError("verified Git LFS content pin no longer matches its public tree row")
+    else:
+        content_sha256 = None
+    return SourceTreeFile(
+        path=row["path"],
+        size_bytes=row["size"],
+        blob_id=row["blob_id"],
+        lfs_oid=row["lfs_oid"],
+        lfs_size_bytes=row["lfs_size"],
+        verified_lfs_content_sha256=content_sha256,
+    )
 
 
 def _tree_purpose(path_prefix: str) -> str:

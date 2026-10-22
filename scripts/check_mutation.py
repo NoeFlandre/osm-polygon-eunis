@@ -15,6 +15,8 @@ MODULE_MINIMUM_SCORES: dict[str, float] = {
     "grid_overlap": 93.67,
     "manifest_state": 99.09,
     "matching": 99.2,
+    "pool_adapters.source_staging": 82.35,
+    "pool_adapters.workspace_quota": 90.42,
     "publish": 99.6,
     "release_plan": 100.0,
     "transform": 98.3,
@@ -163,6 +165,119 @@ ALLOWED_MUTANTS: dict[str, str] = {
         "publish",
         "x_verify_dataset__mutmut_30",
     ),
+    **_equivalent(
+        "Equivalent: ensure_ascii=None selects json.dumps' default False; the second separator "
+        "is unused for the source identity tuple; UTF-8 is case-insensitive.",
+        "pool_adapters.source_staging",
+        "x_staged_source_path__mutmut_3",
+        "x_staged_source_path__mutmut_10",
+        "x_staged_source_path__mutmut_15",
+    ),
+    **_equivalent(
+        "Equivalent: only the human-readable error text changes; the guard and exception type "
+        "remain identical.",
+        "pool_adapters.workspace_quota",
+        "xǁWorkspaceQuotaǁ__init____mutmut_4",
+        "xǁWorkspaceQuotaǁ__init____mutmut_7",
+        "xǁWorkspaceQuotaǁensure__mutmut_4",
+        "xǁWorkspaceQuotaǁ_require_capacity__mutmut_5",
+        "xǁWorkspaceQuotaǁ_accounted_usage__mutmut_23",
+        "xǁWorkspaceQuotaǁ_remove_owned_paths__mutmut_8",
+        "xǁWorkspaceQuotaǁ_remove_owned_paths__mutmut_9",
+        "xǁWorkspaceQuotaǁ_remove_owned_paths__mutmut_10",
+        "xǁWorkspaceQuotaLeaseǁtrack_temporary_path__mutmut_18",
+        "xǁWorkspaceQuotaLeaseǁtrack_temporary_path__mutmut_24",
+        "xǁWorkspaceQuotaLeaseǁreserve__mutmut_9",
+        "xǁWorkspaceQuotaLeaseǁreserve__mutmut_10",
+        "xǁWorkspaceQuotaLeaseǁreserve__mutmut_11",
+        "xǁWorkspaceQuotaLeaseǁreserve_up_to__mutmut_10",
+        "xǁWorkspaceQuotaLeaseǁ_settle__mutmut_4",
+        "xǁWorkspaceQuotaLeaseǁ_settle__mutmut_18",
+        "xǁWorkspaceQuotaLeaseǁpromote_temporary_path__mutmut_16",
+        "xǁWorkspaceQuotaLeaseǁpromote_temporary_path__mutmut_24",
+        "xǁWorkspaceQuotaLeaseǁdiscard_temporary_path__mutmut_11",
+        "xǁWorkspaceQuotaLeaseǁforget_temporary_path__mutmut_10",
+        "xǁWorkspaceQuotaLeaseǁforget_temporary_path__mutmut_15",
+        "xǁWorkspaceQuotaLeaseǁclose__mutmut_4",
+        "xǁWorkspaceQuotaLeaseǁ_tracked_path__mutmut_4",
+        "xǁWorkspaceQuotaWriterǁwrite__mutmut_4",
+        "xǁWorkspaceQuotaWriterǁwrite__mutmut_24",
+        "xǁWorkspaceQuotaWriterǁwrite__mutmut_25",
+        "xǁWorkspaceQuotaWriterǁwrite__mutmut_26",
+        "xǁWorkspaceQuotaWriterǁ_require_stream__mutmut_3",
+        "x_workspace_size__mutmut_1",
+        "x_workspace_size__mutmut_2",
+        "x_workspace_size__mutmut_3",
+        "x_workspace_size__mutmut_11",
+        "x__temporary_path__mutmut_13",
+        "x__workspace_path__mutmut_6",
+        "x__workspace_path__mutmut_13",
+        "x__owned_path__mutmut_9",
+        "x__owned_path__mutmut_14",
+        "x__owned_path__mutmut_21",
+        "x__owned_path__mutmut_30",
+        "x__path_size__mutmut_1",
+        "x__path_size__mutmut_2",
+        "x__path_size__mutmut_3",
+        "x__path_size__mutmut_11",
+    ),
+    **_equivalent(
+        "Equivalent: the string is used only for an internal closed flag, for a descriptor "
+        "that is overwritten on successful initialization, or after the lease is already closed.",
+        "pool_adapters.workspace_quota",
+        "xǁWorkspaceQuotaLeaseǁ__init____mutmut_11",
+        "xǁWorkspaceQuotaLeaseǁ__init____mutmut_13",
+        "xǁWorkspaceQuotaLeaseǁ__init____mutmut_36",
+        "xǁWorkspaceQuotaLeaseǁclose__mutmut_16",
+    ),
+    **_equivalent(
+        "Equivalent: all descriptor checks distinguish only nonnegative OS descriptors from "
+        "negative no-file sentinels; -1 and -2 both take the same no-lock path.",
+        "pool_adapters.workspace_quota",
+        "xǁWorkspaceQuotaLeaseǁreserve_up_to__mutmut_4",
+        "x__try_acquire_lease_lock__mutmut_3",
+        "x__try_acquire_lease_lock__mutmut_10",
+    ),
+    **_equivalent(
+        "Equivalent: None is falsy, so this settles a reservation with consume=False.",
+        "pool_adapters.workspace_quota",
+        "xǁWorkspaceQuotaLeaseǁrelease__mutmut_3",
+    ),
+    **_equivalent(
+        "Equivalent: the first nonempty write flushes and resets pending bytes before adding "
+        "data, and the remaining changes affect only error text.",
+        "pool_adapters.workspace_quota",
+        "xǁWorkspaceQuotaWriterǁ__init____mutmut_6",
+    ),
+    **_equivalent(
+        "Equivalent: the active-lock pass already records the live state; the second-pass "
+        "suffix check only avoids reading that same state a second time.",
+        "pool_adapters.workspace_quota",
+        "xǁWorkspaceQuotaǁ_active_states__mutmut_64",
+    ),
+    **_equivalent(
+        "Equivalent: None and omitted sort/format options use JSON defaults; this state object "
+        "is parsed structurally and does not depend on serialized key order or whitespace. UTF-8 "
+        "is case-insensitive, and the descriptor is closed explicitly in finally.",
+        "pool_adapters.workspace_quota",
+        "xǁWorkspaceQuotaLeaseǁ_write_state__mutmut_6",
+        "xǁWorkspaceQuotaLeaseǁ_write_state__mutmut_7",
+        "xǁWorkspaceQuotaLeaseǁ_write_state__mutmut_9",
+        "xǁWorkspaceQuotaLeaseǁ_write_state__mutmut_10",
+        "xǁWorkspaceQuotaLeaseǁ_write_state__mutmut_11",
+        "xǁWorkspaceQuotaLeaseǁ_write_state__mutmut_15",
+        "xǁWorkspaceQuotaLeaseǁ_write_state__mutmut_28",
+        "x__read_lease_state__mutmut_3",
+        "x__read_lease_state__mutmut_5",
+    ),
+    **_equivalent(
+        "Equivalent: pathlib discards the left operand when joining an absolute path, and "
+        "resolve(strict=None) has the same non-strict behavior as strict=False.",
+        "pool_adapters.workspace_quota",
+        "x__workspace_path__mutmut_2",
+        "x__workspace_path__mutmut_9",
+        "x__owned_path__mutmut_17",
+    ),
 }
 _NAME_PARTS = 3  # osm_polygon_eunis.<module>.<mutant>
 _RESULT_LINE = re.compile(r"^\s*([\w.]+):\s*(.+?)\s*$")
@@ -279,10 +394,10 @@ def _check_quality(counts: dict[str, int], reported: dict[str, str]) -> list[str
 
 
 def module_of(name: str) -> str:
-    """Return the module part of ``osm_polygon_eunis.<module>.<mutant>``."""
+    """Return the fully qualified module before the mutation identifier."""
 
     parts = name.split(".")
-    return parts[1] if len(parts) >= _NAME_PARTS else ""
+    return ".".join(parts[1:-1]) if len(parts) >= _NAME_PARTS else ""
 
 
 def module_scores(reported: dict[str, str]) -> dict[str, float]:

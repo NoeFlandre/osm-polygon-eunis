@@ -30,6 +30,7 @@ def test_parse_walltime_rejects_malformed_values(walltime: str) -> None:
         parse_walltime_seconds(walltime)
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize(
     ("walltime", "stop_margin", "termination_grace"),
     [
@@ -104,6 +105,7 @@ def test_remaining_runtime_never_becomes_negative() -> None:
     )
 
 
+@pytest.mark.slow
 def test_run_command_preserves_child_exit_status() -> None:
     result = run_command(
         [sys.executable, "-c", "raise SystemExit(17)"],
@@ -114,6 +116,7 @@ def test_run_command_preserves_child_exit_status() -> None:
     assert result == 17
 
 
+@pytest.mark.slow
 def test_run_command_announces_signal_readiness_before_starting_child(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -134,6 +137,7 @@ def test_run_command_announces_signal_readiness_before_starting_child(
     assert result == 0
 
 
+@pytest.mark.slow
 def test_run_command_terminates_child_process_group_at_deadline(capfd) -> None:
     child = (
         "import os, signal, time; "
@@ -155,6 +159,7 @@ def test_run_command_terminates_child_process_group_at_deadline(capfd) -> None:
         os.kill(int(output), 0)
 
 
+@pytest.mark.slow
 def test_child_exit_124_is_not_marked_as_a_deadline(tmp_path: Path) -> None:
     helper = Path(__file__).resolve().parents[2] / "scripts/grid5000/worker_deadline.py"
     stop_marker = tmp_path / "worker-stop-state"
@@ -186,6 +191,7 @@ def test_child_exit_124_is_not_marked_as_a_deadline(tmp_path: Path) -> None:
     assert not stop_marker.exists()
 
 
+@pytest.mark.slow
 def test_deadline_writes_a_distinguishing_stop_marker(tmp_path: Path) -> None:
     helper = Path(__file__).resolve().parents[2] / "scripts/grid5000/worker_deadline.py"
     stop_marker = tmp_path / "worker-stop-state"
@@ -225,6 +231,7 @@ def test_deadline_writes_a_distinguishing_stop_marker(tmp_path: Path) -> None:
         os.kill(int(child_started.read_text(encoding="utf-8")), 0)
 
 
+@pytest.mark.slow
 def test_worker_deadline_returns_shell_status_for_external_sigterm(tmp_path: Path) -> None:
     helper = Path(__file__).resolve().parents[2] / "scripts/grid5000/worker_deadline.py"
     stop_marker = tmp_path / "worker-stop-state"

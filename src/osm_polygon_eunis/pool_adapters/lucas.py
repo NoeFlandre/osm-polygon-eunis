@@ -19,6 +19,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 import shapely
 from shapely.geometry import MultiPolygon, Polygon
@@ -447,6 +448,38 @@ class LucasResourceLimitError(RuntimeError):
 DEFAULT_LUCAS_RESOURCE_LIMITS = LucasResourceLimits()
 
 
+class LucasScratchBudget(Protocol):
+    """Track pending file reservations until temporary bytes are flushed or removed."""
+
+    def reserve(self, size_bytes: int) -> int:
+        """Reserve and return available capacity before writing evidence bytes."""
+
+    def consume(self, size_bytes: int) -> None:
+        """Convert reserved bytes to flushed file bytes."""
+
+    def release(self, size_bytes: int) -> None:
+        """Return capacity that was reserved but not written."""
+
+    def track_temporary_path(self, path: Path) -> None:
+        """Register the scratch directory that owns subsequent evidence bytes."""
+
+    def forget_temporary_path(self, path: Path) -> None:
+        """Forget a scratch directory after its temporary owner removes it."""
+
+
+@dataclass(frozen=True, slots=True)
+class LucasReaderConfig:
+    """Execution bounds and scratch destination for one read-only scan."""
+
+    fetch_size: int = 512
+    resource_limits: LucasResourceLimits = DEFAULT_LUCAS_RESOURCE_LIMITS
+    scratch_parent: Path | None = None
+    scratch_budget: LucasScratchBudget | None = None
+
+
+DEFAULT_LUCAS_READER_CONFIG = LucasReaderConfig()
+
+
 class LucasGeoPackageReader:
     """Read a manifest-pinned EPSG:3035 footprint layer without downloading it."""
 
@@ -457,12 +490,11 @@ class LucasGeoPackageReader:
         manifest: LucasReferenceManifest,
         taxonomy: LucasTaxonomy,
         *,
-        fetch_size: int = 512,
-        resource_limits: LucasResourceLimits = DEFAULT_LUCAS_RESOURCE_LIMITS,
+        config: LucasReaderConfig = DEFAULT_LUCAS_READER_CONFIG,
     ) -> None:
         """Prepare a read-only reader without downloading reference data."""
 
-        if fetch_size <= 0:
+        if config.fetch_size <= 0:
             raise ValueError("GeoPackage query fetch size must be positive")
         if taxonomy.taxonomy_id != manifest.taxonomy_id:
             raise ValueError("LUCAS taxonomy ID does not match the source manifest")
@@ -474,8 +506,11 @@ class LucasGeoPackageReader:
         self.taxonomy_path = taxonomy_path
         self.manifest = manifest
         self.taxonomy = taxonomy
-        self.fetch_size = fetch_size
-        self.resource_limits = resource_limits
+        self.config = config
+        self.fetch_size = config.fetch_size
+        self.resource_limits = config.resource_limits
+        self.scratch_parent = config.scratch_parent
+        self.scratch_budget = config.scratch_budget
         self._connection: sqlite3.Connection | None = None
         self._sidecar_directory: tempfile.TemporaryDirectory[str] | None = None
 
@@ -487,15 +522,25 @@ class LucasGeoPackageReader:
         verify_lucas_file(self.path, self.manifest)
         verify_lucas_taxonomy_file(self.taxonomy_path, self.manifest)
         self._connection = sqlite3.connect(f"{self.path.resolve().as_uri()}?mode=ro", uri=True)
-        sidecar_directory = tempfile.TemporaryDirectory(prefix="lucas-reference-evidence-")
+        if self.scratch_parent is not None:
+            self.scratch_parent.mkdir(parents=True, exist_ok=True)
+        sidecar_directory = tempfile.TemporaryDirectory(
+            prefix="lucas-reference-evidence-", dir=self.scratch_parent
+        )
         self._sidecar_directory = sidecar_directory
+        scratch_path_tracked = False
         try:
+            if self.scratch_budget is not None:
+                self.scratch_budget.track_temporary_path(Path(sidecar_directory.name))
+                scratch_path_tracked = True
             self._validate_schema()
         except Exception:
             self._connection.close()
             self._connection = None
             sidecar_directory.cleanup()
             self._sidecar_directory = None
+            if self.scratch_budget is not None and scratch_path_tracked:
+                self.scratch_budget.forget_temporary_path(Path(sidecar_directory.name))
             raise
         return self
 
@@ -512,8 +557,11 @@ class LucasGeoPackageReader:
             self._connection.close()
             self._connection = None
         if self._sidecar_directory is not None:
+            sidecar_path = Path(self._sidecar_directory.name)
             self._sidecar_directory.cleanup()
             self._sidecar_directory = None
+            if self.scratch_budget is not None:
+                self.scratch_budget.forget_temporary_path(sidecar_path)
 
     def query(self, geometry: BaseGeometry) -> LucasFeatureQuery:
         """Query all RTree candidates, retaining IDs even for zero-area touches."""
@@ -548,6 +596,7 @@ class LucasGeoPackageReader:
                 self.manifest.layer,
                 Path(sidecar_directory.name),
                 self.resource_limits,
+                self.scratch_budget,
             ),
         )
         filter_summary = _reason_summary("filtered", scan.filter_counts)
@@ -749,6 +798,7 @@ class _LucasScanContext:
     layer: LucasLayerManifest
     sidecar_directory: Path
     resource_limits: LucasResourceLimits
+    scratch_budget: LucasScratchBudget | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -766,12 +816,15 @@ class _LucasScanState:
 
     def __init__(self, context: _LucasScanContext) -> None:
         self.context = context
-        self.attempted_writer = _JsonlReferenceIdWriter(context.sidecar_directory, "attempted")
+        self.attempted_writer = _JsonlReferenceIdWriter(
+            context.sidecar_directory, "attempted", context.scratch_budget
+        )
         self.supports = _LucasSupportAccumulator(
             context.geometry,
             context.taxonomy,
             sidecar_directory=context.sidecar_directory,
             resource_limits=context.resource_limits,
+            scratch_budget=context.scratch_budget,
         )
         self.filter_counts: defaultdict[str, int] = defaultdict(int)
         self.partial_counts: defaultdict[str, int] = defaultdict(int)
@@ -823,6 +876,12 @@ class _LucasScanState:
                 return False
         return True
 
+    def discard(self) -> None:
+        """Close and remove every temporary ID writer after an exceptional scan."""
+
+        self.attempted_writer.discard()
+        self.supports.discard()
+
     def finish(self, *, scan_failed: bool) -> _LucasScanResult:
         if scan_failed or self.resource_failure is not None or self.partial_counts:
             self.supports.discard()
@@ -852,19 +911,23 @@ class _LucasScanState:
 def _scan_rtree_candidates(cursor: sqlite3.Cursor, context: _LucasScanContext) -> _LucasScanResult:
     state = _LucasScanState(context)
     scan_failed = False
-    while True:
-        try:
-            rows = cursor.fetchmany(state.next_fetch_size())
-        except sqlite3.DatabaseError:
-            scan_failed = True
-            break
-        if not rows:
-            break
-        continue_scan = _process_candidate_batch(state, rows)
-        del rows
-        if not continue_scan:
-            break
-    return state.finish(scan_failed=scan_failed)
+    try:
+        while True:
+            try:
+                rows = cursor.fetchmany(state.next_fetch_size())
+            except sqlite3.DatabaseError:
+                scan_failed = True
+                break
+            if not rows:
+                break
+            continue_scan = _process_candidate_batch(state, rows)
+            del rows
+            if not continue_scan:
+                break
+        return state.finish(scan_failed=scan_failed)
+    except Exception:
+        state.discard()
+        raise
 
 
 def _process_candidate_batch(state: _LucasScanState, rows: Sequence[tuple[object, ...]]) -> bool:
@@ -1131,7 +1194,14 @@ class _SupportUnionForest:
 class _JsonlReferenceIdWriter:
     """Write one JSON string per line while maintaining a streaming digest."""
 
-    def __init__(self, directory: Path, prefix: str) -> None:
+    _RESERVATION_BLOCK_BYTES = 64 * 1024
+
+    def __init__(
+        self,
+        directory: Path,
+        prefix: str,
+        scratch_budget: LucasScratchBudget | None = None,
+    ) -> None:
         directory.mkdir(parents=True, exist_ok=True)
         handle = tempfile.NamedTemporaryFile(  # noqa: SIM115 -- kept open until finish/discard
             mode="wb", prefix=f"{prefix}-", suffix=".jsonl", dir=directory, delete=False
@@ -1139,18 +1209,23 @@ class _JsonlReferenceIdWriter:
         self.path = Path(handle.name)
         self._handle = handle
         self._digest = hashlib.sha256()
+        self._scratch_budget = scratch_budget
+        self._reserved_bytes = 0
+        self._pending_bytes = 0
         self.record_count = 0
 
     def write_id(self, reference_id: str) -> None:
         line = (json.dumps(reference_id, ensure_ascii=False, separators=(",", ":")) + "\n").encode(
             "utf-8"
         )
+        self._reserve_before_write(len(line))
         self._handle.write(line)
+        self._pending_bytes += len(line)
         self._digest.update(line)
         self.record_count += 1
 
     def finish(self) -> MeasurementSidecar | None:
-        self._handle.flush()
+        self._settle_reservation()
         self._handle.close()
         if self.record_count == 0:
             self.path.unlink(missing_ok=True)
@@ -1165,6 +1240,33 @@ class _JsonlReferenceIdWriter:
         if not self._handle.closed:
             self._handle.close()
         self.path.unlink(missing_ok=True)
+        if self._scratch_budget is not None and self._reserved_bytes:
+            self._scratch_budget.release(self._reserved_bytes)
+            self._reserved_bytes = 0
+        self._pending_bytes = 0
+
+    def _reserve_before_write(self, next_line_bytes: int) -> None:
+        if self._scratch_budget is None:
+            return
+        if self._reserved_bytes - self._pending_bytes < next_line_bytes:
+            self._settle_reservation()
+            reservation = max(self._RESERVATION_BLOCK_BYTES, next_line_bytes)
+            granted = self._scratch_budget.reserve(reservation)
+            if granted < next_line_bytes:
+                self._scratch_budget.release(granted)
+                raise LucasResourceLimitError("scratch byte limit exceeded")
+            self._reserved_bytes = granted
+
+    def _settle_reservation(self) -> None:
+        self._handle.flush()
+        if self._scratch_budget is not None and self._reserved_bytes:
+            if self._pending_bytes:
+                self._scratch_budget.consume(self._pending_bytes)
+            unused = self._reserved_bytes - self._pending_bytes
+            if unused:
+                self._scratch_budget.release(unused)
+            self._reserved_bytes = 0
+            self._pending_bytes = 0
 
 
 class _LucasSupportAccumulator:
@@ -1177,11 +1279,13 @@ class _LucasSupportAccumulator:
         *,
         sidecar_directory: Path | None = None,
         resource_limits: LucasResourceLimits | None = None,
+        scratch_budget: LucasScratchBudget | None = None,
     ) -> None:
         self._original = original
         self._taxonomy = taxonomy
         self._sidecar_directory = sidecar_directory
         self._resource_limits = resource_limits
+        self._scratch_budget = scratch_budget
         self._unions: dict[tuple[str, str], _SupportUnionForest] = {}
         self._evidence_ids: dict[tuple[str, str], list[str]] = defaultdict(list)
         self._evidence_writers: dict[tuple[str, str], _JsonlReferenceIdWriter] = {}
@@ -1253,7 +1357,11 @@ class _LucasSupportAccumulator:
         writer = self._evidence_writers.get(key)
         if writer is None:
             level_code = hashlib.sha256(f"{key[0]}:{key[1]}".encode()).hexdigest()
-            writer = _JsonlReferenceIdWriter(self._sidecar_directory, f"support-{level_code}")
+            writer = _JsonlReferenceIdWriter(
+                self._sidecar_directory,
+                f"support-{level_code}",
+                self._scratch_budget,
+            )
             self._evidence_writers[key] = writer
         writer.write_id(reference_id)
 

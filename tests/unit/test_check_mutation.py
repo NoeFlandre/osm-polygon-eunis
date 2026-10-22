@@ -100,6 +100,10 @@ def test_rejects_modules_without_a_configured_baseline() -> None:
 
 def test_module_helpers_split_mutant_names() -> None:
     assert module_of("osm_polygon_eunis.grid_overlap.x__burn__mutmut_1") == "grid_overlap"
+    assert (
+        module_of("osm_polygon_eunis.pool_adapters.workspace_quota.x__burn__mutmut_1")
+        == "pool_adapters.workspace_quota"
+    )
     assert module_of("osm_polygon_eunis.mutant_5") == ""
     assert module_scores(
         {"osm_polygon_eunis.a.x": "killed", "osm_polygon_eunis.a.y": "survived"}
@@ -155,9 +159,14 @@ def test_mutation_scope_lists_the_ratcheted_modules_and_their_tests() -> None:
     root = Path(__file__).resolve().parents[2]
     config = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     mutation = config["tool"]["mutmut"]
-    mutated = {Path(path).stem for path in mutation["source_paths"]}
+    mutated = {
+        Path(path).relative_to("src/osm_polygon_eunis").with_suffix("").as_posix().replace("/", ".")
+        for path in mutation["source_paths"]
+    }
 
     assert mutated == set(MODULE_MINIMUM_SCORES)
+    assert "tests/unit/test_source_staging.py" in mutation["pytest_add_cli_args_test_selection"]
+    assert "tests/unit/test_workspace_quota.py" in mutation["pytest_add_cli_args_test_selection"]
     assert {
         "tests/unit/test_grid_overlap.py",
         "tests/unit/test_transform_contract.py",

@@ -71,6 +71,16 @@ def export_polygon_attempts(
     )
 
 
+def persist_measurement_sidecars(
+    labeled_polygons: Iterable[tuple[PoolPolygonInput, PoolPolygonLabelRecords]],
+    sink: FileArtifactSink,
+    pool_name: str,
+) -> Iterator[tuple[PoolPolygonInput, PoolPolygonLabelRecords]]:
+    """Persist and pin adapter evidence files before a checkpoint advances."""
+
+    yield from _persist_measurement_sidecars(labeled_polygons, sink, pool_name)
+
+
 def export_labeled_polygons(
     metadata_input: PoolBuildInput,
     labeled_polygons: Iterable[tuple[PoolPolygonInput, PoolPolygonLabelRecords]],
