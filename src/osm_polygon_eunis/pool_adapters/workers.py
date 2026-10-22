@@ -805,7 +805,8 @@ def _verified_direct_url_revision(
     ):
         return None
     commit_id = vcs.get("commit_id")
-    if not isinstance(commit_id, str) or vcs.get("dirty") is not False:
+    dirty = vcs.get("dirty")
+    if not isinstance(commit_id, str) or (dirty is not None and dirty is not False):
         return None
     directory_info = origin.get("dir_info", {})
     editable_location = (
@@ -814,6 +815,8 @@ def _verified_direct_url_revision(
         else None
     )
     if isinstance(editable_location, str):
+        if dirty is not False:
+            return None
         editable_root = Path(editable_location).resolve()
         if package_path.is_relative_to(editable_root):
             # PEP 610 metadata can outlive source edits. Bind editable imports to

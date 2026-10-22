@@ -502,6 +502,31 @@ def test_worldcover_direct_url_requires_the_live_clean_pinned_checkout(
         == _PRODUCER_REVISION
     )
     assert workers_module._verified_direct_url_revision(distribution, origin, shadow) is None
+    origin_without_dirty_field = {
+        "url": "git+https://github.com/NoeFlandre/osm-worldcover.git",
+        "vcs_info": {"vcs": "git", "commit_id": _PRODUCER_REVISION},
+        "dir_info": {"editable_project_location": str(project)},
+    }
+    installed_origin = {
+        "url": "git+https://github.com/NoeFlandre/osm-worldcover.git",
+        "vcs_info": {"vcs": "git", "commit_id": _PRODUCER_REVISION},
+        "dir_info": {},
+    }
+    installed_distribution = SimpleNamespace(
+        locate_file=lambda _path: expected_module,
+    )
+    assert (
+        workers_module._verified_direct_url_revision(
+            installed_distribution, installed_origin, expected_module
+        )
+        == _PRODUCER_REVISION
+    )
+    assert (
+        workers_module._verified_direct_url_revision(
+            distribution, origin_without_dirty_field, expected_module
+        )
+        is None
+    )
     monkeypatch.setattr(workers_module, "_worldcover_git_revision", lambda _path: "0" * 40)
     assert (
         workers_module._verified_direct_url_revision(distribution, origin, expected_module) is None
