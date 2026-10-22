@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import logging
-import re
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping
 from contextlib import ExitStack
-from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -18,6 +16,13 @@ from shapely.geometry import box
 from shapely.geometry.base import BaseGeometry
 
 from .domain import EunisResult
+from .eunis_asset_manifest import (
+    EunisRasterAssetManifest,
+    RasterAssetReferencePins,
+)
+from .eunis_asset_manifest import (
+    validate_classification_inventory as _validate_classification_inventory,
+)
 from .geometry import is_usable
 from .grid_overlap import (
     TILE_SIZE,
@@ -38,6 +43,7 @@ from .raster_class_support import (
     support_areas as _support_areas,
 )
 from .raster_geometry import is_epsg_3035, wgs84_envelope  # noqa: F401
+from .raster_layer import RasterLayer, parse_layer_code  # noqa: F401
 from .raster_reference_helpers import RasterLayerLike
 from .raster_reference_helpers import code_order_on_shared_grid as _code_order_on_shared_grid
 from .raster_reference_helpers import outward_raster_window as _outward_raster_window
@@ -47,30 +53,10 @@ from .raster_reference_helpers import (
 
 logger = logging.getLogger(__name__)
 
-_LAYER_CODE = re.compile(r"^Prob_(?P<code>[A-Z][A-Z0-9.]+)_\d+m\.tif$")
 _DEFAULT_RASTER_TILE_CACHE_BYTES = 1536 * 1024 * 1024
 # GDAL's block cache per open raster reference, in MiB (``GDAL_CACHEMAX``).
 # Sized independently of ``_DEFAULT_RASTER_TILE_CACHE_BYTES`` above.
 _GDAL_CACHE_MAX_MB = 256
-
-
-@dataclass(frozen=True, slots=True)
-class RasterLayer:
-    """One EEA score raster and its stable EUNIS metadata."""
-
-    code: str
-    name: str
-    path: Path
-    source_version: str
-
-
-def parse_layer_code(filename: str) -> str:
-    """Extract the EUNIS code from an official probability-map filename."""
-
-    match = _LAYER_CODE.fullmatch(Path(filename).name)
-    if match is None:
-        raise ValueError(f"could not parse reference layer code from {filename!r}")
-    return match.group("code")
 
 
 class RasterReference:
@@ -82,6 +68,7 @@ class RasterReference:
         threshold: int = 0,
         *,
         tile_cache_bytes: int = _DEFAULT_RASTER_TILE_CACHE_BYTES,
+        asset_manifest: EunisRasterAssetManifest | None = None,
     ) -> None:
         """Prepare raster layers for exact overlap queries.
 
@@ -89,6 +76,7 @@ class RasterReference:
             layers: EEA score rasters that share one source version.
             threshold: Minimum source value for the legacy single-layer query.
             tile_cache_bytes: Maximum estimated memory retained for tile geometries.
+            asset_manifest: Complete source inventory and output-semantics evidence.
 
         Raises:
             ValueError: If layer versions disagree, the threshold is negative, or the cache
@@ -102,6 +90,8 @@ class RasterReference:
         if tile_cache_bytes <= 0:
             raise ValueError("raster tile cache byte budget must be positive")
         self._layers = layers
+        self._asset_manifest = asset_manifest
+        self._inventory_verified = False
         self._threshold = threshold
         self._tile_cache_byte_budget = tile_cache_bytes
         self._source_version = next(iter(versions), None)
@@ -170,17 +160,35 @@ class RasterReference:
 
         return self._source_version
 
+    def validate_classification_inventory(
+        self,
+        *,
+        expected_native_manifest_sha256: str | None = None,
+        expected_asset_inventory_sha256: str | None = None,
+        expected_output_semantics_sha256: str | None = None,
+    ) -> None:
+        """Verify every opened source file against its complete, pinned inventory."""
+
+        self._asset_manifest = _validate_classification_inventory(
+            self._layers,
+            self._source_version,
+            self._asset_manifest,
+            reference_pins=RasterAssetReferencePins(
+                expected_native_manifest_sha256,
+                expected_asset_inventory_sha256,
+                expected_output_semantics_sha256,
+            ),
+            verify_asset_files=not self._inventory_verified,
+        )
+        self._inventory_verified = True
+
     def __enter__(self) -> RasterReference:
         """Open raster datasets and return this reference for overlap queries."""
         if self._stack is not None:
             raise RuntimeError("raster reference is already open")
         stack = ExitStack()
         stack.enter_context(rasterio.Env(GDAL_CACHEMAX=_GDAL_CACHE_MAX_MB))
-        datasets: list[tuple[RasterLayer, rasterio.DatasetReader]] = []
-        for layer in self._layers:
-            dataset = stack.enter_context(rasterio.open(layer.path))
-            self._validate_crs(dataset, layer.path)
-            datasets.append((layer, dataset))
+        datasets = self._open_datasets(stack)
         self._stack = stack
         self._datasets = tuple(datasets)
         return self
@@ -199,6 +207,7 @@ class RasterReference:
             self._tile_cache_bytes = 0
             self._grid_order = None
             self._grid_checked = False
+            self._inventory_verified = False
 
     def _count_intersection_error(self) -> None:
         self.intersection_errors += 1

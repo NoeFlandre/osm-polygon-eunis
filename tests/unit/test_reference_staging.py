@@ -196,6 +196,7 @@ def test_worker_reference_batch_opens_local_groups_once_and_closes_on_exit(
     assert [(layer.code, layer.name, layer.path) for layer in layers] == [
         ("R11", "steppe", tmp_path / "02-raster-r" / "R11.tif")
     ]
+    assert layers[0].asset_filename == "Prob_R11.tif"
     assert opened[0].kwargs == {"threshold": 3}
     assert opened[1].args[0] == tmp_path / "03-vector-r" / "habitats.gpkg"
     assert len(reference_staging._WORKER_REFERENCES) == 1
@@ -398,6 +399,31 @@ def test_indexed_reference_batches_cover_raster_and_vector_transitions() -> None
     batches = reference_staging.indexed_reference_group_batches((*rasters, *vectors))
 
     assert batches == ((0, rasters[:2]), (2, (rasters[2],)), (3, vectors))
+
+
+def test_reference_batches_handle_empty_and_vector_to_raster_transition() -> None:
+    vector = EeaGroup(
+        "vector",
+        "vector",
+        "folder",
+        "service",
+        {},
+        (),
+        _asset("/habitat.gpkg", code=None),
+    )
+    raster = EeaGroup(
+        "raster",
+        "raster",
+        "folder",
+        "service",
+        {},
+        (_asset("/Prob_R11_100m.tif"),),
+        None,
+    )
+
+    assert reference_staging._reference_group_batches(()) == ()
+    assert reference_staging._reference_group_batches((vector, vector)) == ((vector, vector),)
+    assert reference_staging._reference_group_batches((vector, raster)) == ((vector,), (raster,))
 
 
 def test_stage_reference_groups_downloads_each_asset_and_cleans_temporary_files(

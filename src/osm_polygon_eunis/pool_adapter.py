@@ -18,6 +18,14 @@ from .eea import (
     ClassificationTaxonomyLineagePin,
     VerifiedClassificationTaxonomy,
 )
+from .eunis_asset_manifest import (
+    EEA_2021_ASSET_BYTES,
+    EEA_2021_ASSET_COUNT,
+    EEA_2021_MAP_RELEASE,
+    EEA_2021_NATIVE_ASSET_INVENTORY_SHA256,
+    EEA_2021_NATIVE_MANIFEST_SHA256,
+    EEA_2021_OUTPUT_SEMANTICS_EVIDENCE_SHA256,
+)
 from .geometry import OVERLAP_KERNEL_VERSION, WGS84_MAX_SEGMENT_LENGTH_DEGREES
 from .pool_contract import (
     AmbiguityBasis,
@@ -54,9 +62,6 @@ EUNIS_SUPPORT_SEMANTICS = SupportSemantics.MODELED_SCORE_DERIVED_CLASSIFICATION
 EUNIS_SUPPORT_AREA_POLICY = "highest_source_score_per_cell_then_unique_class_area_per_level:v1"
 EUNIS_AREA_MEASUREMENT_ID = "eunis-epsg3035-densified-source-boundary-v1"
 _EUNIS_DIRECT_MAP_LEVEL = 3
-EEA_2021_NATIVE_MANIFEST_SHA256 = "4a91e553b2e0271e7ca935e542dd092fe45288c5f9bb4a09f40f6b74da4eae22"
-EEA_2021_ASSET_COUNT = 136
-EEA_2021_ASSET_BYTES = 5_007_209_626
 EUNIS_WEBSITE_FIELD_TO_SENTENCE_COLUMN = MappingProxyType(
     {
         "website": "website_sentences",
@@ -648,11 +653,14 @@ def make_eunis_2021_reference_pin(
 
     if not taxonomy.production_eligible:
         taxonomy.require_production_lineage()
+    output_semantics_digest = EEA_2021_OUTPUT_SEMANTICS_EVIDENCE_SHA256 or "unverified"
     return ReferencePin(
-        release_id="EEA EUNIS habitat probability maps v1 2021",
+        release_id=EEA_2021_MAP_RELEASE,
         source_repository="https://biodiversity.europa.eu/resources/search-habitat",
         source_revision=(
             f"native-manifest-sha256:{EEA_2021_NATIVE_MANIFEST_SHA256};"
+            f"asset-inventory-sha256:{EEA_2021_NATIVE_ASSET_INVENTORY_SHA256};"
+            f"source-output-semantics-evidence-sha256:{output_semantics_digest};"
             f"asset-count:{EEA_2021_ASSET_COUNT};asset-bytes:{EEA_2021_ASSET_BYTES};"
             "crs:EPSG:3035;score-range:0..1;identity-scale-offset;"
             "rule:highest-source-score-derived-classification-v1"

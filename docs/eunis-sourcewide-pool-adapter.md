@@ -138,11 +138,14 @@ structure were checked: 3,950 labels, 3,949 level entries, and 3,942 parent
 links. The cache records EEA classification
 `bfe4c237-e378-4a83-ab21-b3807f96c2e2` and workbook SHA-256
 `1427d22db8d77d1053ab1683aa60713bdec3d810605dd6b7bc16683b4ca14665`.
-Original workbook bytes, its direct URL, and external crosswalk values remain
-unavailable, so the workbook digest has not been freshly rehashed and the
-cache-to-workbook comparison has not run. No production-eligible taxonomy was
-created during this recovery; production remains gated until the original
-workbook bytes pass the pinned check.
+The original 2021_1 workbook was recovered from the official EEA public share
+as `EUNIS terrestrial habitat classification 2021_1 including crosswalks.xlsx`
+(1,439,940 bytes). Its freshly computed SHA-256 matches the pinned digest above.
+The exact asset URL is
+`https://sdi.eea.europa.eu/datashare/public.php/dav/files/sptXqwkQr5g7Bp5/eea_t_eunis-hab-t_p_2004-on-going_v01_r00/EUNIS%20terrestrial%20habitat%20classification%202021_1%20including%20crosswalks.xlsx`.
+The taxonomy cache-to-workbook comparison and crosswalk extraction have not
+run. No production-eligible taxonomy was created during this recovery; that
+lineage check remains a separate production gate.
 
 The source-specific text adapter joins downstream text and relevance rows only
 after the complete raw inventory and geometry attempts. It validates pinned
@@ -237,11 +240,24 @@ and [EEA salt-marsh map metadata](https://doi.org/10.2909/5b3e4da9-4c14-498c-b20
 Those catalog records do not verify the exact 136-file inventory used by this
 adapter, its complete output-family mix, each raster's band count, per-file
 scale/offset tags, NoData values, or pixel eligibility masks. The adapter
-requires one numeric band, identity scale/offset, and values in the catalog's
-0–1 range. These are input checks; identity tags and every asset's stored
-values remain unverified until the exact files are inspected. Masked, NoData,
-and uncovered cells stay unknown. No source ineligible mask is inferred from
-them.
+requires a complete pinned asset list, one numeric band, identity scale/offset,
+and values in the catalog's 0–1 range. Before classification it checks every
+opened raster's filename, byte count, and SHA-256 against that list, then
+requires source evidence for the output family of every asset and rejects a
+mixed family. The checked-in 136-file inventory pins filenames, byte counts,
+and SHA-256 values, but has no per-asset output-semantics evidence. Production
+label attempts therefore fail before writing attempt checkpoints. The catalog
+does not verify each asset's band count, scale/offset tags, NoData values, or
+pixel eligibility masks; these remain unverified until the exact files and
+source evidence are reviewed. Masked, NoData, and uncovered cells stay
+unknown. No source ineligible mask is inferred from them.
+
+The 136-file pin covers the configured GeoTIFF competitors only. The official
+catalog also lists separate GeoPackage products for wetlands (`Q`), salt
+marsh (`MA`), and sparsely vegetated habitats (`U`); these are not included in
+that raster inventory. Whether those products belong in the intended complete
+2021 classification coverage remains unresolved, so the current 136-file pin
+must not be described as a complete inventory of every EEA habitat product.
 
 A separate raw-polygon inventory audit dated 2026-10-22 read footers and native
 key columns for all 1,158 shards across Description, Website, and Wiki. It

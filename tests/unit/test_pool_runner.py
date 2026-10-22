@@ -22,6 +22,14 @@ from osm_polygon_eunis.eea import (
     parse_classification_taxonomy_rows,
     verify_classification_taxonomy_lineage,
 )
+from osm_polygon_eunis.eunis_asset_manifest import (
+    EEA_2021_MAP_RELEASE,
+    EEA_2021_NATIVE_ASSET_INVENTORY_SHA256,
+    EEA_2021_NATIVE_MANIFEST_SHA256,
+    EunisRasterAssetManifest,
+    EunisRasterAssetPin,
+    SourceOutputSemanticsEvidence,
+)
 from osm_polygon_eunis.pool_adapter import (
     EUNIS_POOL_SOURCE_LAYOUTS,
     EunisTaxonomy,
@@ -63,7 +71,7 @@ from osm_polygon_eunis.pool_runner import (
     scan_raw_inventory,
 )
 from osm_polygon_eunis.raster_class_support import ClassificationAreas, ScoreDiagnostics
-from osm_polygon_eunis.raster_reference import RasterReference
+from osm_polygon_eunis.raster_reference import RasterLayer, RasterReference
 from osm_polygon_eunis.text_join import (
     BoundedJoinedTextRecords,
     JoinAllocationBounds,
@@ -619,7 +627,10 @@ def test_handoff_source_tree_inventory_pins_match_checked_in_provenance() -> Non
         sum(row["size_bytes"] for row in reference["native_assets"])
         == (reference["native_asset_total_bytes"])
     )
-    assert reference["taxonomy"]["workbook_direct_url"] is None
+    assert reference["taxonomy"]["workbook_bytes"] == 1_439_940
+    assert reference["taxonomy"]["workbook_direct_url"].endswith(
+        "EUNIS%20terrestrial%20habitat%20classification%202021_1%20including%20crosswalks.xlsx"
+    )
     assert reference["taxonomy"]["crosswalk_rows"] is None
 
 
@@ -764,6 +775,168 @@ def test_label_attempts_follow_raw_inventory_and_keep_missing_geometry_outcome(
     assert report["total_attempted_polygons"] == 2
     assert report["attempt_counts_by_status"] == dict(attempts.shards[0].attempt_counts)
     assert report["outcome_counts_by_level_status"] == dict(attempts.shards[0].outcome_counts)
+
+
+def test_incomplete_raster_inventory_fails_before_attempt_checkpoint_writes(
+    tmp_path: Path,
+) -> None:
+    source = _frozen_source(tmp_path, [_source_row(11, _geojson_polygon())])
+    raw_scan = scan_raw_inventory(source, tmp_path / "raw-checkpoints", _code_pin())
+    paths = {}
+    for code in ("A11", "A12"):
+        path = tmp_path / f"{code}.tif"
+        values = np.asarray([[0.8]], dtype=np.float32)
+        with rasterio.open(
+            path,
+            "w",
+            driver="GTiff",
+            height=1,
+            width=1,
+            count=1,
+            dtype=values.dtype,
+            crs="EPSG:3035",
+            transform=from_origin(0, 10, 10, 10),
+        ) as dataset:
+            dataset.write(values, 1)
+        paths[code] = path
+    output_evidence = SourceOutputSemanticsEvidence(
+        "synthetic-suitability-score",
+        "test-fixture://eunis/output-semantics",
+        "b" * 64,
+    )
+    manifest = EunisRasterAssetManifest(
+        "a" * 64,
+        tuple(
+            EunisRasterAssetPin(
+                code=code,
+                filename=f"Prob_{code}_100m.tif",
+                size_bytes=path.stat().st_size,
+                sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                output_evidence=output_evidence,
+            )
+            for code, path in paths.items()
+        ),
+    )
+    reference = RasterReference(
+        (
+            RasterLayer(
+                "A11",
+                "fixture class",
+                paths["A11"],
+                "EEA test map release",
+                "Prob_A11_100m.tif",
+            ),
+        ),
+        asset_manifest=manifest,
+    )
+    attempts_root = tmp_path / "attempts-not-created"
+
+    with pytest.raises(ValueError, match=r"missing=\['A12'\]"):
+        run_eunis_label_attempts(
+            raw_scan,
+            reference,
+            _reference_pin(tmp_path),
+            _TAXONOMY,
+            attempts_root,
+        )
+
+    assert not attempts_root.exists()
+
+
+def test_production_eunis_attempts_fail_closed_without_output_semantics_pin(
+    tmp_path: Path,
+) -> None:
+    source = _frozen_source(tmp_path, [_source_row(11, _geojson_polygon())])
+    raw_scan = scan_raw_inventory(source, tmp_path / "raw-checkpoints", _code_pin())
+    test_pin = _reference_pin(tmp_path)
+    reference_pin = replace(
+        test_pin,
+        release_id=EEA_2021_MAP_RELEASE,
+        source_revision=(
+            f"native-manifest-sha256:{EEA_2021_NATIVE_MANIFEST_SHA256};"
+            f"asset-inventory-sha256:{EEA_2021_NATIVE_ASSET_INVENTORY_SHA256};"
+            "source-output-semantics-evidence-sha256:unverified"
+        ),
+    )
+    attempts_root = tmp_path / "attempts-not-created"
+
+    with pytest.raises(ValueError, match="verified per-asset source-output semantics evidence"):
+        run_eunis_label_attempts(
+            raw_scan,
+            cast(RasterReference, FakeReference()),
+            reference_pin,
+            _TAXONOMY,
+            attempts_root,
+        )
+
+    assert not attempts_root.exists()
+
+
+def test_production_eunis_attempts_reject_unbound_reference_objects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _frozen_source(tmp_path, [_source_row(11, _geojson_polygon())])
+    raw_scan = scan_raw_inventory(source, tmp_path / "raw-checkpoints", _code_pin())
+    semantics_sha256 = "e" * 64
+    monkeypatch.setattr(pool_runner, "EEA_2021_OUTPUT_SEMANTICS_EVIDENCE_SHA256", semantics_sha256)
+    reference_pin = replace(
+        _reference_pin(tmp_path),
+        release_id=EEA_2021_MAP_RELEASE,
+        source_revision=(
+            f"native-manifest-sha256:{EEA_2021_NATIVE_MANIFEST_SHA256};"
+            f"asset-inventory-sha256:{EEA_2021_NATIVE_ASSET_INVENTORY_SHA256};"
+            f"source-output-semantics-evidence-sha256:{semantics_sha256}"
+        ),
+    )
+    reference = cast(
+        RasterReference,
+        FakeReference(source_version=EEA_2021_MAP_RELEASE),
+    )
+    attempts_root = tmp_path / "attempts-not-created"
+
+    with pytest.raises(ValueError, match="requires a RasterReference bound"):
+        run_eunis_label_attempts(
+            raw_scan,
+            reference,
+            reference_pin,
+            _TAXONOMY,
+            attempts_root,
+        )
+
+    assert not attempts_root.exists()
+
+
+def test_production_eunis_reference_pin_checks_all_official_revision_hashes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    semantics_sha256 = "e" * 64
+    monkeypatch.setattr(pool_runner, "EEA_2021_OUTPUT_SEMANTICS_EVIDENCE_SHA256", semantics_sha256)
+    valid_revision = (
+        f"native-manifest-sha256:{EEA_2021_NATIVE_MANIFEST_SHA256};"
+        f"asset-inventory-sha256:{EEA_2021_NATIVE_ASSET_INVENTORY_SHA256};"
+        f"source-output-semantics-evidence-sha256:{semantics_sha256}"
+    )
+    base_pin = replace(
+        _reference_pin(tmp_path),
+        release_id=EEA_2021_MAP_RELEASE,
+    )
+    pool_runner._validate_eunis_reference_pin(replace(base_pin, source_revision=valid_revision))
+
+    for revision, error in (
+        (
+            valid_revision.replace(EEA_2021_NATIVE_MANIFEST_SHA256, "f" * 64),
+            "native asset manifest",
+        ),
+        (
+            valid_revision.replace(EEA_2021_NATIVE_ASSET_INVENTORY_SHA256, "f" * 64),
+            "complete asset inventory",
+        ),
+        (valid_revision.replace(semantics_sha256, "f" * 64), "source-output evidence"),
+    ):
+        with pytest.raises(ValueError, match=error):
+            pool_runner._validate_eunis_reference_pin(replace(base_pin, source_revision=revision))
 
 
 def test_query_error_is_excluded_with_reason_at_every_supported_level(tmp_path: Path) -> None:

@@ -134,6 +134,8 @@ class _Reference(Protocol):
         polygon: BaseGeometry,
     ) -> Window | None: ...
 
+    def validate_classification_inventory(self) -> None: ...
+
 
 def support_areas(
     reference: _Reference,
@@ -172,6 +174,7 @@ def classification_areas(
     if not math.isfinite(polygon_area) or polygon_area <= 0.0:
         raise ValueError("support query requires a positive full polygon area")
     normalized = _normalize_class_groups(classes)
+    reference.validate_classification_inventory()
     if reference._stack is not None:
         return _classification_areas_open(
             reference, polygon, reference._datasets, normalized, polygon_area

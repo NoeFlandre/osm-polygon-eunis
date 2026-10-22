@@ -17050,9 +17050,10 @@
         "8": 23
       },
       "levels_count": 3949,
-      "lineage_validation": "pending: original cache bytes and workbook bytes/direct URL were not present in this metadata handoff",
+      "lineage_validation": "original workbook bytes re-downloaded from the official EEA share and SHA-256 matched; cache-to-workbook comparison remains pending",
       "parent_links_count": 3942,
-      "workbook_direct_url": null,
+      "workbook_bytes": 1439940,
+      "workbook_direct_url": "https://sdi.eea.europa.eu/datashare/public.php/dav/files/sptXqwkQr5g7Bp5/eea_t_eunis-hab-t_p_2004-on-going_v01_r00/EUNIS%20terrestrial%20habitat%20classification%202021_1%20including%20crosswalks.xlsx",
       "workbook_record_id": "bfe4c237-e378-4a83-ab21-b3807f96c2e2",
       "workbook_sha256": "1427d22db8d77d1053ab1683aa60713bdec3d810605dd6b7bc16683b4ca14665"
     }

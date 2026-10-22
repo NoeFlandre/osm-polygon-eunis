@@ -31,6 +31,12 @@ from shapely.errors import GEOSException
 from shapely.geometry.base import BaseGeometry
 
 from .eea import EEA_2021_CLASSIFICATION_LINEAGE_PIN
+from .eunis_asset_manifest import (
+    EEA_2021_MAP_RELEASE,
+    EEA_2021_NATIVE_ASSET_INVENTORY_SHA256,
+    EEA_2021_NATIVE_MANIFEST_SHA256,
+    EEA_2021_OUTPUT_SEMANTICS_EVIDENCE_SHA256,
+)
 from .geometry import is_usable, parse_geometry, to_equal_area
 from .pool_adapter import (
     EUNIS_AREA_MEASUREMENT_ID,
@@ -487,6 +493,7 @@ def run_eunis_label_attempts(
 
     _validate_eunis_reference_pin(reference_pin)
     _validate_reference_release(reference, reference_pin)
+    _validate_classification_asset_inventory(reference, reference_pin)
     code_pin = raw_scan.code_pin
     _validate_attempt_taxonomy_inputs(raw_scan, reference_pin, taxonomy, code_pin, reference)
     checkpoint_root.mkdir(parents=True, exist_ok=True)
@@ -2094,6 +2101,78 @@ def _taxonomy_lineage_report_fields(taxonomy: EunisTaxonomy) -> dict[str, Any]:
 def _validate_eunis_reference_pin(reference_pin: ReferencePin) -> None:
     _validate_eunis_support_policy(reference_pin)
     _validate_eunis_provenance(reference_pin)
+    if reference_pin.release_id != EEA_2021_MAP_RELEASE:
+        return
+    _validate_official_eunis_revision(reference_pin.source_revision)
+
+
+def _validate_official_eunis_revision(source_revision: str) -> None:
+    revision_pins = _reference_revision_fields(source_revision)
+    _require_revision_pin(
+        revision_pins,
+        "native-manifest-sha256",
+        EEA_2021_NATIVE_MANIFEST_SHA256,
+        "production EUNIS reference pin has the wrong native asset manifest",
+    )
+    _require_revision_pin(
+        revision_pins,
+        "asset-inventory-sha256",
+        EEA_2021_NATIVE_ASSET_INVENTORY_SHA256,
+        "production EUNIS reference pin has the wrong complete asset inventory",
+    )
+    if EEA_2021_OUTPUT_SEMANTICS_EVIDENCE_SHA256 is None:
+        raise ValueError(
+            "production EUNIS label attempts require verified per-asset "
+            "source-output semantics evidence"
+        )
+    _require_revision_pin(
+        revision_pins,
+        "source-output-semantics-evidence-sha256",
+        EEA_2021_OUTPUT_SEMANTICS_EVIDENCE_SHA256,
+        "production EUNIS reference pin has the wrong source-output evidence",
+    )
+
+
+def _require_revision_pin(
+    revision_pins: Mapping[str, str],
+    field: str,
+    expected: str,
+    message: str,
+) -> None:
+    if revision_pins.get(field) != expected:
+        raise ValueError(message)
+
+
+def _validate_classification_asset_inventory(
+    reference: object,
+    reference_pin: ReferencePin,
+) -> None:
+    if not isinstance(reference, RasterReference):
+        if reference_pin.release_id == EEA_2021_MAP_RELEASE:
+            raise ValueError(
+                "production EUNIS classification requires a RasterReference bound to its "
+                "opened, pinned raster assets"
+            )
+        return
+    revision_pins = _reference_revision_fields(reference_pin.source_revision)
+    reference.validate_classification_inventory(
+        expected_native_manifest_sha256=revision_pins.get("native-manifest-sha256"),
+        expected_asset_inventory_sha256=revision_pins.get("asset-inventory-sha256"),
+        expected_output_semantics_sha256=(
+            revision_pins.get("source-output-semantics-evidence-sha256")
+            if revision_pins.get("source-output-semantics-evidence-sha256") != "unverified"
+            else None
+        ),
+    )
+
+
+def _reference_revision_fields(source_revision: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for part in source_revision.split(";"):
+        name, separator, value = part.partition(":")
+        if separator and name:
+            fields[name] = value
+    return fields
 
 
 def _validate_eunis_support_policy(reference_pin: ReferencePin) -> None:

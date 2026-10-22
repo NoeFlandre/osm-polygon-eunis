@@ -19,6 +19,11 @@ from osm_polygon_eunis.eea import (
     parse_classification_taxonomy_rows,
     verify_classification_taxonomy_lineage,
 )
+from osm_polygon_eunis.eunis_asset_manifest import (
+    EunisRasterAssetManifest,
+    EunisRasterAssetPin,
+    SourceOutputSemanticsEvidence,
+)
 from osm_polygon_eunis.pool_adapter import (
     EEA_2021_ASSET_BYTES,
     EEA_2021_ASSET_COUNT,
@@ -46,7 +51,8 @@ from osm_polygon_eunis.pool_contract import (
     TextSource,
 )
 from osm_polygon_eunis.pool_contract.builder import canonical_native_key
-from osm_polygon_eunis.raster_reference import RasterLayer, RasterReference
+from osm_polygon_eunis.raster_reference import RasterLayer
+from osm_polygon_eunis.raster_reference import RasterReference as _RasterReference
 
 _TAXONOMY = EunisTaxonomy(
     taxonomy_id="fixture-eunis",
@@ -58,6 +64,47 @@ _TAXONOMY = EunisTaxonomy(
         "C3": EunisTaxonomyPath("B", "B1", "C3"),
     },
 )
+
+
+def _raster_reference(
+    layers: tuple[RasterLayer, ...],
+    threshold: int = 0,
+    *,
+    tile_cache_bytes: int = 1536 * 1024 * 1024,
+    asset_manifest: EunisRasterAssetManifest | None = None,
+) -> _RasterReference:
+    """Build a synthetic complete asset inventory for the raster test fixtures."""
+
+    if asset_manifest is None and layers:
+        layer_by_code = {layer.code: layer for layer in layers}
+        evidence_digest = hashlib.sha256(b"synthetic EUNIS raster output metadata").hexdigest()
+        evidence = SourceOutputSemanticsEvidence(
+            "synthetic-suitability-score",
+            "test-fixture://eunis/source-output-semantics",
+            evidence_digest,
+        )
+        asset_manifest = EunisRasterAssetManifest(
+            hashlib.sha256(b"synthetic EUNIS native manifest").hexdigest(),
+            tuple(
+                EunisRasterAssetPin(
+                    code=layer.code,
+                    filename=layer.asset_filename or layer.path.name,
+                    size_bytes=layer.path.stat().st_size,
+                    sha256=hashlib.sha256(layer.path.read_bytes()).hexdigest(),
+                    output_evidence=evidence,
+                )
+                for layer in sorted(layer_by_code.values(), key=lambda item: item.code)
+            ),
+        )
+    bound_layers = tuple(
+        replace(layer, asset_filename=layer.asset_filename or layer.path.name) for layer in layers
+    )
+    return _RasterReference(
+        bound_layers,
+        threshold=threshold,
+        tile_cache_bytes=tile_cache_bytes,
+        asset_manifest=asset_manifest,
+    )
 
 
 def _attempt(
@@ -531,7 +578,7 @@ def test_score_classification_keeps_ties_unknown_and_nodata_in_denominator(
     second = tmp_path / "Prob_C2_10m.tif"
     _write_raster(first, [[0.9, -9999]])
     _write_raster(second, [[0.9, 0.0]])
-    reference = RasterReference(
+    reference = _raster_reference(
         (
             RasterLayer("C1", "child one", first, "EEA fixture"),
             RasterLayer("C2", "child two", second, "EEA fixture"),
@@ -566,7 +613,7 @@ def test_highest_score_ties_resolve_only_at_a_shared_ancestor(tmp_path: Path) ->
     _write_raster(paths["C1"], [[0.9, 0.9]])
     _write_raster(paths["C2"], [[0.9, 0.1]])
     _write_raster(paths["C3"], [[0.1, 0.9]])
-    reference = RasterReference(
+    reference = _raster_reference(
         tuple(RasterLayer(code, code, paths[code], "EEA fixture") for code in paths)
     )
     same_ancestor_groups = {
@@ -607,7 +654,7 @@ def test_exact_80_percent_accepts_known_class_with_remaining_unknown_area(
     _write_raster(paths["C1"], [[0.9, 0.9, 0.9, 0.9]])
     _write_raster(paths["C2"], [[0.1, 0.1, 0.1, 0.1]])
     _write_raster(paths["C3"], [[0.2, 0.2, 0.2, 0.2]])
-    reference = RasterReference(
+    reference = _raster_reference(
         tuple(RasterLayer(code, code, paths[code], "EEA fixture") for code in paths)
     )
     polygon = box(0, 0, 50, 10)
@@ -635,7 +682,7 @@ def test_unknown_competing_score_prevents_classification_and_keeps_full_denomina
     _write_raster(paths["C1"], [[0.9, 0.9, 0.9, 0.9]])
     _write_raster(paths["C2"], [[-9999.0, 0.1, 0.1, 0.1]])
     _write_raster(paths["C3"], [[0.2, 0.2, 0.2, 0.2]])
-    reference = RasterReference(
+    reference = _raster_reference(
         tuple(RasterLayer(code, code, paths[code], "EEA fixture") for code in paths)
     )
     polygon = box(0, 0, 40, 10)
@@ -666,7 +713,7 @@ def test_fractional_cell_boundary_uses_intersection_area(tmp_path: Path) -> None
     _write_raster(paths["C1"], [[0.9, 0.1]])
     _write_raster(paths["C2"], [[0.1, 0.9]])
     _write_raster(paths["C3"], [[0.1, 0.1]])
-    reference = RasterReference(
+    reference = _raster_reference(
         tuple(RasterLayer(code, code, paths[code], "EEA fixture") for code in paths)
     )
     polygon = box(0, 0, 15, 10)
@@ -689,7 +736,7 @@ def test_undocumented_scale_or_offset_fails_closed(
     _write_raster(paths["C1"], [[0.9]], scale=scale, offset=offset)
     _write_raster(paths["C2"], [[0.1]])
     _write_raster(paths["C3"], [[0.2]])
-    reference = RasterReference(
+    reference = _raster_reference(
         tuple(RasterLayer(code, code, paths[code], "EEA fixture") for code in paths)
     )
     with reference, pytest.raises(ValueError, match="undocumented scale or offset"):
@@ -701,7 +748,7 @@ def test_scores_outside_documented_range_fail_closed(tmp_path: Path) -> None:
     _write_raster(paths["C1"], [[1.1]])
     _write_raster(paths["C2"], [[0.1]])
     _write_raster(paths["C3"], [[0.2]])
-    reference = RasterReference(
+    reference = _raster_reference(
         tuple(RasterLayer(code, code, paths[code], "EEA fixture") for code in paths)
     )
 
@@ -733,7 +780,7 @@ def test_score_decoding_rejects_multiband_and_complex_rasters(
         transform=from_origin(0, 10, 10, 10),
     ) as dataset:
         dataset.write(values)
-    reference = RasterReference((RasterLayer("C1", "class one", path, "EEA fixture"),))
+    reference = _raster_reference((RasterLayer("C1", "class one", path, "EEA fixture"),))
     groups = {
         ("L1", "A"): ("C1",),
         ("L2", "A1"): ("C1",),
@@ -747,7 +794,7 @@ def test_score_decoding_rejects_multiband_and_complex_rasters(
 def test_score_decoding_rejects_duplicate_direct_codes(tmp_path: Path) -> None:
     path = tmp_path / "Prob_C1_10m.tif"
     _write_raster(path, [[0.9]])
-    reference = RasterReference(
+    reference = _raster_reference(
         (
             RasterLayer("C1", "class one", path, "EEA fixture"),
             RasterLayer("C1", "class one duplicate", path, "EEA fixture"),
@@ -768,7 +815,7 @@ def test_support_query_fails_closed_when_a_class_uses_an_unpinned_layer(
 ) -> None:
     raster = tmp_path / "Prob_C1_10m.tif"
     _write_raster(raster, [[1.0, 0.0]])
-    reference = RasterReference((RasterLayer("C1", "class one", raster, "EEA fixture"),))
+    reference = _raster_reference((RasterLayer("C1", "class one", raster, "EEA fixture"),))
 
     with reference, pytest.raises(ValueError, match="missing raster codes"):
         reference.support_areas(box(0, 0, 20, 10), {("L1", "A"): ("MISSING",)})
@@ -778,7 +825,7 @@ def test_classification_requires_every_competing_raster(tmp_path: Path) -> None:
     paths = {code: tmp_path / f"Prob_{code}_10m.tif" for code in ("C1", "C2")}
     _write_raster(paths["C1"], [[0.9]])
     _write_raster(paths["C2"], [[0.1]])
-    reference = RasterReference(
+    reference = _raster_reference(
         tuple(RasterLayer(code, code, path, "EEA fixture") for code, path in paths.items())
     )
 
@@ -792,7 +839,7 @@ def test_classification_rejects_unmapped_codes_and_incomplete_hierarchy(
     paths = {code: tmp_path / f"Prob_{code}_10m.tif" for code in ("C1", "C2")}
     for path in paths.values():
         _write_raster(path, [[0.9]])
-    reference = RasterReference(
+    reference = _raster_reference(
         tuple(RasterLayer(code, code, path, "EEA fixture") for code, path in paths.items())
     )
     polygon = box(0, 0, 10, 10)
@@ -817,7 +864,7 @@ def test_classification_rejects_conflicting_or_missing_level_ancestry(tmp_path: 
     paths = {code: tmp_path / f"Prob_{code}_10m.tif" for code in ("C1", "C2")}
     for path in paths.values():
         _write_raster(path, [[0.9]])
-    reference = RasterReference(
+    reference = _raster_reference(
         tuple(RasterLayer(code, code, path, "EEA fixture") for code, path in paths.items())
     )
     polygon = box(0, 0, 10, 10)
@@ -859,7 +906,7 @@ def test_zero_source_scores_do_not_create_a_habitat_label(tmp_path: Path) -> Non
     paths = {code: tmp_path / f"Prob_{code}_10m.tif" for code in ("C1", "C2", "C3")}
     for path in paths.values():
         _write_raster(path, [[0.0]])
-    reference = RasterReference(
+    reference = _raster_reference(
         tuple(RasterLayer(code, code, paths[code], "EEA fixture") for code in paths)
     )
 
@@ -876,7 +923,7 @@ def test_zero_source_scores_do_not_create_a_habitat_label(tmp_path: Path) -> Non
 
 
 def test_support_query_rejects_empty_geometry_and_malformed_class_groups() -> None:
-    reference = RasterReference(())
+    reference = _raster_reference(())
     polygon = box(0, 0, 10, 10)
 
     with pytest.raises(ValueError, match="usable projected polygon"):

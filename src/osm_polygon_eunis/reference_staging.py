@@ -35,6 +35,10 @@ def _asset_filename(asset: RemoteAsset) -> str:
     return f"{stem}{suffix}"
 
 
+def _source_asset_filename(asset: RemoteAsset) -> str:
+    return Path(unquote(asset.path)).name
+
+
 def asset_key(group: EeaGroup, asset: RemoteAsset) -> str:
     """Return the cache key that identifies one remote asset of an EEA group."""
     return f"{group.record_id}:{asset.path}"
@@ -139,6 +143,7 @@ def _open_local_raster_reference(
             name=asset.name or "",
             path=directory / _asset_filename(asset),
             source_version=asset.source_version,
+            asset_filename=_source_asset_filename(asset),
         )
         for asset in group.raster_assets
     )
@@ -263,7 +268,8 @@ def _raster_group_reference(
 ) -> Iterator[RasterReference]:
     layers = []
     for asset in group.raster_assets:
-        path = directory / _asset_filename(asset)
+        filename = _asset_filename(asset)
+        path = directory / filename
         digest = stage_or_verify_asset(client, asset, path)
         if checksums is not None:
             checksums[asset_key(group, asset)] = digest
@@ -273,6 +279,7 @@ def _raster_group_reference(
                 name=asset.name or "",
                 path=path,
                 source_version=asset.source_version,
+                asset_filename=_source_asset_filename(asset),
             )
         )
     with RasterReference(tuple(layers), threshold=threshold) as reference:
